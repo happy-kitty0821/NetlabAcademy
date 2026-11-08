@@ -1,5 +1,69 @@
-# Kiro IDE — track specs and steering; ignore session/cache state
+# ── Kiro IDE ─────────────────────────────────────────────────────────────────
+# Track specs and steering; ignore session/cache state.
 .kiro/settings/
 .kiro/hooks/
 .kiro/cache/
 .kiro/*.json
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+vnev/
+.venv/
+env/
+ENV/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+# Environment files (never commit real secrets)
+.env
+!.env.example
+!.env.local.example
+services/api/.env
+apps/web/.env.local
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editors ───────────────────────────────────────────────────────────────────
+.vscode/settings.json
+*.swp
+*.swo
+
+# ── Old backend scaffold (migrated to services/api/) ─────────────────────────
+backend/vnev/

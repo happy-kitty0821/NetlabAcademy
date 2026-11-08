@@ -1,24 +1,105 @@
-# NetLab Academy — Kiro starter pack
+# NetLab Academy
 
-This starter pack contains the long-term product/technical specification and initial Kiro steering files.
+An independent, browser-based networking education platform for CCNA and CCNP
+learners. Combines a software network simulator, visual topology labs and a
+structured examination engine.
 
-## Contents
+> This is not affiliated with Cisco Systems. The simulator is an original
+> software model; it does not execute Cisco IOS or claim to be Cisco Packet Tracer.
 
-- `PROJECT_SPEC.md` — product, architecture, simulator, security, roadmap and Kiro workflow baseline.
-- `FIRST_KIRO_PROMPT.md` — copy/paste kickoff prompt for the first simulator proof-of-concept spec.
-- `.kiro/steering/product.md` — always-on product context.
-- `.kiro/steering/tech.md` — always-on technology and engineering constraints.
-- `.kiro/steering/structure.md` — repository organization rules.
-- `.kiro/steering/simulator-principles.md` — simulator-specific constraints, loaded for simulator/schema files.
+---
 
-## How to use it
+## Repository layout
 
-1. Create or open the project root in Kiro.
-2. Copy the contents of this starter pack into that project root, preserving the `.kiro/steering/` directory.
-3. Keep `PROJECT_SPEC.md` at the repository root or move it to `docs/PROJECT_SPEC.md` and update the steering references.
-4. Review the specification and decide the open Phase 0 decisions that affect your deployment.
-5. In Kiro, create a feature spec named `simulator-proof-of-concept` using Section 15.2 of `PROJECT_SPEC.md`.
-6. Review `requirements.md`, `design.md` and `tasks.md` before asking Kiro to implement the tasks.
-7. Build and test one vertical slice at a time. Do not ask Kiro to generate the entire platform in a single run.
+```
+netlab-academy/
+├── apps/
+│   └── web/                  # Next.js 15 + TypeScript frontend
+├── services/
+│   └── api/                  # Django 5.1 + DRF backend
+├── packages/
+│   └── simulator-core/       # Standalone Python simulation engine
+├── docs/
+│   ├── adr/                  # Architecture decision records
+│   └── protocols/            # Protocol behaviour notes
+├── .kiro/
+│   ├── specs/                # Feature specs (requirements / design / tasks)
+│   └── steering/             # Project-wide constraints for Kiro
+└── backend/                  # Legacy Django scaffold (to be removed)
+```
 
-The product name is provisional. This is a planning baseline, not a finished implementation or guarantee that every proposed feature has already been validated.
+---
+
+## Getting started
+
+### Prerequisites
+
+| Tool | Version |
+|------|---------|
+| Python | ≥ 3.12 |
+| Node.js | ≥ 20 |
+| PostgreSQL | ≥ 15 |
+
+### Simulator core (no database needed)
+
+```sh
+cd packages/simulator-core
+pip install -e ".[test]"
+python -m pytest tests/ -v --cov=simulator_core
+```
+
+### Backend API
+
+```sh
+cd services/api
+python -m venv venv
+# Windows: venv\Scripts\activate  |  macOS/Linux: source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in DB credentials and SECRET_KEY
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py runserver
+```
+
+API available at: `http://localhost:8000/`
+Admin panel: `http://localhost:8000/admin/`
+Health check: `http://localhost:8000/health/`
+
+### Frontend
+
+```sh
+cd apps/web
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+App available at: `http://localhost:3000/`
+
+---
+
+## Development status
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| Phase 0 — Simulator PoC | ✅ Complete | Two-host topology, ARP, ICMP, deterministic replay |
+| Phase 1 — Platform scaffold | 🔄 In progress | Django API, Next.js frontend, auth skeleton |
+| Phase 1 — Auth & RBAC | ⏳ Pending | Custom user model wired, JWT endpoints ready |
+| Phase 2 — Exam engine | ⏳ Pending | |
+| Phase 3 — Simulator UI | ⏳ Pending | |
+
+---
+
+## Key decisions
+
+- **Modular monolith**: one Django project with domain apps (`accounts`,
+  `courses`, `labs`). No microservices without a measured need.
+- **Simulator independence**: `packages/simulator-core` has zero runtime
+  dependencies outside the Python stdlib. It is importable and testable
+  without Django, PostgreSQL, or the web frontend.
+- **PostgreSQL from day one**: SQLite is not used in `services/api/`.
+- **JWT authentication**: access + refresh token pair via `djangorestframework-simplejwt`.
+- **Dark, technical UI**: the frontend uses a purpose-built dark palette that
+  reflects a networking tool, not a generic SaaS template.
+
+See `docs/adr/` for formal architecture decision records as they are written.

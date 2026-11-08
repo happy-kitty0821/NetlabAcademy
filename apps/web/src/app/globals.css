@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────
+   NetLab Academy — Design tokens
+
+   Palette rationale:
+   - Deep navy + charcoal backgrounds give it a technical, terminal feel.
+   - Cyan/electric-blue accent is precise and purposeful (think packet
+     tracer, not a marketing site).
+   - Mono font used selectively for CLI, addresses, counters.
+   - No gradients on primary actions; flat bold colors communicate
+     confidence and function over decoration.
+────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces */
+  --surface-base:    #0d1117;   /* page background */
+  --surface-raised:  #161b22;   /* cards, panels */
+  --surface-overlay: #1c2128;   /* modals, dropdowns */
+  --surface-border:  #30363d;   /* dividers, input borders */
+
+  /* Text */
+  --text-primary:    #e6edf3;
+  --text-secondary:  #8b949e;
+  --text-muted:      #484f58;
+  --text-inverse:    #0d1117;
+
+  /* Brand accent — electric cyan */
+  --accent-primary:  #58a6ff;   /* links, primary actions */
+  --accent-strong:   #1f6feb;   /* hover state */
+  --accent-subtle:   #1d3558;   /* accent backgrounds */
+
+  /* Status */
+  --status-success:  #3fb950;
+  --status-warning:  #d29922;
+  --status-error:    #f85149;
+  --status-info:     #58a6ff;
+
+  /* CLI / terminal */
+  --terminal-bg:     #010409;
+  --terminal-text:   #7ee787;   /* green terminal output */
+  --terminal-cursor: #58a6ff;
+  --terminal-prompt: #58a6ff;
+
+  /* Topology canvas */
+  --canvas-bg:       #0d1117;
+  --canvas-grid:     #1c2128;
+  --canvas-node:     #161b22;
+  --canvas-link:     #30363d;
+  --canvas-active:   #58a6ff;
+
+  /* Typography scale */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+}
+
+/* ── Base reset ─────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--surface-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Typography ─────────────────────────────────────────────────── */
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+h1 { font-size: 1.75rem; line-height: 1.25; }
+h2 { font-size: 1.375rem; line-height: 1.3; }
+h3 { font-size: 1.125rem; line-height: 1.4; }
+
+a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code, kbd, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Focus ring ─────────────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Selection ──────────────────────────────────────────────────── */
+
+::selection {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
