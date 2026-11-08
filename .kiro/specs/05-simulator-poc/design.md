@@ -508,11 +508,16 @@ Responsibilities:
   - Decode IPv4/ICMP echo request → schedule ICMPEchoReply.
   - Decode IPv4/ICMP echo reply → complete pending ping result.
 - Expose `ping(dst_ip, count, simulation)`:
-  1. Validate own IP is configured.
-  2. Check ARP cache for `dst_ip`.
-  3. If miss: schedule `ARPRequestSent` + `FrameTransmit` (broadcast) at `clock + 1`.
-     Register a pending ARP callback that, when the reply arrives, continues with step 4.
-  4. Schedule `ICMPEchoRequestSent` + `FrameTransmit` (unicast to dst MAC) at `clock + 2`.
+  1. Validate own IP is configured; raise `ConfigurationError` immediately if not.
+  2. **Pre-flight route check:** if `dst_ip` is outside the host's local subnet and no
+     default gateway is configured, return a `PingResult` immediately with `received=0`
+     and each `EchoResult` having `success=False` and
+     `drop_reason="no route to host — destination outside local subnet and no gateway configured"`.
+     No events are scheduled, no frames are transmitted, no `ConfigurationError` is raised.
+  3. Check ARP cache for `dst_ip`.
+  4. If miss: schedule `ARPRequestSent` + `FrameTransmit` (broadcast) at `clock + 1`.
+     Register a pending ARP callback that, when the reply arrives, continues with step 5.
+  5. Schedule `ICMPEchoRequestSent` + `FrameTransmit` (unicast to dst MAC) at `clock + 2`.
 
 ### 6.2 Switch (`devices/switch.py`)
 

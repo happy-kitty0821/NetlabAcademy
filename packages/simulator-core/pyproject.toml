@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simulator-core"
+version = "0.1.0"
+description = "NetLab Academy — deterministic discrete-event network simulator core"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest==8.3.5",
+    "pytest-cov==6.2.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["simulator_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.coverage.run]
+source = ["simulator_core"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

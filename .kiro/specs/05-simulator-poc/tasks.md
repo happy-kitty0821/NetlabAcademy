@@ -250,6 +250,11 @@ ARP reply handling and ICMP echo reply handling — as described in design §6.1
   AC-07-6 states no unhandled exception from `run()`; the caller's `ping()` call may
   raise `ConfigurationError` only if IP is unconfigured — AC-07-2).
 - If the host has no IP configured: raise `ConfigurationError` immediately in `ping()`.
+- **Pre-flight route check:** if the destination IP is outside the host's local subnet
+  and no default gateway is configured, return a `PingResult` immediately with
+  `received=0`, each `EchoResult` having `success=False` and
+  `drop_reason="no route to host — destination outside local subnet and no gateway configured"`.
+  No events are scheduled. This is NOT a `ConfigurationError`.
 
 **Test requirements (`test_host.py`):**
 - IP assignment accepted for valid CIDR.
@@ -336,11 +341,13 @@ scenarios, determinism and resource limits.
 `test_failures.py`:
 - Interface DOWN → `FrameDropped(DROP_INTERFACE_ADMIN_DOWN)` in trace (AC-07-1).
 - No IP configured → `ConfigurationError` raised by `ping()` (AC-07-2).
-- Different subnets, no gateway → `ConfigurationError` or `FrameDropped(DROP_NO_ROUTE)`
-  depending on whether the check is pre-flight or in-flight (AC-07-3; choose one
-  behaviour and document it in `design.md`).
+- Different subnets, no gateway configured → `ping()` returns a `PingResult` with
+  `received=0`; every `EchoResult.success` is `False`; every `EchoResult.drop_reason`
+  equals `"no route to host — destination outside local subnet and no gateway configured"`;
+  the simulation event trace is **empty** (no `FrameDropped`, no `ARPRequestSent`, no
+  `FrameTransmit` events — pre-flight check fires before any event is scheduled) (AC-07-3).
 - Link disconnected after ARP → `FrameDropped(DROP_PORT_DOWN)` in trace (AC-07-4).
-- All failures contain required drop event fields (AC-07-5).
+- All `FrameDropped` events contain required fields: timestamp, device_id, reason, frame metadata (AC-07-5).
 - No unhandled exception propagates from `run()` (AC-07-6).
 
 `test_determinism.py`:

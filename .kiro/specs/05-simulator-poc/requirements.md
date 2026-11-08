@@ -157,7 +157,7 @@ than silently dropping the frame or hanging.
 |----|-----------|
 | AC-07-1 | If a host interface is administratively `DOWN`, any frame it would send is dropped and a `LinkDownDrop` event is recorded in the trace with the reason `"interface administratively down"`. |
 | AC-07-2 | If Host A has no IP address configured and attempts a ping, the simulator raises a `ConfigurationError` immediately (before any events are scheduled). |
-| AC-07-3 | If Host A and Host B are on different subnets with no default gateway configured, the ping attempt records an `UnreachableDrop` event with reason `"no route to host"`. |
+| AC-07-3 | If Host A and Host B are on different subnets with no default gateway or applicable route configured, `ping()` returns a `PingResult` with `success=False` and a diagnostic reason of `"no route to host — destination outside local subnet and no gateway configured"`. No `FrameDropped` event, no ARP request and no Ethernet frame transmission event are generated. `ConfigurationError` is NOT raised; the result is returned normally. |
 | AC-07-4 | Disconnecting a link between the switch and Host B after ARP has resolved and then issuing a ping from Host A results in the ICMP echo request being dropped at the switch with a `PortDownDrop` event. |
 | AC-07-5 | All drop events include: logical timestamp, the node that dropped the frame, the reason string and the frame/packet metadata sufficient to identify the original flow. |
 | AC-07-6 | None of the failure cases cause an unhandled Python exception to propagate out of `simulation.run()` or `simulation.step()`. |
