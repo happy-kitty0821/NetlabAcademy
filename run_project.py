@@ -451,6 +451,101 @@ def start_servers() -> None:
                 shutdown()
 
 
+# ── Create / promote admin ─────────────────────────────────────────────────────
+
+def create_admin() -> None:
+    """
+    Prompt for an email address.  If a user with that email exists,
+    promote them to Django staff + superuser and set their platform
+    role to 'admin'.  If the user does not exist, print an error.
+    """
+    header("Promote user to administrator")
+
+    email = input("  Enter the email of the user to promote: ").strip()
+    if not email:
+        err("No email provided.")
+        sys.exit(1)
+
+    # Write a small script to a temp file and run it with the venv Python.
+    # This avoids manage.py shell -c which can hit asyncio issues on Windows.
+    import tempfile
+    script_content = f'''import os, sys
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netlab.settings.dev")
+import django
+django.setup()
+from apps.accounts.models import User, Role
+
+email = {email!r}
+try:
+    user = User.objects.get(email__iexact=email)
+except User.DoesNotExist:
+    print("NOT_FOUND")
+    sys.exit(0)
+
+was_admin = user.is_staff and user.is_superuser and user.role == Role.ADMIN
+user.is_staff = True
+user.is_superuser = True
+user.role = Role.ADMIN
+user.is_active = True
+user.save()
+
+if was_admin:
+    print("ALREADY_ADMIN")
+else:
+    print("PROMOTED")
+print(f"NAME={{user.full_name}}")
+print(f"EMAIL={{user.email}}")
+'''
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix="_promote_admin.py", delete=False, dir=str(API_DIR)
+    ) as f:
+        f.write(script_content)
+        script_path = f.name
+
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), os.path.basename(script_path)],
+            cwd=API_DIR,
+            capture_output=True,
+            text=True,
+            shell=_shell(),
+            stdin=subprocess.DEVNULL,
+        )
+
+        output = result.stdout.strip()
+
+        if "NOT_FOUND" in output:
+            err(f"No user found with email '{email}'.")
+            info("Register an account first via the web UI at http://localhost:3000/register")
+            info("or create one via: python manage.py createsuperuser")
+            sys.exit(1)
+
+        if "ALREADY_ADMIN" in output:
+            warn(f"User '{email}' is already an administrator.")
+        elif "PROMOTED" in output:
+            ok(f"User '{email}' has been promoted to administrator.")
+        else:
+            err(f"Unexpected response:\n{output}")
+            if result.stderr:
+                err(f"stderr: {result.stderr.strip()}")
+            sys.exit(1)
+
+        # Extract and display the user details from the output.
+        for line in output.splitlines():
+            if line.startswith("NAME="):
+                info(f"Name: {line.split('=', 1)[1]}")
+            elif line.startswith("EMAIL="):
+                info(f"Email: {line.split('=', 1)[1]}")
+
+        info("Permissions: is_staff=True, is_superuser=True, role=admin")
+        print()
+    finally:
+        os.unlink(script_path)
+
+    sys.exit(0)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -472,6 +567,12 @@ def main() -> None:
         action="store_true",
         help="Skip makemigrations + migrate",
     )
+    parser.add_argument(
+        "--create-admin",
+        action="store_true",
+        help="Prompt for a user email and promote them to Django admin + "
+             "platform administrator. Does not start servers.",
+    )
     args = parser.parse_args()
 
     header("NetLab Academy — startup")
@@ -481,7 +582,6 @@ def main() -> None:
     # ── Prerequisites ──────────────────────────────────────────────────────────
     check_python_version()
     check_git()
-    check_node()
 
     # ── Setup ──────────────────────────────────────────────────────────────────
     ensure_venv()
@@ -495,6 +595,13 @@ def main() -> None:
         run_migrations()
     else:
         warn("Skipping migrations (--skip-migrate)")
+
+    # ── Admin promotion mode ──────────────────────────────────────────────────
+    if args.create_admin:
+        create_admin()
+
+    # ── Frontend (only needed when starting servers) ───────────────────────────
+    check_node()
 
     if not args.skip_frontend_build:
         build_frontend()
