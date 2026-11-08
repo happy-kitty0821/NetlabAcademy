@@ -304,10 +304,82 @@ def build_frontend() -> None:
     ok("Frontend build complete")
 
 
+# ── Port conflict detection ────────────────────────────────────────────────────
+
+def kill_port(port: int) -> bool:
+    """
+    If *port* is occupied, kill the process holding it.
+    Returns True if something was killed, False if the port was free.
+    Works on both Windows and Unix.
+    """
+    import socket as _socket
+
+    # Quick check — is the port actually in use?
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        s.close()
+        return False  # port is free
+    except OSError:
+        s.close()
+
+    # Port is in use — find and kill the process.
+    if IS_WINDOWS:
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, shell=True
+            )
+            for line in result.stdout.strip().splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = int(parts[-1])
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/F"],
+                        shell=True, capture_output=True
+                    )
+                    return True
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, shell=True
+            )
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+def ensure_port_free(port: int, name: str) -> None:
+    """Kill any process holding *port*, or warn if it cannot be freed."""
+    if kill_port(port):
+        warn(f"Killed stale process on port {port} ({name})")
+        time.sleep(0.5)
+    # Verify it is actually free now.
+    import socket as _socket
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        s.close()
+    except OSError:
+        s.close()
+        err(f"Port {port} is in use and could not be freed. "
+            f"Close the application using it and try again.")
+        sys.exit(1)
+
+
 # ── Start servers ──────────────────────────────────────────────────────────────
 
 def start_servers() -> None:
     header("Starting servers")
+
+    # ── Free ports before binding ───────────────────────────────────────────────
+    ensure_port_free(8000, "Django API")
+    ensure_port_free(3000, "Next.js")
 
     django_env = {
         "DJANGO_SETTINGS_MODULE": "netlab.settings.dev",
