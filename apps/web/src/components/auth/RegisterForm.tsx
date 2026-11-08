@@ -4,11 +4,12 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import { register } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import type { APIError } from "@/types/api";
 
 export function RegisterForm() {
   const router = useRouter();
+  const { register } = useAuth();
   const [loading, setLoading] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -36,7 +37,7 @@ export function RegisterForm() {
 
     try {
       await register(form);
-      router.push("/login?registered=1");
+      router.push("/dashboard");
     } catch (err) {
       const apiErr = err as APIError;
       if (apiErr?.error?.detail) {

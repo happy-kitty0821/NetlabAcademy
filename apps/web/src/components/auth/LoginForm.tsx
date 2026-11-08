@@ -5,11 +5,12 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import { login, setTokens } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import type { APIError } from "@/types/api";
 
 export function LoginForm() {
   const router = useRouter();
+  const { login } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -21,8 +22,7 @@ export function LoginForm() {
     setLoading(true);
 
     try {
-      const tokens = await login(email, password);
-      setTokens(tokens);
+      await login(email, password);
       router.push("/dashboard");
     } catch (err) {
       const apiErr = err as APIError;

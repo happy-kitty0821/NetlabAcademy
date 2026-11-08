@@ -1,22 +1,48 @@
+"use client";
+
 /**
  * Authenticated route group layout.
  *
- * Auth guard is intentionally left as a client-side redirect for now
- * (the platform is not yet on a production deployment). A middleware-based
- * guard will be added in the auth-rbac spec.
+ * Uses the auth context to pass the real user to the DashboardShell and
+ * wraps all child pages in AuthGuard so unauthenticated visitors are
+ * redirected to /login.
  */
+
+import { useRouter, usePathname } from "next/navigation";
 import { DashboardShell } from "@/components/layout/DashboardShell";
+import { AuthGuard } from "@/components/auth/AuthGuard";
+import { useAuth } from "@/lib/auth-context";
+
+// Map pathname -> page title shown in the TopBar.
+const TITLES: Record<string, string> = {
+  "/dashboard": "Overview",
+  "/courses": "Courses",
+  "/labs": "Labs",
+  "/topology": "Topology Editor",
+  "/admin/users": "User Management",
+  "/settings": "Settings",
+};
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  // user and onLogout will be wired to a context/store once the auth
-  // feature spec is implemented. For scaffold purposes, null is safe.
+  const { user, logout } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+  const title = TITLES[pathname] ?? "";
+
+  function handleLogout() {
+    logout();
+    router.replace("/login");
+  }
+
   return (
-    <DashboardShell user={null} title="">
-      {children}
-    </DashboardShell>
+    <AuthGuard>
+      <DashboardShell user={user} title={title} onLogout={handleLogout}>
+        {children}
+      </DashboardShell>
+    </AuthGuard>
   );
 }
