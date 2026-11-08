@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-run_project.py — NetLab Academy development launcher
+run_project.py -- NetLab Academy development launcher
 ======================================================
 
 Platform-independent startup script. Run from the repository root:
@@ -33,6 +34,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# ── Windows UTF-8 console fix ─────────────────────────────────────────────────
+# Must run before any print() call. Windows cmd/PowerShell default to cp1252;
+# wrap stdout/stderr to UTF-8 so box characters and arrows render correctly.
+if sys.platform == "win32":
+    import io as _io
+    sys.stdout = _io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
+    sys.stderr = _io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -101,20 +114,30 @@ def err(msg: str) -> None:
 
 def header(msg: str) -> None:
     width = 60
+    line = "-" * width
     print()
-    print(_c("1;34", "─" * width))
+    print(_c("1;34", line))
     print(_c("1;34", f"  {msg}"))
-    print(_c("1;34", "─" * width))
+    print(_c("1;34", line))
 
 
 # ── Subprocess helpers ─────────────────────────────────────────────────────────
+#
+# On Windows, npm/npx/node are .cmd shims and cannot be found by subprocess
+# unless shell=True is set or the full .cmd path is used.
+# We set shell=True on Windows for all subprocess calls to handle this uniformly.
+
+def _shell() -> bool:
+    """True on Windows — required so .cmd shims (npm, npx) are found."""
+    return IS_WINDOWS
+
 
 def run(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> int:
     """Run a command, stream output, and return the exit code."""
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    result = subprocess.run(cmd, cwd=cwd, env=merged_env)
+    result = subprocess.run(cmd, cwd=cwd, env=merged_env, shell=_shell())
     return result.returncode
 
 
@@ -135,7 +158,7 @@ def spawn(cmd: list[str], cwd: Path | None = None,
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    return subprocess.Popen(cmd, cwd=cwd, env=merged_env)
+    return subprocess.Popen(cmd, cwd=cwd, env=merged_env, shell=_shell())
 
 
 # ── Prerequisite checks ────────────────────────────────────────────────────────
@@ -151,7 +174,7 @@ def check_git() -> None:
 def check_node() -> None:
     info("Checking Node.js ...")
     result = subprocess.run(
-        ["node", "--version"], capture_output=True, text=True
+        ["node", "--version"], capture_output=True, text=True, shell=IS_WINDOWS
     )
     if result.returncode != 0:
         err("Node.js is not installed or not on PATH. Install from https://nodejs.org/")
@@ -308,16 +331,16 @@ def start_servers() -> None:
     )
 
     print()
-    print(_c("1;32", "  ┌─────────────────────────────────────────┐"))
-    print(_c("1;32", "  │  NetLab Academy is running               │"))
-    print(_c("1;32", "  │                                          │"))
-    print(_c("1;32", f"  │  Frontend  →  http://localhost:3000      │"))
-    print(_c("1;32", f"  │  API       →  http://localhost:8000      │"))
-    print(_c("1;32", f"  │  Admin     →  http://localhost:8000/admin│"))
-    print(_c("1;32", f"  │  Health    →  http://localhost:8000/health│"))
-    print(_c("1;32", "  │                                          │"))
-    print(_c("1;32", "  │  Press Ctrl+C to stop all servers        │"))
-    print(_c("1;32", "  └─────────────────────────────────────────┘"))
+    print(_c("1;32", "  +------------------------------------------+"))
+    print(_c("1;32", "  |  NetLab Academy is running               |"))
+    print(_c("1;32", "  |                                          |"))
+    print(_c("1;32", f"  |  Frontend  ->  http://localhost:3000     |"))
+    print(_c("1;32", f"  |  API       ->  http://localhost:8000     |"))
+    print(_c("1;32", f"  |  Admin     ->  http://localhost:8000/admin|"))
+    print(_c("1;32", f"  |  Health    ->  http://localhost:8000/health|"))
+    print(_c("1;32", "  |                                          |"))
+    print(_c("1;32", "  |  Press Ctrl+C to stop all servers        |"))
+    print(_c("1;32", "  +------------------------------------------+"))
     print()
 
     # ── Wait and handle shutdown ───────────────────────────────────────────────
@@ -360,7 +383,7 @@ def start_servers() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="NetLab Academy — start the full development stack"
+        description="NetLab Academy - start the full development stack"
     )
     parser.add_argument(
         "--skip-pull",
