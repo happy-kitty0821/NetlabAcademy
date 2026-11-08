@@ -1,1 +1,5 @@
-.kiro/
+# Kiro IDE — track specs and steering; ignore session/cache state
+.kiro/settings/
+.kiro/hooks/
+.kiro/cache/
+.kiro/*.json
