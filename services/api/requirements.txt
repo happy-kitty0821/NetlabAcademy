@@ -1,26 +1,43 @@
 # NetLab Academy — Django API service dependencies
-# Pin all versions. Verify compatibility before upgrading.
+# Full pinned lockfile. Re-generate with:
+#   pip freeze > services/api/requirements.txt
+# from inside the services/venv virtual environment.
 
-# Core framework
+# ── Core framework ────────────────────────────────────────────────────────────
 Django==5.1.7
+asgiref==3.13.0
+sqlparse==0.6.1
+tzdata==2026.6
+
+# ── REST API ──────────────────────────────────────────────────────────────────
 djangorestframework==3.15.2
 
-# Database
-psycopg2-binary==2.9.10
-
-# Auth
+# ── Auth ──────────────────────────────────────────────────────────────────────
 djangorestframework-simplejwt==5.3.1
+PyJWT==2.15.1
 
-# CORS
+# ── CORS ──────────────────────────────────────────────────────────────────────
 django-cors-headers==4.6.0
 
-# Environment configuration
+# ── Environment / config ──────────────────────────────────────────────────────
 python-decouple==3.8
 
-# Utilities
-Pillow==11.1.0
+# ── Database ──────────────────────────────────────────────────────────────────
+# psycopg2-binary is only needed when using PostgreSQL (production).
+# SQLite (development) requires nothing extra.
+psycopg2-binary==2.9.10
 
-# Development / test
+# ── Media / file handling ─────────────────────────────────────────────────────
+pillow==11.1.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.3.5
 pytest-django==4.9.0
 pytest-cov==6.2.1
+coverage==7.17.2
+
+# ── Transitive (pinned for reproducibility) ───────────────────────────────────
+colorama==0.4.6
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0

@@ -23,6 +23,8 @@ vnev/
 .venv/
 env/
 ENV/
+services/venv/
+services/api/venv/
 
 # pytest / coverage
 .pytest_cache/

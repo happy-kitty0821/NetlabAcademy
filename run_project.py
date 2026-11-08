@@ -41,14 +41,38 @@ API_DIR = ROOT / "services" / "api"
 WEB_DIR = ROOT / "apps" / "web"
 
 # Virtual-environment paths differ between Windows and Unix.
+# We probe three locations in order of preference:
+#   1. services/venv/     — created manually beside the api directory
+#   2. services/api/venv/ — created by a previous run of this script
+#
+# If neither exists, ensure_venv() creates services/api/venv/ automatically.
 IS_WINDOWS = platform.system() == "Windows"
-VENV_DIR = API_DIR / "venv"
-VENV_PYTHON = VENV_DIR / ("Scripts" if IS_WINDOWS else "bin") / (
-    "python.exe" if IS_WINDOWS else "python"
-)
-VENV_PIP = VENV_DIR / ("Scripts" if IS_WINDOWS else "bin") / (
-    "pip.exe" if IS_WINDOWS else "pip"
-)
+
+_VENV_CANDIDATES = [
+    API_DIR.parent / "venv",   # services/venv/
+    API_DIR / "venv",          # services/api/venv/
+]
+
+
+def _resolve_venv_dir() -> Path:
+    for candidate in _VENV_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    # Neither exists yet — default creation path.
+    return _VENV_CANDIDATES[1]  # services/api/venv/
+
+
+def _venv_bin(venv: Path, name: str) -> Path:
+    """Return the path to an executable inside a venv directory."""
+    suffix = ".exe" if IS_WINDOWS else ""
+    sub = "Scripts" if IS_WINDOWS else "bin"
+    return venv / sub / (name + suffix)
+
+
+# Resolved lazily so ensure_venv() can update VENV_DIR after creation.
+VENV_DIR    = _resolve_venv_dir()
+VENV_PYTHON = _venv_bin(VENV_DIR, "python")
+VENV_PIP    = _venv_bin(VENV_DIR, "pip")
 
 # ── ANSI colours (disabled on Windows unless the terminal supports them) ──────
 
@@ -148,17 +172,30 @@ def ensure_venv() -> None:
     """Create the venv if it does not exist, then install/sync requirements."""
     header("Python virtual environment")
 
+    global VENV_DIR, VENV_PYTHON, VENV_PIP
+
+    # Re-resolve in case the user created one since the script started.
+    VENV_DIR    = _resolve_venv_dir()
+    VENV_PYTHON = _venv_bin(VENV_DIR, "python")
+    VENV_PIP    = _venv_bin(VENV_DIR, "pip")
+
+    info(f"Using venv: {VENV_DIR}")
+
     if not VENV_DIR.exists():
         info(f"Creating venv at {VENV_DIR} ...")
         run_or_die([sys.executable, "-m", "venv", str(VENV_DIR)],
                    label="create venv")
+        # Re-resolve paths now that the venv exists.
+        VENV_PYTHON = _venv_bin(VENV_DIR, "python")
+        VENV_PIP    = _venv_bin(VENV_DIR, "pip")
         ok("venv created")
     else:
-        ok("venv already exists")
+        ok(f"venv found at {VENV_DIR}")
 
     info("Installing / updating Python dependencies ...")
     run_or_die(
-        [str(VENV_PIP), "install", "-r", str(API_DIR / "requirements.txt"), "-q"],
+        [str(VENV_PYTHON), "-m", "pip", "install",
+         "-r", str(API_DIR / "requirements.txt"), "-q"],
         label="pip install",
     )
     ok("Python dependencies up to date")
