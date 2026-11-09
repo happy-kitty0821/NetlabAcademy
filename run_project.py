@@ -221,6 +221,22 @@ def ensure_venv() -> None:
          "-r", str(API_DIR / "requirements.txt"), "-q"],
         label="pip install",
     )
+
+    # Install simulator-core as an editable package from the monorepo.
+    # Done separately because pip's relative-path resolution for -e in
+    # requirements files is unreliable across platforms.
+    sim_core_dir = ROOT / "packages" / "simulator-core"
+    if sim_core_dir.exists():
+        info("Installing simulator-core (editable) ...")
+        run_or_die(
+            [str(VENV_PYTHON), "-m", "pip", "install",
+             "-e", str(sim_core_dir), "-q"],
+            label="install simulator-core",
+        )
+        ok("simulator-core installed")
+    else:
+        warn(f"simulator-core not found at {sim_core_dir}")
+
     ok("Python dependencies up to date")
 
 

@@ -30,9 +30,11 @@ psycopg2-binary==2.9.10
 # ── Media / file handling ─────────────────────────────────────────────────────
 pillow==11.1.0
 
-# ── Simulator core (local package) ────────────────────────────────────────────
-# Editable install of the simulation engine from the monorepo.
--e ../../packages/simulator-core
+# ── Simulator core ────────────────────────────────────────────────────────────
+# The simulator-core package is installed separately by run_project.py
+# as an editable install from packages/simulator-core/.  It is NOT listed
+# here because pip's relative-path resolution for -e in requirements files
+# is unreliable across platforms.
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.3.5
