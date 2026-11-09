@@ -4,16 +4,17 @@ import { useState, useCallback } from "react";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { TopologyView } from "@/components/labs/TopologyView";
+import { TopologyCanvas } from "@/components/labs/TopologyCanvas";
 import { PingPanel } from "@/components/labs/PingPanel";
 import { TraceViewer } from "@/components/labs/TraceViewer";
+import { PlaybackControls } from "@/components/labs/PlaybackControls";
 import {
   DEFAULT_TOPOLOGY,
   TraceEvent,
   createSimulation,
   resetSimulation,
 } from "@/lib/simulation-api";
-import { FlaskConical, Play, RotateCcw, Wifi } from "lucide-react";
+import { Play, RotateCcw, Wifi } from "lucide-react";
 
 export default function LabsPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -22,10 +23,46 @@ export default function LabsPage() {
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Playback state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const [speed, setSpeed] = useState(800); // ms per step
+
+  // Total animation steps = trace length
+  const totalSteps = trace.length;
+
+  // When a ping result comes in, load the trace and auto-play
+  const handleTraceUpdate = useCallback((newTrace: TraceEvent[]) => {
+    setTrace(newTrace);
+    setCurrentStep(0);
+    setIsPlaying(true); // auto-play on new trace
+  }, []);
+
+  // Playback handlers
+  const handlePlay = useCallback(() => setIsPlaying(true), []);
+  const handlePause = useCallback(() => setIsPlaying(false), []);
+  const handleStep = useCallback(() => {
+    setCurrentStep((s) => Math.min(s + 1, totalSteps));
+  }, [totalSteps]);
+  const handleResetPlayback = useCallback(() => {
+    setIsPlaying(false);
+    setCurrentStep(0);
+  }, []);
+  const handleStepChange = useCallback((s: number) => {
+    setCurrentStep(s);
+    if (s >= totalSteps) setIsPlaying(false);
+  }, [totalSteps]);
+
+  // Highlight the current trace event in the TraceViewer during playback.
+  const traceHighlight =
+    trace.length > 0 && currentStep < trace.length ? currentStep : undefined;
+
   const handleCreateSession = useCallback(async () => {
     setError(null);
     setCreating(true);
     setTrace([]);
+    setCurrentStep(0);
+    setIsPlaying(false);
     try {
       const session = await createSimulation(DEFAULT_TOPOLOGY, 42);
       setSessionId(session.id);
@@ -41,9 +78,11 @@ export default function LabsPage() {
     if (!sessionId) return;
     setError(null);
     setResetting(true);
+    setIsPlaying(false);
     try {
       const result = await resetSimulation(sessionId);
       setTrace(result.trace);
+      setCurrentStep(0);
     } catch (err) {
       const apiErr = err as { error?: { message?: string } };
       setError(apiErr?.error?.message ?? "Failed to reset simulation.");
@@ -61,7 +100,7 @@ export default function LabsPage() {
             Lab Workspace
           </h1>
           <p className="mt-1 text-sm text-[var(--text-secondary)]">
-            Build a topology, run simulations and inspect packet traces.
+            Build a topology, run simulations and watch packet flow in real time.
           </p>
         </div>
         {sessionId && (
@@ -82,7 +121,7 @@ export default function LabsPage() {
         </div>
       )}
 
-      {/* Topology section */}
+      {/* Animated topology canvas */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -107,14 +146,39 @@ export default function LabsPage() {
                   loading={resetting}
                 >
                   <RotateCcw size={12} aria-hidden="true" />
-                  Reset
+                  Reset sim
                 </Button>
               )}
             </div>
           </div>
         </CardHeader>
         <CardBody>
-          <TopologyView topology={DEFAULT_TOPOLOGY} />
+          <TopologyCanvas
+            topology={DEFAULT_TOPOLOGY}
+            trace={trace}
+            isPlaying={isPlaying}
+            currentStep={currentStep}
+            speed={speed}
+            onStepChange={handleStepChange}
+            totalSteps={totalSteps}
+          />
+
+          {/* Playback controls — only show when there's a trace */}
+          {trace.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-[var(--surface-border)]">
+              <PlaybackControls
+                isPlaying={isPlaying}
+                onPlay={handlePlay}
+                onPause={handlePause}
+                onStep={handleStep}
+                onReset={handleResetPlayback}
+                currentStep={currentStep}
+                totalSteps={totalSteps}
+                speed={speed}
+                onSpeedChange={setSpeed}
+              />
+            </div>
+          )}
         </CardBody>
       </Card>
 
@@ -130,11 +194,6 @@ export default function LabsPage() {
           <CardBody>
             {!sessionId ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
-                <FlaskConical
-                  size={20}
-                  className="text-[var(--text-muted)]"
-                  aria-hidden="true"
-                />
                 <p className="text-sm text-[var(--text-secondary)]">
                   Start a simulation to run pings.
                 </p>
@@ -142,7 +201,7 @@ export default function LabsPage() {
             ) : (
               <PingPanel
                 sessionId={sessionId}
-                onTraceUpdate={setTrace}
+                onTraceUpdate={handleTraceUpdate}
               />
             )}
           </CardBody>
@@ -156,7 +215,7 @@ export default function LabsPage() {
             </h2>
           </CardHeader>
           <CardBody>
-            <TraceViewer events={trace} />
+            <TraceViewer events={trace} currentStep={traceHighlight} />
           </CardBody>
         </Card>
       </div>
@@ -167,7 +226,7 @@ export default function LabsPage() {
           <p className="text-xs text-[var(--text-muted)]">
             The default topology has two PCs connected through a switch.
             Click &quot;Start simulation&quot; to create a live session, then run a ping
-            to observe ARP resolution and ICMP echo in the event trace.
+            to watch ARP resolution and ICMP echo packets animate across the topology.
           </p>
         </div>
       )}

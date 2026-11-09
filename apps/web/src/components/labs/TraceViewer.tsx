@@ -9,11 +9,11 @@
  */
 
 import { TraceEvent } from "@/lib/simulation-api";
-import { cn } from "@/lib/utils";
 
 interface TraceViewerProps {
   events: TraceEvent[];
   loading?: boolean;
+  currentStep?: number;  // index of the active event during playback
 }
 
 // Event type → colour class for the type label.
@@ -30,7 +30,7 @@ const TYPE_COLORS: Record<string, string> = {
   TraceLimitReached:    "text-[var(--status-error)]",
 };
 
-export function TraceViewer({ events, loading }: TraceViewerProps) {
+export function TraceViewer({ events, loading, currentStep }: TraceViewerProps) {
   return (
     <div className="rounded-lg overflow-hidden border border-[var(--surface-border)]">
       {/* Header bar */}
@@ -70,18 +70,21 @@ export function TraceViewer({ events, loading }: TraceViewerProps) {
           </span>
         )}
         {events.map((evt, i) => (
-          <TraceLine key={`${evt.seq}-${i}`} event={evt} />
+          <TraceLine
+            key={`${evt.seq}-${i}`}
+            event={evt}
+            active={currentStep !== undefined && i === currentStep}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function TraceLine({ event }: { event: TraceEvent }) {
+function TraceLine({ event, active }: { event: TraceEvent; active?: boolean }) {
   const colorClass = TYPE_COLORS[event.type] ?? "text-[var(--text-primary)]";
   const timeStr = String(event.time).padStart(4, " ");
 
-  // Build a human-readable detail string from the event fields.
   let detail = "";
   if (event.operation) {
     detail = `${event.sender_ip} -> ${event.target_ip} (${event.operation})`;
@@ -98,9 +101,13 @@ function TraceLine({ event }: { event: TraceEvent }) {
   }
 
   return (
-    <div className="flex gap-2 whitespace-nowrap">
+    <div
+      className={`flex gap-2 whitespace-nowrap px-1 rounded ${
+        active ? "bg-[var(--accent-subtle)] border-l-2 border-[var(--accent-primary)]" : ""
+      }`}
+    >
       <span className="text-[var(--text-muted)] select-none">{timeStr}</span>
-      <span className={cn("font-medium", colorClass)}>{event.type}</span>
+      <span className={colorClass}>{event.type}</span>
       {detail && (
         <span className="text-[var(--text-secondary)]">{detail}</span>
       )}

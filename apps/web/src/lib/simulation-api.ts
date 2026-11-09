@@ -60,6 +60,8 @@ export interface TraceEvent {
   seq: number;
   device_id?: string;
   switch_id?: string;
+  src_device_id?: string;
+  dst_device_id?: string;
   interface_name?: string;
   reason?: string;
   mac_address?: string;
