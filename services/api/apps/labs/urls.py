@@ -13,6 +13,7 @@ from .views import (
     SimulationPingView,
     SimulationResetView,
     SimulationTraceView,
+    SimulationCLIView,
 )
 
 urlpatterns = [
@@ -22,6 +23,7 @@ urlpatterns = [
     path("simulations/<str:session_id>/ping/", SimulationPingView.as_view(), name="sim-ping"),
     path("simulations/<str:session_id>/trace/", SimulationTraceView.as_view(), name="sim-trace"),
     path("simulations/<str:session_id>/reset/", SimulationResetView.as_view(), name="sim-reset"),
+    path("simulations/<str:session_id>/cli/", SimulationCLIView.as_view(), name="sim-cli"),
     path(
         "simulations/<str:session_id>/devices/<str:device_id>/",
         SimulationDeviceStateView.as_view(),

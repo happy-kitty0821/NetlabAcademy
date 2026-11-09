@@ -399,8 +399,13 @@ class Host:
         own_mac = self._own_mac()
         assert own_ip is not None
 
-        # Space each request by one tick per sequence number.
-        t = self._sim.clock + 2 + sequence
+        # Space each request enough that the previous one has completed
+        # its full round trip before the next is sent.
+        # Round-trip path: host→switch (1 tick) + switch→host-b (1 tick)
+        # + processing (1 tick) + reply path (2 ticks) = ~5 ticks per ping.
+        # Using 6 ticks between requests gives headroom and clean separation.
+        RTT_SPACING = 6
+        t = self._sim.clock + 2 + sequence * RTT_SPACING
 
         icmp = ICMPMessage(
             type=ICMPMessage.ECHO_REQUEST,

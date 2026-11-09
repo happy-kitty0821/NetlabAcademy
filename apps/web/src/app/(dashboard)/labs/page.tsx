@@ -1,281 +1,299 @@
-"use client";
-
-import { useState, useCallback } from "react";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
-import { Button } from "@/components/ui/Button";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { Card, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { TopologyCanvas } from "@/components/labs/TopologyCanvas";
-import { TopologyEditor } from "@/components/labs/TopologyEditor";
-import { PingPanel } from "@/components/labs/PingPanel";
-import { TraceViewer } from "@/components/labs/TraceViewer";
-import { PlaybackControls } from "@/components/labs/PlaybackControls";
+import { Button } from "@/components/ui/Button";
 import {
-  DEFAULT_TOPOLOGY,
-  type TopologyDocument,
-  type TraceEvent,
-  createSimulation,
-  resetSimulation,
-} from "@/lib/simulation-api";
-import { Play, RotateCcw, Wifi, Eye, EyeOff, PenLine } from "lucide-react";
+  BookOpen,
+  ChevronRight,
+  Clock,
+  FlaskConical,
+  Lock,
+  Network,
+  Play,
+  Star,
+  Wifi,
+} from "lucide-react";
+
+export const metadata: Metadata = { title: "Labs" };
+
+// ── Static lab catalog (placeholder until the lab-lifecycle spec is built) ────
+
+const LABS: LabDefinition[] = [
+  {
+    id: "lab-01-basic-connectivity",
+    title: "Basic Ethernet Connectivity",
+    topic: "Switching",
+    level: "CCNA",
+    difficulty: "beginner",
+    duration: "15 min",
+    description:
+      "Connect two PCs through a Catalyst 2960 switch. Configure IP addressing, verify ARP resolution, and run ping tests to confirm end-to-end connectivity.",
+    objectives: [
+      "Configure IPv4 addresses on two end hosts",
+      "Observe ARP request and reply in the packet trace",
+      "Verify MAC address learning on the switch",
+      "Confirm successful ICMP echo exchange",
+    ],
+    tags: ["ARP", "ICMP", "Switching", "IPv4"],
+    status: "available",
+    completed: false,
+  },
+  {
+    id: "lab-02-mac-learning",
+    title: "Switch MAC Address Learning",
+    topic: "Switching",
+    level: "CCNA",
+    difficulty: "beginner",
+    duration: "20 min",
+    description:
+      "Explore how an Ethernet switch builds its MAC address table. Add multiple hosts, generate traffic, and inspect the MAC table using show mac address-table.",
+    objectives: [
+      "Explain the MAC learning process",
+      "Use show mac address-table to verify learned entries",
+      "Observe unknown-unicast flooding before learning",
+      "Verify known-unicast forwarding after learning",
+    ],
+    tags: ["MAC", "Switching", "Frame forwarding"],
+    status: "available",
+    completed: false,
+  },
+  {
+    id: "lab-03-vlans",
+    title: "VLAN Segmentation",
+    topic: "VLANs",
+    level: "CCNA",
+    difficulty: "intermediate",
+    duration: "30 min",
+    description:
+      "Create VLANs on a switch, assign access ports, and verify that hosts in different VLANs cannot communicate without a router.",
+    objectives: [
+      "Create VLANs 10 and 20",
+      "Assign switch ports to access VLANs",
+      "Verify isolation between VLANs",
+      "Document the VLAN configuration",
+    ],
+    tags: ["VLAN", "Access port", "Segmentation"],
+    status: "coming-soon",
+    completed: false,
+  },
+  {
+    id: "lab-04-static-routing",
+    title: "Static Routing Fundamentals",
+    topic: "Routing",
+    level: "CCNA",
+    difficulty: "intermediate",
+    duration: "35 min",
+    description:
+      "Connect two LANs through a router. Configure static routes and verify inter-network reachability using ping and traceroute.",
+    objectives: [
+      "Configure router interfaces with IP addresses",
+      "Add static routes for remote networks",
+      "Verify routing table with show ip route",
+      "Test connectivity between subnets",
+    ],
+    tags: ["Static routing", "IPv4", "Router"],
+    status: "coming-soon",
+    completed: false,
+  },
+];
+
+type LabDifficulty = "beginner" | "intermediate" | "advanced";
+type LabStatus = "available" | "coming-soon" | "locked";
+
+interface LabDefinition {
+  id: string;
+  title: string;
+  topic: string;
+  level: string;
+  difficulty: LabDifficulty;
+  duration: string;
+  description: string;
+  objectives: string[];
+  tags: string[];
+  status: LabStatus;
+  completed: boolean;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const DIFFICULTY_BADGE: Record<LabDifficulty, "success" | "warning" | "error"> = {
+  beginner:     "success",
+  intermediate: "warning",
+  advanced:     "error",
+};
+
+const TOPIC_ICON: Record<string, React.ElementType> = {
+  Switching: Network,
+  VLANs:     Network,
+  Routing:   Network,
+  default:   FlaskConical,
+};
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function LabsPage() {
-  // ── Topology state ─────────────────────────────────────────────────────────
-  const [topology, setTopology] = useState<TopologyDocument>(DEFAULT_TOPOLOGY);
-  const [showEditor, setShowEditor] = useState(false);
-
-  // ── Simulation state ───────────────────────────────────────────────────────
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [trace, setTrace] = useState<TraceEvent[]>([]);
-  const [creating, setCreating] = useState(false);
-  const [resetting, setResetting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // ── Playback ───────────────────────────────────────────────────────────────
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
-  const [speed, setSpeed] = useState(700);
-  const [showSimulation, setShowSimulation] = useState(true);
-
-  const totalSteps = trace.length;
-
-  // ── Handlers ───────────────────────────────────────────────────────────────
-
-  /** Called by the TopologyEditor when the user clicks "Use this topology" */
-  const handleApplyTopology = useCallback(
-    async (newTopo: TopologyDocument) => {
-      setTopology(newTopo);
-      setShowEditor(false);
-      setError(null);
-      setTrace([]);
-      setCurrentStep(0);
-      setIsPlaying(false);
-      // Auto-create a simulation session with the new topology
-      setCreating(true);
-      try {
-        const session = await createSimulation(newTopo, 42);
-        setSessionId(session.id);
-      } catch (err) {
-        const e = err as { error?: { message?: string } };
-        setError(e?.error?.message ?? "Failed to create simulation.");
-      } finally {
-        setCreating(false);
-      }
-    },
-    [],
-  );
-
-  const handleTraceUpdate = useCallback((newTrace: TraceEvent[]) => {
-    setTrace(newTrace);
-    setCurrentStep(0);
-    setIsPlaying(true);
-    setShowSimulation(true);
-  }, []);
-
-  const handlePlay = useCallback(() => setIsPlaying(true), []);
-  const handlePause = useCallback(() => setIsPlaying(false), []);
-  const handleStep = useCallback(
-    () => setCurrentStep((s) => Math.min(s + 1, totalSteps)),
-    [totalSteps],
-  );
-  const handleResetPlayback = useCallback(() => {
-    setIsPlaying(false);
-    setCurrentStep(0);
-  }, []);
-  const handleStepChange = useCallback(
-    (s: number) => {
-      setCurrentStep(s);
-      if (s >= totalSteps) setIsPlaying(false);
-    },
-    [totalSteps],
-  );
-
-  const handleCreateSession = useCallback(async () => {
-    setError(null);
-    setCreating(true);
-    setTrace([]);
-    setCurrentStep(0);
-    setIsPlaying(false);
-    try {
-      const session = await createSimulation(topology, 42);
-      setSessionId(session.id);
-    } catch (err) {
-      const e = err as { error?: { message?: string } };
-      setError(e?.error?.message ?? "Failed to create simulation.");
-    } finally {
-      setCreating(false);
-    }
-  }, [topology]);
-
-  const handleReset = useCallback(async () => {
-    if (!sessionId) return;
-    setError(null);
-    setResetting(true);
-    setIsPlaying(false);
-    try {
-      const result = await resetSimulation(sessionId);
-      setTrace(result.trace);
-      setCurrentStep(0);
-    } catch (err) {
-      const e = err as { error?: { message?: string } };
-      setError(e?.error?.message ?? "Failed to reset.");
-    } finally {
-      setResetting(false);
-    }
-  }, [sessionId]);
-
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const available = LABS.filter((l) => l.status === "available");
+  const comingSoon = LABS.filter((l) => l.status === "coming-soon");
 
   return (
-    <div className="max-w-5xl mx-auto space-y-5">
+    <div className="max-w-5xl mx-auto space-y-8">
+
       {/* Page header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-[var(--text-primary)]">
-            Lab Workspace
-          </h1>
+          <h1 className="text-xl font-semibold text-[var(--text-primary)]">Lab Catalog</h1>
           <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
-            Build topologies, run simulations, and inspect packet-by-packet flow.
+            Hands-on networking labs for CCNA and CCNP learners.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {sessionId && !showEditor && (
-            <Badge variant="success">
-              <Wifi size={10} className="mr-1" />
-              Session active
-            </Badge>
-          )}
-        </div>
+        <Link href="/labs/workspace">
+          <Button size="sm" variant="secondary">
+            <Network size={12} aria-hidden="true" />
+            Open free workspace
+          </Button>
+        </Link>
       </div>
 
-      {error && (
-        <div role="alert" className="rounded-md px-4 py-3 text-sm bg-[#3a1a1a] border border-[#f85149] text-[#f85149]">
-          {error}
+      {/* Stats bar */}
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: "Available now", value: available.length, color: "text-[var(--status-success)]" },
+          { label: "Coming soon", value: comingSoon.length, color: "text-[var(--status-warning)]" },
+          { label: "Completed",   value: LABS.filter((l) => l.completed).length, color: "text-[var(--accent-primary)]" },
+        ].map((s) => (
+          <Card key={s.label}>
+            <CardBody className="py-3 px-4">
+              <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">{s.label}</p>
+            </CardBody>
+          </Card>
+        ))}
+      </div>
+
+      {/* Available labs */}
+      <section>
+        <h2 className="text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)] mb-4">
+          Available now
+        </h2>
+        <div className="grid grid-cols-1 gap-4">
+          {available.map((lab) => (
+            <LabCard key={lab.id} lab={lab} />
+          ))}
         </div>
-      )}
+      </section>
 
-      {/* ── Topology editor panel ───────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-              {showEditor ? "Build topology" : "Topology"}
-            </h2>
-            <div className="flex items-center gap-2">
-              {/* Editor toggle */}
-              <Button
-                size="sm"
-                variant={showEditor ? "primary" : "secondary"}
-                onClick={() => setShowEditor((v) => !v)}
-              >
-                <PenLine size={12} aria-hidden="true" />
-                {showEditor ? "Close editor" : "Build topology"}
-              </Button>
-
-              {/* Simulation controls (only when editor is closed) */}
-              {!showEditor && (
-                <>
-                  {trace.length > 0 && (
-                    <Button
-                      size="sm"
-                      variant={showSimulation ? "primary" : "secondary"}
-                      onClick={() => setShowSimulation((v) => !v)}
-                    >
-                      {showSimulation ? (
-                        <><EyeOff size={12} aria-hidden="true" /> Hide sim</>
-                      ) : (
-                        <><Eye size={12} aria-hidden="true" /> Show sim</>
-                      )}
-                    </Button>
-                  )}
-                  {!sessionId ? (
-                    <Button size="sm" onClick={handleCreateSession} loading={creating}>
-                      <Play size={12} aria-hidden="true" />
-                      Start simulation
-                    </Button>
-                  ) : (
-                    <Button size="sm" variant="secondary" onClick={handleReset} loading={resetting}>
-                      <RotateCcw size={12} aria-hidden="true" />
-                      Reset
-                    </Button>
-                  )}
-                </>
-              )}
-            </div>
+      {/* Coming soon */}
+      {comingSoon.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)] mb-4">
+            Coming soon
+          </h2>
+          <div className="grid grid-cols-1 gap-4">
+            {comingSoon.map((lab) => (
+              <LabCard key={lab.id} lab={lab} />
+            ))}
           </div>
-        </CardHeader>
-        <CardBody className={showEditor ? "p-4" : "p-0"}>
-          {showEditor ? (
-            <TopologyEditor onApply={handleApplyTopology} />
-          ) : (
-            <>
-              <TopologyCanvas
-                topology={topology}
-                trace={trace}
-                isPlaying={isPlaying}
-                currentStep={currentStep}
-                speed={speed}
-                onStepChange={handleStepChange}
-                totalSteps={totalSteps}
-                showSimulation={showSimulation}
-              />
-              {trace.length > 0 && showSimulation && (
-                <div className="px-4 py-3 border-t border-[var(--surface-border)]">
-                  <PlaybackControls
-                    isPlaying={isPlaying}
-                    onPlay={handlePlay}
-                    onPause={handlePause}
-                    onStep={handleStep}
-                    onReset={handleResetPlayback}
-                    currentStep={currentStep}
-                    totalSteps={totalSteps}
-                    speed={speed}
-                    onSpeedChange={setSpeed}
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* ── Ping + trace ───────────────────────────────────────────────────── */}
-      {!showEditor && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <Card>
-            <CardHeader>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Ping</h2>
-            </CardHeader>
-            <CardBody>
-              {!sessionId ? (
-                <p className="text-sm text-[var(--text-secondary)] text-center py-8">
-                  Start a simulation to run pings.
-                </p>
-              ) : (
-                <PingPanel sessionId={sessionId} onTraceUpdate={handleTraceUpdate} />
-              )}
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Event trace</h2>
-            </CardHeader>
-            <CardBody>
-              <TraceViewer
-                events={trace}
-                currentStep={showSimulation ? currentStep : undefined}
-              />
-            </CardBody>
-          </Card>
-        </div>
-      )}
-
-      {!sessionId && !showEditor && (
-        <p className="text-center text-xs text-[var(--text-muted)] py-2">
-          Use the default topology or click &quot;Build topology&quot; to design your own.
-          Then click &quot;Start simulation&quot; and run a ping.
-        </p>
+        </section>
       )}
     </div>
+  );
+}
+
+// ── Lab card ──────────────────────────────────────────────────────────────────
+
+function LabCard({ lab }: { lab: LabDefinition }) {
+  const Icon = TOPIC_ICON[lab.topic] ?? TOPIC_ICON.default;
+  const isAvailable = lab.status === "available";
+  const isComingSoon = lab.status === "coming-soon";
+
+  return (
+    <Card className={isComingSoon ? "opacity-70" : ""}>
+      <CardBody>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          {/* Left: icon + info */}
+          <div className="flex items-start gap-4 min-w-0 flex-1">
+            <div
+              className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+              style={{ background: isAvailable ? "var(--accent-subtle)" : "var(--surface-overlay)" }}
+              aria-hidden="true"
+            >
+              {lab.completed ? (
+                <Star size={16} className="text-[var(--status-success)]" />
+              ) : isComingSoon ? (
+                <Lock size={16} className="text-[var(--text-muted)]" />
+              ) : (
+                <Icon size={16} className="text-[var(--accent-primary)]" />
+              )}
+            </div>
+
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  {lab.title}
+                </h3>
+                <Badge variant={DIFFICULTY_BADGE[lab.difficulty]}>
+                  {lab.difficulty}
+                </Badge>
+                {lab.completed && (
+                  <Badge variant="success">completed</Badge>
+                )}
+                {isComingSoon && (
+                  <Badge variant="default">coming soon</Badge>
+                )}
+              </div>
+
+              <p className="text-xs text-[var(--text-secondary)] mb-2 leading-relaxed">
+                {lab.description}
+              </p>
+
+              {/* Objectives */}
+              <ul className="hidden sm:flex flex-col gap-0.5 mb-2">
+                {lab.objectives.slice(0, 2).map((obj) => (
+                  <li key={obj} className="flex items-start gap-1.5 text-xs text-[var(--text-muted)]">
+                    <span className="mt-1.5 w-1 h-1 rounded-full bg-[var(--accent-primary)] shrink-0" aria-hidden="true" />
+                    {obj}
+                  </li>
+                ))}
+              </ul>
+
+              {/* Meta row */}
+              <div className="flex items-center gap-3 flex-wrap text-xs text-[var(--text-muted)]">
+                <span className="flex items-center gap-1">
+                  <BookOpen size={11} aria-hidden="true" />
+                  {lab.level}
+                </span>
+                <span className="flex items-center gap-1">
+                  <Clock size={11} aria-hidden="true" />
+                  {lab.duration}
+                </span>
+                <span className="flex items-center gap-1">
+                  <Wifi size={11} aria-hidden="true" />
+                  {lab.topic}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right: action */}
+          <div className="flex items-center">
+            {isAvailable ? (
+              <Link href={`/labs/workspace?lab=${lab.id}`}>
+                <Button size="sm">
+                  <Play size={12} aria-hidden="true" />
+                  {lab.completed ? "Retry" : "Start lab"}
+                  <ChevronRight size={12} aria-hidden="true" />
+                </Button>
+              </Link>
+            ) : (
+              <Button size="sm" variant="secondary" disabled>
+                <Lock size={12} aria-hidden="true" />
+                Coming soon
+              </Button>
+            )}
+          </div>
+        </div>
+      </CardBody>
+    </Card>
   );
 }

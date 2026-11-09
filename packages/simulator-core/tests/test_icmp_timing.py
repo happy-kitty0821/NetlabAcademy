@@ -78,9 +78,8 @@ class TestICMPTiming:
 
     def test_no_batch_of_frameTransmits(self) -> None:
         """
-        There should be no run of more than 3 consecutive FrameTransmit events
-        without an intervening non-FrameTransmit event.  The old bug caused runs
-        of 11 consecutive FrameTransmits (one per ICMP seq) at the same tick.
+        There should be no run of more than 2 consecutive FrameTransmit events.
+        With RTT_SPACING=6, each ping is fully resolved before the next starts.
         """
         sim = build_sim(seed=42)
         sim.get_host("host-a").ping("192.168.1.2", count=4)
@@ -95,9 +94,9 @@ class TestICMPTiming:
             else:
                 current_run = 0
 
-        assert max_run <= 3, (
+        assert max_run <= 2, (
             f"Found a run of {max_run} consecutive FrameTransmits — "
-            f"requests are being batched (regression of timing bug)"
+            f"requests are still being batched (timing bug)"
         )
 
     def test_single_ping_correct_event_sequence(self) -> None:

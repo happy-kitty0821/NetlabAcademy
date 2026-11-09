@@ -9,6 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "12.12.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",

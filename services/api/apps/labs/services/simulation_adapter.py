@@ -159,6 +159,9 @@ class SimulationSession:
     # Last ping result, if any.
     last_ping: PingResult | None = None
 
+    # CLI sessions keyed by device_id — one per open terminal.
+    cli_sessions: dict[str, Any] = field(default_factory=dict)
+
 
 # In-memory session store.  Keyed by session ID (UUID string).
 _sessions: dict[str, SimulationSession] = {}
@@ -324,3 +327,20 @@ def _trace_to_list(trace: list[SimulationEvent]) -> list[dict[str, Any]]:
 
         items.append(entry)
     return items
+
+
+def get_or_create_cli_session(session: SimulationSession, device_id: str):
+    """
+    Return the existing CLISession for *device_id* in *session*, or
+    create a new one.  Raises KeyError if *device_id* does not exist.
+    """
+    if device_id not in session.simulation.topology.devices:
+        raise KeyError(f"Device {device_id!r} not found in simulation.")
+
+    if device_id not in session.cli_sessions:
+        from simulator_core.cli import CLISession
+        session.cli_sessions[device_id] = CLISession(
+            device_id=device_id,
+            simulation=session.simulation,
+        )
+    return session.cli_sessions[device_id]

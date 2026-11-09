@@ -1,20 +1,12 @@
 """
 apps.labs.views
 ~~~~~~~~~~~~~~
-API views for simulation sessions.
-
-Endpoints:
-  POST   /api/v1/labs/simulations/           — create a simulation from a topology
-  GET    /api/v1/labs/simulations/<id>/      — get session status
-  DELETE /api/v1/labs/simulations/<id>/       — delete session
-  POST   /api/v1/labs/simulations/<id>/ping/  — issue a ping from a device
-  GET    /api/v1/labs/simulations/<id>/trace/ — get the event trace
-  GET    /api/v1/labs/simulations/<id>/devices/<id>/ — get device state
-  POST   /api/v1/labs/simulations/<id>/reset/ — reset the simulation
+API views for simulation sessions and device CLI.
 """
 
 from __future__ import annotations
 
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -25,6 +17,8 @@ from simulator_core import ConfigurationError, TopologyError
 from .serializers import PingRequestSerializer, TopologyDocumentSerializer
 from .services import simulation_adapter as adapter
 
+
+# ── Simulation lifecycle ──────────────────────────────────────────────────────
 
 class SimulationListCreateView(APIView):
     """POST /api/v1/labs/simulations/ — create a new simulation session."""
@@ -101,7 +95,6 @@ class SimulationPingView(APIView):
 
         serializer = PingRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         data = serializer.validated_data
 
         try:
@@ -179,3 +172,54 @@ class SimulationResetView(APIView):
             )
         result = adapter.reset_session(session)
         return Response(result)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+class CLICommandSerializer(drf_serializers.Serializer):
+    """Request body for a CLI command."""
+    device_id = drf_serializers.CharField(max_length=64)
+    command   = drf_serializers.CharField(max_length=1024, allow_blank=True)
+
+
+class SimulationCLIView(APIView):
+    """
+    POST /api/v1/labs/simulations/<id>/cli/
+
+    Execute a single CLI command on a device and return the formatted output.
+
+    Request:  { "device_id": "host-a", "command": "ping 192.168.1.2" }
+    Response: { "output": "...", "prompt": "PC-A>", "mode": "user_exec" }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id: str):
+        try:
+            session = adapter.get_session(session_id)
+        except KeyError:
+            return Response(
+                {"error": {"code": "not_found", "message": "Simulation session not found."}},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = CLICommandSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        device_id = serializer.validated_data["device_id"]
+        command   = serializer.validated_data["command"]
+
+        try:
+            cli_session = adapter.get_or_create_cli_session(session, device_id)
+        except KeyError as exc:
+            return Response(
+                {"error": {"code": "not_found", "message": str(exc)}},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        output = cli_session.execute(command)
+        return Response({
+            "output": output,
+            "prompt": cli_session.prompt(),
+            "mode":   cli_session.mode.name.lower(),
+        })

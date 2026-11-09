@@ -108,3 +108,8 @@ __all__ = [
     # Serialisation
     "trace_to_json", "trace_from_json",
 ]
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+from simulator_core.cli import CLISession, CLIMode  # noqa: E402
