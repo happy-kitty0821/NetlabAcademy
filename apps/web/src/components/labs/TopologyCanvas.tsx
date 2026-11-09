@@ -381,7 +381,7 @@ export function TopologyCanvas({
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
-        style={{ minHeight: 260, maxHeight: 340 }}
+        style={{ minHeight: 360, maxHeight: 520 }}
         aria-label="Network topology"
       >
         {/* Dot grid */}

@@ -26,6 +26,7 @@ const NAV: NavItem[] = [
 ];
 
 const BOTTOM_NAV: NavItem[] = [
+  { label: "Devices",  href: "/admin/devices", icon: Network },
   { label: "Users",    href: "/admin/users",   icon: Users },
   { label: "Settings", href: "/settings",      icon: Settings },
 ];

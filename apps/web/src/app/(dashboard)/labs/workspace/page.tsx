@@ -132,7 +132,7 @@ export default function LabsPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-5xl mx-auto space-y-5">
+    <div className="w-full space-y-4 px-1">
       {/* Page header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>

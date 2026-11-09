@@ -97,8 +97,20 @@ const DEFAULT_EDGES: Edge[] = [
 ];
 
 // ── Node counter ──────────────────────────────────────────────────────────────
+// Initialised from sessionStorage state so IDs never collide on restore.
 
 let _counter = 100;
+
+function initCounter(nodes: DeviceNode[]) {
+  for (const n of nodes) {
+    const m = n.id.match(/^n-(\d+)$/);
+    if (m) {
+      const num = parseInt(m[1], 10);
+      if (num >= _counter) _counter = num + 1;
+    }
+  }
+}
+
 function nextId() { return `n-${++_counter}`; }
 
 // ── Stamp interface labels onto edges ─────────────────────────────────────────
@@ -244,6 +256,9 @@ interface TopologyEditorProps {
 
 export function TopologyEditor({ onApply }: TopologyEditorProps) {
   const saved = loadFromStorage();
+  // Initialise the ID counter from restored nodes so new additions never collide.
+  if (saved?.nodes) initCounter(saved.nodes);
+
   const [nodes, setNodes, onNodesChange] = useNodesState<DeviceNode>(
     saved?.nodes ?? DEFAULT_NODES,
   );
@@ -405,7 +420,7 @@ export function TopologyEditor({ onApply }: TopologyEditorProps) {
       )}
 
       {/* Canvas */}
-      <div className="relative rounded-lg overflow-hidden border border-[#30363d]" style={{ height: 400 }}>
+      <div className="relative rounded-lg overflow-hidden border border-[#30363d]" style={{ height: 520 }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
