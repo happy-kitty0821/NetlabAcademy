@@ -1,19 +1,10 @@
 "use client";
 
 /**
- * TopologyEditor
- * ──────────────
- * Drag-and-drop network topology canvas.
+ * TopologyEditor — EVE-NG style topology canvas.
  *
- * Device palette uses the DEFAULT_DEVICE_CATALOG, which mirrors
- * Cisco Packet Tracer's logical icon set (PC, Laptop, Server,
- * Catalyst 2960, 2911 Router).
- *
- * Fixes vs. previous version:
- *  - Interface assignment uses a pre-assignment pass so nodes and links
- *    are always consistent regardless of how many switches are present.
- *  - catalogId drives the node type, so each device renders the correct icon.
- *  - sessionStorage key is versioned (v2) to avoid loading stale data.
+ * Cables render with green color (active Ethernet) and interface name
+ * labels at each endpoint — same visual language as EVE-NG.
  */
 
 import "@xyflow/react/dist/style.css";
@@ -35,6 +26,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { nodeTypes } from "./FlowNodes";
+import { edgeTypes } from "./FlowEdge";
 import {
   convertFlowToTopology,
   TopologyValidationError,
@@ -94,14 +86,49 @@ const DEFAULT_NODES: DeviceNode[] = [
 ];
 
 const DEFAULT_EDGES: Edge[] = [
-  { id: "l1", source: "host-a", target: "switch-1" },
-  { id: "l2", source: "host-b", target: "switch-1" },
+  {
+    id: "l1", source: "host-a", target: "switch-1", type: "lab",
+    data: { labelA: "eth0", labelB: "Gi0/0", active: true },
+  },
+  {
+    id: "l2", source: "host-b", target: "switch-1", type: "lab",
+    data: { labelA: "eth0", labelB: "Gi0/1", active: true },
+  },
 ];
 
 // ── Node counter ──────────────────────────────────────────────────────────────
 
 let _counter = 100;
 function nextId() { return `n-${++_counter}`; }
+
+// ── Stamp interface labels onto edges ─────────────────────────────────────────
+// Runs the same pre-assignment pass as convertFlowToTopology but only returns
+// the enriched edges — used after any topology change to keep labels in sync.
+
+function stampEdgeLabels(
+  currentNodes: DeviceNode[],
+  currentEdges: Edge[],
+): Edge[] {
+  const nodeMap = new Map(currentNodes.map((n) => [n.id, n]));
+  const counter = new Map<string, number>();
+
+  return currentEdges.map((edge) => {
+    function getIface(nodeId: string): string {
+      const node = nodeMap.get(nodeId);
+      if (!node || node.data.model === "host") return "eth0";
+      const c = counter.get(nodeId) ?? 0;
+      counter.set(nodeId, c + 1);
+      return `Gi0/${c}`;
+    }
+    const labelA = getIface(edge.source);
+    const labelB = getIface(edge.target);
+    return {
+      ...edge,
+      type: "lab",
+      data: { ...edge.data, labelA, labelB, active: true },
+    };
+  });
+}
 
 // ── Catalog icon map ──────────────────────────────────────────────────────────
 
@@ -224,10 +251,17 @@ export function TopologyEditor({ onApply }: TopologyEditorProps) {
     saved?.edges ?? DEFAULT_EDGES,
   );
 
-  // Save on every graph change
+  // Save on every graph change; also re-stamp edge labels when edges change
   useEffect(() => {
     saveToStorage(nodes, edges);
   }, [nodes, edges]);
+
+  // Re-stamp interface labels whenever nodes are added/deleted
+  // (a deleted node changes port numbering on switches)
+  useEffect(() => {
+    setEdges((eds) => stampEdgeLabels(nodes, eds));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes]);
 
   const [editingNode, setEditingNode] = useState<DeviceNode | null>(null);
   const [validationErr, setValidationErr] = useState<string | null>(null);
@@ -236,9 +270,17 @@ export function TopologyEditor({ onApply }: TopologyEditorProps) {
   // ── Connect ───────────────────────────────────────────────────────────────
 
   const onConnect = useCallback(
-    (conn: Connection) =>
-      setEdges((eds) => addEdge({ ...conn, id: `e-${Date.now()}` }, eds)),
-    [setEdges],
+    (conn: Connection) => {
+      setEdges((eds) => {
+        const newEdges = addEdge(
+          { ...conn, id: `e-${Date.now()}`, type: "lab" },
+          eds,
+        );
+        // Re-stamp all labels so the new edge gets correct interface names
+        return stampEdgeLabels(nodes, newEdges);
+      });
+    },
+    [nodes, setEdges],
   );
 
   // ── Add device from catalog ───────────────────────────────────────────────
@@ -299,8 +341,8 @@ export function TopologyEditor({ onApply }: TopologyEditorProps) {
     setValidationErr(null);
     setApplied(false);
     try {
-      const topo = convertFlowToTopology(nodes, edges);
-      onApply(topo);
+      const result = convertFlowToTopology(nodes, edges);
+      onApply(result.topology);
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);
     } catch (err) {
@@ -372,12 +414,14 @@ export function TopologyEditor({ onApply }: TopologyEditorProps) {
           onConnect={onConnect}
           onNodeDoubleClick={onNodeDoubleClick}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           deleteKeyCode={["Delete", "Backspace"]}
           fitView
           fitViewOptions={{ padding: 0.3 }}
           style={{ background: "#0d1117" }}
           defaultEdgeOptions={{
-            style: { stroke: "#30363d", strokeWidth: 2 },
+            type: "lab",
+            data: { labelA: "", labelB: "", active: true },
           }}
           proOptions={{ hideAttribution: true }}
           aria-label="Network topology canvas"

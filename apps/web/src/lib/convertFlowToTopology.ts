@@ -4,19 +4,20 @@
  * Converts a React Flow node/edge graph into a TopologyDocument suitable
  * for the simulation API.
  *
+ * Also returns an ifaceMap (nodeId:edgeId → interfaceName) so the
+ * topology editor can stamp interface labels onto the React Flow edges
+ * for EVE-NG-style display.
+ *
  * Design — single pre-assignment pass:
  *  1. Walk every edge and pre-assign interface names to both endpoints
  *     before building either the node list or the link list.
- *     This guarantees nodes and links are always consistent —
- *     a switch interface declared in the node list is always the same
- *     name used in the link list.
+ *     This guarantees nodes and links are always consistent.
  *  2. Hosts always use "eth0".
  *  3. Switches use "Gi0/0", "Gi0/1", … assigned in edge-traversal order
  *     PER NODE, tracked by a per-node counter.
  *  4. Switches are given exactly as many interfaces as they have
  *     connected edges (minimum 2 for visual clarity).
- *  5. Validation: hosts require a CIDR IP, links must reference existing nodes,
- *     hosts may not have more than one connection (not yet supported).
+ *  5. Validation: hosts require a CIDR IP, links must reference existing nodes.
  */
 
 import type { Edge } from "@xyflow/react";
@@ -39,12 +40,23 @@ export class TopologyValidationError extends Error {
   }
 }
 
+// ── Result type ───────────────────────────────────────────────────────────────
+
+export interface ConversionResult {
+  topology: TopologyDocument;
+  /**
+   * Interface name map: `"${nodeId}:${edgeId}"` → interface name.
+   * Use this to stamp labels onto React Flow edges after conversion.
+   */
+  ifaceMap: Map<string, string>;
+}
+
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 export function convertFlowToTopology(
   nodes: DeviceNode[],
   edges: Edge[],
-): TopologyDocument {
+): ConversionResult {
   if (nodes.length === 0) {
     throw new TopologyValidationError(
       "The topology has no devices. Add at least one PC and one Switch.",
@@ -54,29 +66,24 @@ export function convertFlowToTopology(
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
   // ── Phase 1: pre-assign interface names ────────────────────────────────────
-  // Key: `${nodeId}:${edgeId}` → interface name
-  // This is built by iterating edges ONCE, incrementing a per-node counter.
   const ifaceAssignment = new Map<string, string>();
   const switchPortCounter = new Map<string, number>();
 
   for (const edge of edges) {
     if (!nodeMap.has(edge.source)) {
       throw new TopologyValidationError(
-        `A link references device "${edge.source}" which does not exist in the topology.`,
+        `A link references device "${edge.source}" which does not exist.`,
       );
     }
     if (!nodeMap.has(edge.target)) {
       throw new TopologyValidationError(
-        `A link references device "${edge.target}" which does not exist in the topology.`,
+        `A link references device "${edge.target}" which does not exist.`,
       );
     }
 
     function assignIface(nodeId: string): string {
       const node = nodeMap.get(nodeId)!;
-      if (node.data.model === "host") {
-        return "eth0";
-      }
-      // Switch: allocate next Gi0/N
+      if (node.data.model === "host") return "eth0";
       const current = switchPortCounter.get(nodeId) ?? 0;
       switchPortCounter.set(nodeId, current + 1);
       return `Gi0/${current}`;
@@ -86,7 +93,7 @@ export function convertFlowToTopology(
     ifaceAssignment.set(`${edge.target}:${edge.id}`, assignIface(edge.target));
   }
 
-  // ── Phase 2: build TopologyNodes using pre-assigned interface names ─────────
+  // ── Phase 2: build TopologyNodes ───────────────────────────────────────────
 
   const topologyNodes: TopologyNode[] = nodes.map((node, idx) => {
     const data = node.data;
@@ -115,9 +122,7 @@ export function convertFlowToTopology(
       };
     }
 
-    // Switch — collect all interface names assigned to this node
     const portCount = switchPortCounter.get(node.id) ?? 0;
-    // portCount is the number actually used; ensure at least 2 entries exist
     const totalPorts = Math.max(portCount, 2);
     const interfaces = Array.from({ length: totalPorts }, (_, i) => ({
       name: `Gi0/${i}`,
@@ -132,7 +137,7 @@ export function convertFlowToTopology(
     };
   });
 
-  // ── Phase 3: build TopologyLinks using pre-assigned interface names ──────────
+  // ── Phase 3: build TopologyLinks ───────────────────────────────────────────
 
   const topologyLinks: TopologyLink[] = edges.map((edge) => {
     const ifaceA = ifaceAssignment.get(`${edge.source}:${edge.id}`)!;
@@ -147,5 +152,8 @@ export function convertFlowToTopology(
     };
   });
 
-  return { nodes: topologyNodes, links: topologyLinks };
+  return {
+    topology: { nodes: topologyNodes, links: topologyLinks },
+    ifaceMap: ifaceAssignment,
+  };
 }
