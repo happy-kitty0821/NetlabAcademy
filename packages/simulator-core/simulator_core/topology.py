@@ -65,6 +65,10 @@ class Interface:
     oper_state: InterfaceState = InterfaceState.UP
     ip_config: Optional[IPv4Interface] = None
     default_gateway: Optional[str] = None  # dotted-decimal IPv4 string
+    # VLAN support: access port VLAN assignment (default 1)
+    vlan: int = 1
+    # Port mode: "access" for end-host ports, "trunk" for switch-to-switch (future)
+    switchport_mode: str = "access"
     rx_frames: int = field(default=0, repr=False)
     tx_frames: int = field(default=0, repr=False)
 

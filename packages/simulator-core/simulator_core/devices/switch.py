@@ -1,16 +1,15 @@
 """
 simulator_core.devices.switch
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Ethernet switch device protocol logic.
+Ethernet switch with VLAN support.
 
 Responsibilities:
-- MAC address learning from arriving frames.
-- Known-unicast forwarding.
-- Unknown-unicast and broadcast flooding.
+- VLAN database (create, name, delete VLANs).
+- MAC address learning per VLAN.
+- Known-unicast forwarding within the same VLAN.
+- Unknown-unicast and broadcast flooding within the same VLAN.
 - Port-down drop detection on egress.
-
-The switch operates on the default VLAN (1) for all ports in this PoC.
-No 802.1Q trunking, no VLAN access/trunk mode, no STP.
+- Access port VLAN assignment (802.1Q trunking is a future feature).
 
 No host I/O, no socket imports.
 """
@@ -36,14 +35,25 @@ if TYPE_CHECKING:
 
 class Switch:
     """
-    Protocol logic for a simulated Ethernet switch.
+    Protocol logic for a simulated Ethernet switch with VLAN support.
 
-    One Switch instance exists per SWITCH-model Device in the Simulation.
+    VLAN database
+    -------------
+    ``vlans`` is a dict mapping VLAN ID (int) → VLAN name (str).
+    VLAN 1 ("default") always exists.
+
+    Access port VLAN assignment
+    ---------------------------
+    Each interface has a ``vlan`` field (default 1).  When a frame
+    arrives on an access port, its VLAN is determined by the interface's
+    VLAN assignment.  Forwarding and flooding only consider ports in the
+    same VLAN.
 
     MAC address table
     -----------------
-    Keyed by ``(mac_value: str, vlan: int)`` → interface_name.
-    All ports are on VLAN 1 in this PoC.
+    Keyed by ``(mac_value, vlan)`` → interface_name.  MACs are learned
+    per-VLAN so the same MAC can appear on different VLANs on different
+    ports.
     """
 
     def __init__(self, device: Device, simulation: "Simulation") -> None:
@@ -51,6 +61,8 @@ class Switch:
         self._sim = simulation
         # (mac_value, vlan) → interface_name
         self._mac_table: dict[tuple[str, int], str] = {}
+        # VLAN database: vlan_id → vlan_name
+        self._vlans: dict[int, str] = {1: "default"}
 
     # ------------------------------------------------------------------
     # Properties
@@ -65,6 +77,63 @@ class Switch:
         """Read-only view of the MAC address table."""
         return dict(self._mac_table)
 
+    @property
+    def vlans(self) -> dict[int, str]:
+        """Read-only view of the VLAN database."""
+        return dict(self._vlans)
+
+    # ------------------------------------------------------------------
+    # VLAN management (called by CLI)
+    # ------------------------------------------------------------------
+
+    def create_vlan(self, vlan_id: int, name: str = "") -> None:
+        """Create a VLAN.  Raises ValueError if VLAN ID is out of range."""
+        if not (1 <= vlan_id <= 4094):
+            raise ValueError(f"VLAN ID must be 1-4094, got {vlan_id}")
+        if vlan_id not in self._vlans:
+            self._vlans[vlan_id] = name or f"VLAN{vlan_id:04d}"
+
+    def name_vlan(self, vlan_id: int, name: str) -> None:
+        """Set the name of an existing VLAN."""
+        if vlan_id not in self._vlans:
+            raise ValueError(f"VLAN {vlan_id} does not exist")
+        self._vlans[vlan_id] = name
+
+    def delete_vlan(self, vlan_id: int) -> None:
+        """Delete a VLAN.  VLAN 1 cannot be deleted."""
+        if vlan_id == 1:
+            raise ValueError("Default VLAN 1 cannot be deleted")
+        if vlan_id not in self._vlans:
+            raise ValueError(f"VLAN {vlan_id} does not exist")
+        del self._vlans[vlan_id]
+        # Reset any ports assigned to this VLAN back to VLAN 1
+        for iface in self._device.interfaces.values():
+            if iface.vlan == vlan_id:
+                iface.vlan = 1
+
+    def set_port_vlan(self, iface_name: str, vlan_id: int) -> None:
+        """Assign an access port to a VLAN."""
+        if vlan_id not in self._vlans:
+            raise ValueError(f"VLAN {vlan_id} does not exist. Create it first.")
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        iface.vlan = vlan_id
+
+    def get_port_vlan(self, iface_name: str) -> int:
+        """Return the VLAN ID assigned to a port."""
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            return DEFAULT_VLAN
+        return iface.vlan
+
+    def ports_in_vlan(self, vlan_id: int) -> list[str]:
+        """Return list of interface names assigned to the given VLAN."""
+        return [
+            name for name, iface in self._device.interfaces.items()
+            if iface.vlan == vlan_id
+        ]
+
     # ------------------------------------------------------------------
     # FrameArrival handler
     # ------------------------------------------------------------------
@@ -74,37 +143,44 @@ class Switch:
         Process a frame arriving on *event.interface_name*.
 
         Steps:
-        1. Learn source MAC.
-        2. Forward to destination:
-           - Broadcast → flood all ports except ingress.
-           - Known unicast → send on the learned port (if not ingress).
-           - Unknown unicast → flood all ports except ingress.
+        1. Determine the VLAN from the ingress port's VLAN assignment.
+        2. Learn source MAC in that VLAN.
+        3. Forward within the same VLAN only:
+           - Broadcast → flood all ports in the same VLAN except ingress.
+           - Known unicast → forward on the learned port (if same VLAN).
+           - Unknown unicast → flood within the same VLAN.
         """
         frame = event.frame
         ingress_iface = event.interface_name
-        vlan = DEFAULT_VLAN
         arrive_time = event.time
 
-        # 1. Learn source MAC.
+        # Determine VLAN from the ingress port
+        vlan = self.get_port_vlan(ingress_iface)
+
+        # 1. Learn source MAC in this VLAN.
         self._learn(arrive_time, frame.src_mac.value, ingress_iface, vlan)
 
         # 2. Determine egress port(s).
         dst_mac = frame.dst_mac.value
 
         if frame.dst_mac.is_broadcast:
-            # Flood on all ports except ingress.
-            self._flood(arrive_time, frame, ingress_iface, vlan)
+            self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
         else:
             known_port = self._mac_table.get((dst_mac, vlan))
             if known_port is not None and known_port != ingress_iface:
-                # Known unicast — forward on the single learned port.
-                self._forward(arrive_time, frame, known_port)
+                # Known unicast — forward only if the destination port is
+                # in the same VLAN.
+                if self.get_port_vlan(known_port) == vlan:
+                    self._forward(arrive_time, frame, known_port)
+                else:
+                    # Destination MAC is on a different VLAN — drop.
+                    pass
             elif known_port == ingress_iface:
-                # Destination is on the same port as source — drop (no loop).
+                # Destination is on the same port — drop.
                 pass
             else:
-                # Unknown unicast — flood.
-                self._flood(arrive_time, frame, ingress_iface, vlan)
+                # Unknown unicast — flood within the same VLAN.
+                self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -129,7 +205,7 @@ class Switch:
         """Transmit *frame* on *egress_iface*, checking port state first."""
         iface = self._device.interfaces.get(egress_iface)
         if iface is None:
-            return  # interface not on this switch — should not happen
+            return
 
         if iface.admin_state == InterfaceState.DOWN:
             seq = self._sim.next_seq()
@@ -152,15 +228,18 @@ class Switch:
         )
         self._sim.schedule(tx)
 
-    def _flood(
+    def _flood_in_vlan(
         self,
         time: int,
         frame: EthernetFrame,
         ingress_iface: str,
         vlan: int,
     ) -> None:
-        """Transmit *frame* on every port except *ingress_iface*."""
-        for iface_name in self._device.interfaces:
+        """Transmit *frame* on every port in *vlan* except *ingress_iface*."""
+        for iface_name, iface in self._device.interfaces.items():
             if iface_name == ingress_iface:
+                continue
+            # Only flood to ports in the same VLAN
+            if iface.vlan != vlan:
                 continue
             self._forward(time, frame, iface_name)

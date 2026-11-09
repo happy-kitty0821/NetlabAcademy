@@ -80,6 +80,7 @@ class CLIMode(Enum):
     PRIV_EXEC     = auto()
     GLOBAL_CONFIG = auto()
     IFACE_CONFIG  = auto()
+    VLAN_CONFIG   = auto()
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,7 @@ class CLISession:
     simulation: "Simulation"
     mode: CLIMode = CLIMode.USER_EXEC
     current_iface: Optional[str] = None
+    current_vlan: Optional[int] = None  # VLAN ID when in VLAN_CONFIG
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -107,6 +109,7 @@ class CLISession:
             CLIMode.PRIV_EXEC:     "#",
             CLIMode.GLOBAL_CONFIG: "(config)#",
             CLIMode.IFACE_CONFIG:  "(config-if)#",
+            CLIMode.VLAN_CONFIG:   "(config-vlan)#",
         }
         return f"{hostname}{suffixes.get(self.mode, '>')}"
 
@@ -199,6 +202,8 @@ class CLISession:
             return self._global_tree()
         if self.mode == CLIMode.IFACE_CONFIG:
             return self._iface_tree()
+        if self.mode == CLIMode.VLAN_CONFIG:
+            return self._vlan_tree()
         return []
 
     def _user_tree(self) -> list[Cmd]:
@@ -266,8 +271,14 @@ class CLISession:
             Cmd("interface",  "Select an interface to configure",
                 args_hint="<interface-name>",
                 handler=lambda s, t: s._cmd_enter_iface(t)),
+            Cmd("vlan",       "Configure a VLAN",
+                args_hint="<vlan-id>",
+                handler=lambda s, t: s._cmd_enter_vlan(t)),
             Cmd("no",         "Negate a command or set its defaults",
                 children=[
+                    Cmd("vlan", "Delete a VLAN",
+                        args_hint="<vlan-id>",
+                        handler=lambda s, t: s._cmd_no_vlan(t)),
                     Cmd("hostname", "Reset hostname",
                         handler=lambda s, t: s._cmd_hostname(["hostname", "Router"])),
                 ]),
@@ -306,12 +317,31 @@ class CLISession:
                         handler=lambda s, t: s._cmd_no_shutdown(t)),
                     Cmd("description","Remove description",
                         handler=lambda s, t: s._cmd_no_description(t)),
+                    Cmd("switchport", "Reset switchport to default VLAN",
+                        handler=lambda s, t: s._cmd_no_switchport(t)),
                 ]),
             Cmd("shutdown",    "Shutdown the selected interface",
                 handler=lambda s, t: s._cmd_shutdown(t)),
             Cmd("description", "Interface specific description",
                 args_hint="<description-text>",
                 handler=lambda s, t: s._cmd_description(t)),
+            Cmd("switchport",  "Switch port configuration",
+                children=[
+                    Cmd("mode",   "Set interface mode",
+                        children=[
+                            Cmd("access", "Set access mode",
+                                handler=lambda s, t: s._cmd_switchport_mode_access(t)),
+                            Cmd("trunk",  "Set trunk mode (not yet supported)",
+                                handler=lambda s, t: "% Trunk mode is not yet supported."),
+                        ]),
+                    Cmd("access", "Set access VLAN",
+                        args_hint="vlan <vlan-id>",
+                        children=[
+                            Cmd("vlan", "Assign access VLAN",
+                                args_hint="<vlan-id>",
+                                handler=lambda s, t: s._cmd_switchport_access_vlan(t)),
+                        ]),
+                ]),
             Cmd("duplex",      "Configure duplex operation (no effect in sim)",
                 handler=lambda s, t: ""),
             Cmd("speed",       "Configure interface speed (no effect in sim)",
@@ -322,6 +352,25 @@ class CLISession:
             Cmd("exit",        "Exit from interface configuration mode",
                 handler=lambda s, t: s._cmd_end(t)),
             Cmd("end",         "End and return to privileged EXEC",
+                handler=lambda s, t: s._cmd_end(t)),
+        ]
+
+    def _vlan_tree(self) -> list[Cmd]:
+        return [
+            Cmd("name",    "Set the VLAN name",
+                args_hint="<vlan-name>",
+                handler=lambda s, t: s._cmd_vlan_name(t)),
+            Cmd("no",      "Negate a command",
+                children=[
+                    Cmd("name", "Reset VLAN name to default",
+                        handler=lambda s, t: s._cmd_no_vlan_name(t)),
+                ]),
+            Cmd("do",      "Run an EXEC command from config mode",
+                args_hint="<exec-command>",
+                handler=lambda s, t: s._cmd_do(t)),
+            Cmd("exit",    "Exit from VLAN configuration mode",
+                handler=lambda s, t: s._cmd_end(t)),
+            Cmd("end",     "End and return to privileged EXEC",
                 handler=lambda s, t: s._cmd_end(t)),
         ]
 
@@ -513,6 +562,9 @@ class CLISession:
         if self.mode == CLIMode.IFACE_CONFIG:
             self.mode = CLIMode.GLOBAL_CONFIG
             self.current_iface = None
+        elif self.mode == CLIMode.VLAN_CONFIG:
+            self.mode = CLIMode.GLOBAL_CONFIG
+            self.current_vlan = None
         elif self.mode == CLIMode.GLOBAL_CONFIG:
             self.mode = CLIMode.PRIV_EXEC
         elif self.mode == CLIMode.PRIV_EXEC:
@@ -637,6 +689,99 @@ class CLISession:
         iface = self._get_current_iface()
         if iface:
             iface._description = ""  # type: ignore[attr-defined]
+        return ""
+
+    # ── VLAN config commands ────────────────────────────────────────────────────
+
+    def _get_switch(self):
+        """Return the Switch object for this session, or None."""
+        try:
+            return self.simulation.get_switch(self.device_id)
+        except KeyError:
+            return None
+
+    def _cmd_enter_vlan(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[1])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[1]!r}"
+        if not (1 <= vlan_id <= 4094):
+            return f"% VLAN ID must be 1-4094, got {vlan_id}"
+        switch = self._get_switch()
+        if switch is None:
+            return "% VLAN configuration is only available on switch devices."
+        switch.create_vlan(vlan_id)
+        self.mode = CLIMode.VLAN_CONFIG
+        self.current_vlan = vlan_id
+        return ""
+
+    def _cmd_no_vlan(self, tokens: list[str]) -> str:
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[2])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[2]!r}"
+        switch = self._get_switch()
+        if switch is None:
+            return "% VLAN configuration is only available on switch devices."
+        try:
+            switch.delete_vlan(vlan_id)
+        except ValueError as exc:
+            return f"% {exc}"
+        return ""
+
+    def _cmd_vlan_name(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None or self.current_vlan is None:
+            return "% Not in VLAN configuration mode."
+        switch.name_vlan(self.current_vlan, " ".join(tokens[1:]))
+        return ""
+
+    def _cmd_no_vlan_name(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None or self.current_vlan is None:
+            return "% Not in VLAN configuration mode."
+        switch.name_vlan(self.current_vlan, f"VLAN{self.current_vlan:04d}")
+        return ""
+
+    # ── Switchport commands ───────────────────────────────────────────────────
+
+    def _cmd_switchport_mode_access(self, tokens: list[str]) -> str:
+        iface = self._get_current_iface()
+        if iface:
+            iface.switchport_mode = "access"
+        return ""
+
+    def _cmd_switchport_access_vlan(self, tokens: list[str]) -> str:
+        # tokens: ['switchport', 'access', 'vlan', '<id>']
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[3])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[3]!r}"
+        switch = self._get_switch()
+        if switch is None:
+            return "% switchport commands are only available on switch devices."
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        try:
+            switch.set_port_vlan(self.current_iface, vlan_id)
+        except ValueError as exc:
+            return f"% {exc}"
+        return ""
+
+    def _cmd_no_switchport(self, tokens: list[str]) -> str:
+        iface = self._get_current_iface()
+        if iface:
+            iface.vlan = 1
+            iface.switchport_mode = "access"
         return ""
 
     # ── Ping ──────────────────────────────────────────────────────────────────
@@ -897,14 +1042,19 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_vlan_brief(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show vlan is only available on switch devices."
+        vlans = switch.vlans
         lines = [
             "\nVLAN Name                             Status    Ports",
             "---- -------------------------------- --------- -------------------------------",
-            "1    default                          active    (all untagged ports)",
-            "",
-            "% VLAN configuration is not yet fully implemented.",
-            "  VLANs will be configurable in a future simulator update.",
         ]
+        for vlan_id in sorted(vlans.keys()):
+            name = vlans[vlan_id]
+            ports = switch.ports_in_vlan(vlan_id)
+            port_str = ", ".join(ports) if ports else ""
+            lines.append(f"{vlan_id:<4} {name:<32} active    {port_str}")
         return "\n".join(lines)
 
 

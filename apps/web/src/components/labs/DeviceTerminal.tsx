@@ -93,11 +93,12 @@ export function DeviceTerminal({
   // ── Write helpers ─────────────────────────────────────────────────────────
 
   const write = useCallback((text: string) => {
-    termRef.current?.write(text);
+    // xterm.js requires \r\n for line breaks; \n alone causes a staircase effect
+    termRef.current?.write(text.replace(/\n/g, "\r\n"));
   }, []);
 
   const writeLine = useCallback((text: string) => {
-    termRef.current?.write(text + "\r\n");
+    termRef.current?.write(text.replace(/\n/g, "\r\n") + "\r\n");
   }, []);
 
   const redrawLine = useCallback(() => {
