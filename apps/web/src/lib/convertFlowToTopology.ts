@@ -4,29 +4,31 @@
  * Converts a React Flow node/edge graph into a TopologyDocument suitable
  * for the simulation API.
  *
- * Rules:
- *  - Each Flow node → one TopologyNode (host or switch).
- *  - Hosts always get a single interface named "eth0".
- *  - Switches get one interface per connected edge, named "Gi0/0", "Gi0/1", …
- *  - mac_seed is set from the node's position in the array (deterministic).
- *  - Links are validated: both endpoints must exist.
- *  - Host IP is required; missing IP throws a ValidationError with the
- *    node's hostname so the UI can display it inline.
+ * Design — single pre-assignment pass:
+ *  1. Walk every edge and pre-assign interface names to both endpoints
+ *     before building either the node list or the link list.
+ *     This guarantees nodes and links are always consistent —
+ *     a switch interface declared in the node list is always the same
+ *     name used in the link list.
+ *  2. Hosts always use "eth0".
+ *  3. Switches use "Gi0/0", "Gi0/1", … assigned in edge-traversal order
+ *     PER NODE, tracked by a per-node counter.
+ *  4. Switches are given exactly as many interfaces as they have
+ *     connected edges (minimum 2 for visual clarity).
+ *  5. Validation: hosts require a CIDR IP, links must reference existing nodes,
+ *     hosts may not have more than one connection (not yet supported).
  */
 
-import type { Node, Edge } from "@xyflow/react";
-import type { TopologyDocument, TopologyNode, TopologyLink } from "./simulation-api";
+import type { Edge } from "@xyflow/react";
+import type {
+  TopologyDocument,
+  TopologyNode,
+  TopologyLink,
+} from "./simulation-api";
+import type { DeviceNode } from "./deviceTypes";
 
-// ── Node data shape ────────────────────────────────────────────────────────────
-
-export interface DeviceNodeData extends Record<string, unknown> {
-  hostname: string;
-  model: "host" | "switch";
-  ip?: string;          // CIDR string e.g. "192.168.1.1/24"  (hosts only)
-  gateway?: string;
-}
-
-export type DeviceNode = Node<DeviceNodeData>;
+export type { DeviceNode };
+export type { DeviceNodeData } from "./deviceTypes";
 
 // ── Validation error ──────────────────────────────────────────────────────────
 
@@ -49,29 +51,49 @@ export function convertFlowToTopology(
     );
   }
 
-  // Build a lookup: flow node id → edge count (for switch port naming)
-  const edgeCountByNode = new Map<string, number>();
-  for (const edge of edges) {
-    edgeCountByNode.set(
-      edge.source,
-      (edgeCountByNode.get(edge.source) ?? 0) + 1,
-    );
-    edgeCountByNode.set(
-      edge.target,
-      (edgeCountByNode.get(edge.target) ?? 0) + 1,
-    );
-  }
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-  // Build interface name allocator per switch node
+  // ── Phase 1: pre-assign interface names ────────────────────────────────────
+  // Key: `${nodeId}:${edgeId}` → interface name
+  // This is built by iterating edges ONCE, incrementing a per-node counter.
+  const ifaceAssignment = new Map<string, string>();
   const switchPortCounter = new Map<string, number>();
 
-  // Convert nodes
+  for (const edge of edges) {
+    if (!nodeMap.has(edge.source)) {
+      throw new TopologyValidationError(
+        `A link references device "${edge.source}" which does not exist in the topology.`,
+      );
+    }
+    if (!nodeMap.has(edge.target)) {
+      throw new TopologyValidationError(
+        `A link references device "${edge.target}" which does not exist in the topology.`,
+      );
+    }
+
+    function assignIface(nodeId: string): string {
+      const node = nodeMap.get(nodeId)!;
+      if (node.data.model === "host") {
+        return "eth0";
+      }
+      // Switch: allocate next Gi0/N
+      const current = switchPortCounter.get(nodeId) ?? 0;
+      switchPortCounter.set(nodeId, current + 1);
+      return `Gi0/${current}`;
+    }
+
+    ifaceAssignment.set(`${edge.source}:${edge.id}`, assignIface(edge.source));
+    ifaceAssignment.set(`${edge.target}:${edge.id}`, assignIface(edge.target));
+  }
+
+  // ── Phase 2: build TopologyNodes using pre-assigned interface names ─────────
+
   const topologyNodes: TopologyNode[] = nodes.map((node, idx) => {
     const data = node.data;
     const hostname = data.hostname || `${data.model}-${idx}`;
 
     if (data.model === "host") {
-      if (!data.ip || !data.ip.includes("/")) {
+      if (!data.ip || !data.ip.trim().includes("/")) {
         throw new TopologyValidationError(
           `PC "${hostname}" has no IP address configured. ` +
             `Double-click the device and set an IP (e.g. 192.168.1.1/24).`,
@@ -80,68 +102,48 @@ export function convertFlowToTopology(
 
       return {
         id: node.id,
-        model: "host",
+        model: "host" as const,
         hostname,
         interfaces: [
           {
             name: "eth0",
             mac_seed: idx * 10,
-            ip: data.ip,
-            gateway: data.gateway || undefined,
+            ip: data.ip.trim(),
+            gateway: data.gateway?.trim() || undefined,
           },
         ],
       };
     }
 
-    // Switch — allocate one interface per connected edge
-    const portCount = edgeCountByNode.get(node.id) ?? 0;
-    const interfaces = Array.from({ length: Math.max(portCount, 2) }, (_, i) => ({
+    // Switch — collect all interface names assigned to this node
+    const portCount = switchPortCounter.get(node.id) ?? 0;
+    // portCount is the number actually used; ensure at least 2 entries exist
+    const totalPorts = Math.max(portCount, 2);
+    const interfaces = Array.from({ length: totalPorts }, (_, i) => ({
       name: `Gi0/${i}`,
       mac_seed: idx * 10 + i,
     }));
 
     return {
       id: node.id,
-      model: "switch",
+      model: "switch" as const,
       hostname,
       interfaces,
     };
   });
 
-  // Convert edges → links
-  const nodeIds = new Set(nodes.map((n) => n.id));
+  // ── Phase 3: build TopologyLinks using pre-assigned interface names ──────────
 
-  const topologyLinks: TopologyLink[] = edges.map((edge, idx) => {
-    if (!nodeIds.has(edge.source)) {
-      throw new TopologyValidationError(
-        `Link ${idx + 1} references a device that no longer exists.`,
-      );
-    }
-    if (!nodeIds.has(edge.target)) {
-      throw new TopologyValidationError(
-        `Link ${idx + 1} references a device that no longer exists.`,
-      );
-    }
-
-    const srcNode = nodes.find((n) => n.id === edge.source)!;
-    const dstNode = nodes.find((n) => n.id === edge.target)!;
-
-    // Interface assignment:
-    // Hosts always use eth0.
-    // Switches get the next available Gi0/N port.
-    function getIface(node: DeviceNode): string {
-      if (node.data.model === "host") return "eth0";
-      const count = switchPortCounter.get(node.id) ?? 0;
-      switchPortCounter.set(node.id, count + 1);
-      return `Gi0/${count}`;
-    }
+  const topologyLinks: TopologyLink[] = edges.map((edge) => {
+    const ifaceA = ifaceAssignment.get(`${edge.source}:${edge.id}`)!;
+    const ifaceB = ifaceAssignment.get(`${edge.target}:${edge.id}`)!;
 
     return {
       id: edge.id,
       device_a: edge.source,
-      interface_a: getIface(srcNode),
+      interface_a: ifaceA,
       device_b: edge.target,
-      interface_b: getIface(dstNode),
+      interface_b: ifaceB,
     };
   });
 
