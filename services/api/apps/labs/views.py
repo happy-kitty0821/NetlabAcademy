@@ -180,16 +180,27 @@ class CLICommandSerializer(drf_serializers.Serializer):
     """Request body for a CLI command."""
     device_id = drf_serializers.CharField(max_length=64)
     command   = drf_serializers.CharField(max_length=1024, allow_blank=True)
+    action    = drf_serializers.ChoiceField(
+        choices=["execute", "complete", "help"],
+        default="execute",
+    )
 
 
 class SimulationCLIView(APIView):
     """
     POST /api/v1/labs/simulations/<id>/cli/
 
-    Execute a single CLI command on a device and return the formatted output.
+    Execute, tab-complete, or get help for a CLI command on a device.
 
-    Request:  { "device_id": "host-a", "command": "ping 192.168.1.2" }
-    Response: { "output": "...", "prompt": "PC-A>", "mode": "user_exec" }
+    Actions:
+      execute  — run the command, return output + prompt + mode
+      complete — tab-complete the partial input, return completed string
+      help     — return context-sensitive ? help for the partial input
+
+    Request:  { "device_id": "host-a", "command": "sh ip int b", "action": "complete" }
+    Response (execute):  { "output": "...", "prompt": "PC-A>", "mode": "user_exec" }
+    Response (complete): { "completed": "show ip interface brief", "prompt": "PC-A>" }
+    Response (help):      { "help": "...", "prompt": "PC-A>" }
     """
 
     permission_classes = [IsAuthenticated]
@@ -208,6 +219,7 @@ class SimulationCLIView(APIView):
 
         device_id = serializer.validated_data["device_id"]
         command   = serializer.validated_data["command"]
+        action    = serializer.validated_data["action"]
 
         try:
             cli_session = adapter.get_or_create_cli_session(session, device_id)
@@ -217,6 +229,22 @@ class SimulationCLIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        if action == "complete":
+            completed = cli_session.complete(command)
+            return Response({
+                "completed": completed,
+                "prompt": cli_session.prompt(),
+            })
+
+        if action == "help":
+            # The ? help is handled by execute() when the input ends with ?
+            help_text = cli_session.execute(command + "?") if not command.endswith("?") else cli_session.execute(command)
+            return Response({
+                "help": help_text,
+                "prompt": cli_session.prompt(),
+            })
+
+        # Default: execute
         output = cli_session.execute(command)
         return Response({
             "output": output,

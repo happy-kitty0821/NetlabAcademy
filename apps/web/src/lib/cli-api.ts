@@ -10,6 +10,16 @@ export interface CLIResponse {
   mode: string;
 }
 
+export interface CompleteResponse {
+  completed: string;
+  prompt: string;
+}
+
+export interface HelpResponse {
+  help: string;
+  prompt: string;
+}
+
 export async function sendCLICommand(
   sessionId: string,
   deviceId: string,
@@ -17,6 +27,28 @@ export async function sendCLICommand(
 ): Promise<CLIResponse> {
   return apiFetch<CLIResponse>(`/labs/simulations/${sessionId}/cli/`, {
     method: "POST",
-    body: JSON.stringify({ device_id: deviceId, command }),
+    body: JSON.stringify({ device_id: deviceId, command, action: "execute" }),
+  });
+}
+
+export async function completeCLICommand(
+  sessionId: string,
+  deviceId: string,
+  partial: string,
+): Promise<CompleteResponse> {
+  return apiFetch<CompleteResponse>(`/labs/simulations/${sessionId}/cli/`, {
+    method: "POST",
+    body: JSON.stringify({ device_id: deviceId, command: partial, action: "complete" }),
+  });
+}
+
+export async function getCLIHelp(
+  sessionId: string,
+  deviceId: string,
+  partial: string,
+): Promise<HelpResponse> {
+  return apiFetch<HelpResponse>(`/labs/simulations/${sessionId}/cli/`, {
+    method: "POST",
+    body: JSON.stringify({ device_id: deviceId, command: partial, action: "help" }),
   });
 }

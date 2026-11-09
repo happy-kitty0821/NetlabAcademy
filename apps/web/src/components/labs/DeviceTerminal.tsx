@@ -3,27 +3,28 @@
 /**
  * DeviceTerminal
  * ──────────────
- * xterm.js-based terminal that connects to the simulation CLI API.
- *
- * Renders a dark Cisco-style terminal with the device hostname as the
- * window title. The user types commands; each Enter dispatches to
- * POST /api/v1/labs/simulations/<id>/cli/ and the response is written
- * back to the terminal with the new prompt.
+ * xterm.js terminal connected to the simulation CLI API.
  *
  * Features:
+ *  - Tab completion (sends to API, replaces input if changed)
+ *  - ? inline help (sends to API, displays help text, keeps input)
  *  - Command history (Up/Down arrow keys)
- *  - Local echo of typed characters
- *  - Ctrl+C clears the current input line (does NOT kill the session)
+ *  - Ctrl+C clears the current input line
  *  - Cisco-style welcome banner on open
  *  - Coloured output: prompt in cyan, errors in red, success in green
+ *  - Backspace, arrow keys for line editing
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { TopologyNode } from "@/lib/simulation-api";
-import { sendCLICommand } from "@/lib/cli-api";
+import {
+  sendCLICommand,
+  completeCLICommand,
+  getCLIHelp,
+} from "@/lib/cli-api";
 import { X } from "lucide-react";
 
-// ── ANSI colour helpers ────────────────────────────────────────────────────────
+// ── ANSI colours ────────────────────────────────────────────────────────────────
 
 const C = {
   reset:   "\x1b[0m",
@@ -33,17 +34,19 @@ const C = {
   yellow:  "\x1b[33m",
   bold:    "\x1b[1m",
   gray:    "\x1b[90m",
+  dim:     "\x1b[2m",
 };
 
 function colorPrompt(prompt: string) {
-  return `${C.bold}${C.cyan}${prompt} ${C.reset}`;
+  return `${C.bold}${C.cyan}${prompt}${C.reset} `;
 }
 
 function colorOutput(text: string): string {
   if (!text) return text;
-  // Colour success/failure indicators
   const lines = text.split("\n").map((line) => {
-    if (line.trim().startsWith("%")) return `${C.red}${line}${C.reset}`;
+    if (line.trim().startsWith("% Ambiguous")) return `${C.yellow}${line}${C.reset}`;
+    if (line.trim().startsWith("% Invalid")) return `${C.red}${line}${C.reset}`;
+    if (line.trim().startsWith("% ")) return `${C.red}${line}${C.reset}`;
     if (line.includes("Success rate is 100")) return `${C.green}${line}${C.reset}`;
     if (line.includes("Success rate is 0")) return `${C.red}${line}${C.reset}`;
     if (line.match(/^[!.]+$/)) {
@@ -51,6 +54,10 @@ function colorOutput(text: string): string {
         .split("")
         .map((ch) => (ch === "!" ? `${C.green}!${C.reset}` : `${C.red}.${C.reset}`))
         .join("");
+    }
+    // Help lines: keyword + description
+    if (line.match(/^\s{2}\S/) && line.includes("  ")) {
+      // Don't colour general help lines — leave them default
     }
     return line;
   });
@@ -72,13 +79,16 @@ export function DeviceTerminal({
 }: DeviceTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
-  const fitRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
 
-  const [prompt, setPrompt] = useState(`${device.hostname ?? device.id}>`);
+  // Mutable state stored in refs so the key handler closure can access them
+  const promptRef = useRef(`${device.hostname ?? device.id}>`);
   const inputRef = useRef<string>("");
   const historyRef = useRef<string[]>([]);
   const histIdxRef = useRef<number>(-1);
   const loadingRef = useRef<boolean>(false);
+
+  // Also keep prompt in React state for the render side
+  const [, setPromptState] = useState(promptRef.current);
 
   // ── Write helpers ─────────────────────────────────────────────────────────
 
@@ -90,14 +100,13 @@ export function DeviceTerminal({
     termRef.current?.write(text + "\r\n");
   }, []);
 
-  const clearLine = useCallback(() => {
+  const redrawLine = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
-    // Move to beginning of line, clear to end
-    term.write("\r\x1b[K");
-    term.write(colorPrompt(prompt));
+    term.write("\r\x1b[K");  // CR + clear line
+    term.write(colorPrompt(promptRef.current));
     term.write(inputRef.current);
-  }, [prompt]);
+  }, []);
 
   // ── Submit command ────────────────────────────────────────────────────────
 
@@ -116,7 +125,7 @@ export function DeviceTerminal({
       inputRef.current = "";
 
       if (!trimmed) {
-        write(colorPrompt(prompt));
+        write(colorPrompt(promptRef.current));
         return;
       }
 
@@ -126,17 +135,65 @@ export function DeviceTerminal({
         if (res.output) {
           writeLine(colorOutput(res.output));
         }
-        setPrompt(res.prompt);
-        write(colorPrompt(res.prompt));
+        promptRef.current = res.prompt;
+        setPromptState(res.prompt);
+        write(colorPrompt(promptRef.current));
       } catch {
         writeLine(`${C.red}% Connection error — is the simulation server running?${C.reset}`);
-        write(colorPrompt(prompt));
+        write(colorPrompt(promptRef.current));
       } finally {
         loadingRef.current = false;
       }
     },
-    [device.id, prompt, sessionId, write, writeLine],
+    [device.id, sessionId, write, writeLine],
   );
+
+  // ── Tab completion ──────────────────────────────────────────────────────────
+
+  const doTabComplete = useCallback(async () => {
+    if (loadingRef.current) return;
+    const partial = inputRef.current;
+    if (!partial.trim()) return;
+
+    loadingRef.current = true;
+    try {
+      const res = await completeCLICommand(sessionId, device.id, partial);
+      if (res.completed && res.completed !== partial) {
+        // Replace the current input with the completed version
+        inputRef.current = res.completed + " ";
+        redrawLine();
+      }
+    } catch {
+      // Silent — tab on error does nothing (IOS behaviour)
+    } finally {
+      loadingRef.current = false;
+    }
+  }, [sessionId, device.id, redrawLine]);
+
+  // ── ? help ─────────────────────────────────────────────────────────────────
+
+  const doHelp = useCallback(async () => {
+    if (loadingRef.current) return;
+    const partial = inputRef.current;
+
+    loadingRef.current = true;
+    try {
+      const res = await getCLIHelp(sessionId, device.id, partial);
+      // Print the help text on a new line, then re-display the prompt + input
+      write("\r\n");
+      if (res.help) {
+        writeLine(colorOutput(res.help));
+      }
+      write(colorPrompt(promptRef.current));
+      write(inputRef.current);
+    } catch {
+      write("\r\n");
+      write(colorPrompt(promptRef.current));
+      write(inputRef.current);
+    } finally {
+      loadingRef.current = false;
+    }
+  }, [sessionId, device.id, write, writeLine]);
 
   // ── Initialise xterm.js ───────────────────────────────────────────────────
 
@@ -144,11 +201,10 @@ export function DeviceTerminal({
     if (!containerRef.current) return;
 
     let term: import("@xterm/xterm").Terminal;
-    let fit: import("@xterm/addon-fit").FitAddon;
 
     (async () => {
-      const { Terminal }  = await import("@xterm/xterm");
-      const { FitAddon }  = await import("@xterm/addon-fit");
+      const { Terminal } = await import("@xterm/xterm");
+      const { FitAddon } = await import("@xterm/addon-fit");
 
       term = new Terminal({
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
@@ -159,46 +215,49 @@ export function DeviceTerminal({
         theme: {
           background: "#010409",
           foreground: "#e6edf3",
-          cursor:     "#58a6ff",
+          cursor: "#58a6ff",
           selectionBackground: "#1d3558",
-          black:   "#010409",
+          black: "#010409",
           brightBlack: "#484f58",
-          cyan:    "#39c5cf",
+          cyan: "#39c5cf",
           brightCyan: "#58a6ff",
-          green:   "#3fb950",
+          green: "#3fb950",
           brightGreen: "#26a641",
-          red:     "#f85149",
-          brightRed:   "#da3633",
-          white:   "#e6edf3",
+          red: "#f85149",
+          brightRed: "#da3633",
+          white: "#e6edf3",
           brightWhite: "#ffffff",
+          yellow: "#d29922",
         },
         scrollback: 1000,
       });
 
-      fit = new FitAddon();
+      const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(containerRef.current!);
       fit.fit();
 
       termRef.current = term;
-      fitRef.current  = fit;
 
       // Welcome banner
       writeLine(`${C.bold}${C.cyan}NetLab Academy — Educational Network Simulator${C.reset}`);
       writeLine(`${C.gray}Connected to: ${device.hostname ?? device.id} (${device.model})${C.reset}`);
-      writeLine(`${C.gray}Type ? for available commands.${C.reset}`);
+      writeLine(`${C.gray}Type ? for available commands. Tab to complete.${C.reset}`);
       writeLine("");
-      write(colorPrompt(prompt));
+      write(colorPrompt(promptRef.current));
 
-      // Key handler
+      // ── Key handler ─────────────────────────────────────────────────────────
+
       term.onKey(({ key, domEvent }) => {
         const ev = domEvent;
 
+        // Enter — submit command
         if (ev.key === "Enter") {
           submitCommand(inputRef.current);
           return;
         }
 
+        // Backspace
         if (ev.key === "Backspace") {
           if (inputRef.current.length > 0) {
             inputRef.current = inputRef.current.slice(0, -1);
@@ -207,16 +266,34 @@ export function DeviceTerminal({
           return;
         }
 
+        // Tab — tab completion
+        if (ev.key === "Tab") {
+          ev.preventDefault();
+          doTabComplete();
+          return;
+        }
+
+        // ? — inline help (only when ? is the last character on the line)
+        if (key === "?" && !ev.ctrlKey && !ev.altKey) {
+          // Echo the ? then trigger help
+          inputRef.current += "?";
+          term.write("?");
+          doHelp();
+          return;
+        }
+
+        // Arrow Up — history previous
         if (ev.key === "ArrowUp") {
           const hist = historyRef.current;
           if (histIdxRef.current < hist.length - 1) {
             histIdxRef.current++;
             inputRef.current = hist[histIdxRef.current];
-            clearLine();
+            redrawLine();
           }
           return;
         }
 
+        // Arrow Down — history next
         if (ev.key === "ArrowDown") {
           if (histIdxRef.current > 0) {
             histIdxRef.current--;
@@ -225,7 +302,7 @@ export function DeviceTerminal({
             histIdxRef.current = -1;
             inputRef.current = "";
           }
-          clearLine();
+          redrawLine();
           return;
         }
 
@@ -233,18 +310,22 @@ export function DeviceTerminal({
         if (ev.ctrlKey && ev.key === "c") {
           inputRef.current = "";
           write("^C\r\n");
-          write(colorPrompt(prompt));
+          write(colorPrompt(promptRef.current));
           return;
         }
 
-        // Tab — minimal: just echo a tab char
-        if (ev.key === "Tab") {
-          ev.preventDefault();
+        // Ctrl+Z — same as 'end'
+        if (ev.ctrlKey && ev.key === "z") {
+          inputRef.current = "";
+          write("^Z\r\n");
+          submitCommand("end");
           return;
         }
 
         // Printable characters
         if (key && key.length === 1 && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+          // Remove trailing ? if present (user might have triggered help then continues typing)
+          inputRef.current = inputRef.current.replace(/\?$/, "");
           inputRef.current += key;
           term.write(key);
         }
@@ -262,11 +343,6 @@ export function DeviceTerminal({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Update prompt in write calls when it changes
-  useEffect(() => {
-    // Nothing — prompt state is read inside submitCommand via closure
-  }, [prompt]);
 
   return (
     <div
@@ -292,7 +368,7 @@ export function DeviceTerminal({
         </button>
       </div>
       {/* Terminal canvas */}
-      <div ref={containerRef} style={{ height: 320, padding: "4px 2px" }} />
+      <div ref={containerRef} style={{ height: 340, padding: "4px 2px" }} />
     </div>
   );
 }
