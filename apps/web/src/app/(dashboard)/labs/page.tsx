@@ -5,33 +5,64 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { TopologyCanvas } from "@/components/labs/TopologyCanvas";
+import { TopologyEditor } from "@/components/labs/TopologyEditor";
 import { PingPanel } from "@/components/labs/PingPanel";
 import { TraceViewer } from "@/components/labs/TraceViewer";
 import { PlaybackControls } from "@/components/labs/PlaybackControls";
 import {
   DEFAULT_TOPOLOGY,
-  TraceEvent,
+  type TopologyDocument,
+  type TraceEvent,
   createSimulation,
   resetSimulation,
 } from "@/lib/simulation-api";
-import { Play, RotateCcw, Wifi, Eye, EyeOff } from "lucide-react";
+import { Play, RotateCcw, Wifi, Eye, EyeOff, PenLine } from "lucide-react";
 
 export default function LabsPage() {
+  // ── Topology state ─────────────────────────────────────────────────────────
+  const [topology, setTopology] = useState<TopologyDocument>(DEFAULT_TOPOLOGY);
+  const [showEditor, setShowEditor] = useState(false);
+
+  // ── Simulation state ───────────────────────────────────────────────────────
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [trace, setTrace] = useState<TraceEvent[]>([]);
   const [creating, setCreating] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Playback
+  // ── Playback ───────────────────────────────────────────────────────────────
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [speed, setSpeed] = useState(700);
-
-  // Simulation overlay toggle
   const [showSimulation, setShowSimulation] = useState(true);
 
   const totalSteps = trace.length;
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  /** Called by the TopologyEditor when the user clicks "Use this topology" */
+  const handleApplyTopology = useCallback(
+    async (newTopo: TopologyDocument) => {
+      setTopology(newTopo);
+      setShowEditor(false);
+      setError(null);
+      setTrace([]);
+      setCurrentStep(0);
+      setIsPlaying(false);
+      // Auto-create a simulation session with the new topology
+      setCreating(true);
+      try {
+        const session = await createSimulation(newTopo, 42);
+        setSessionId(session.id);
+      } catch (err) {
+        const e = err as { error?: { message?: string } };
+        setError(e?.error?.message ?? "Failed to create simulation.");
+      } finally {
+        setCreating(false);
+      }
+    },
+    [],
+  );
 
   const handleTraceUpdate = useCallback((newTrace: TraceEvent[]) => {
     setTrace(newTrace);
@@ -65,7 +96,7 @@ export default function LabsPage() {
     setCurrentStep(0);
     setIsPlaying(false);
     try {
-      const session = await createSimulation(DEFAULT_TOPOLOGY, 42);
+      const session = await createSimulation(topology, 42);
       setSessionId(session.id);
     } catch (err) {
       const e = err as { error?: { message?: string } };
@@ -73,7 +104,7 @@ export default function LabsPage() {
     } finally {
       setCreating(false);
     }
-  }, []);
+  }, [topology]);
 
   const handleReset = useCallback(async () => {
     if (!sessionId) return;
@@ -92,9 +123,11 @@ export default function LabsPage() {
     }
   }, [sessionId]);
 
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      {/* Header */}
+      {/* Page header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-semibold text-[var(--text-primary)]">
@@ -105,7 +138,7 @@ export default function LabsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {sessionId && (
+          {sessionId && !showEditor && (
             <Badge variant="success">
               <Wifi size={10} className="mr-1" />
               Session active
@@ -120,106 +153,127 @@ export default function LabsPage() {
         </div>
       )}
 
-      {/* Topology + controls */}
+      {/* ── Topology editor panel ───────────────────────────────────────────── */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-              Topology
+              {showEditor ? "Build topology" : "Topology"}
             </h2>
             <div className="flex items-center gap-2">
-              {/* Simulation mode toggle */}
-              {trace.length > 0 && (
-                <Button
-                  size="sm"
-                  variant={showSimulation ? "primary" : "secondary"}
-                  onClick={() => setShowSimulation((v) => !v)}
-                >
-                  {showSimulation ? (
-                    <><EyeOff size={12} aria-hidden="true" /> Hide simulation</>
-                  ) : (
-                    <><Eye size={12} aria-hidden="true" /> Show simulation</>
+              {/* Editor toggle */}
+              <Button
+                size="sm"
+                variant={showEditor ? "primary" : "secondary"}
+                onClick={() => setShowEditor((v) => !v)}
+              >
+                <PenLine size={12} aria-hidden="true" />
+                {showEditor ? "Close editor" : "Build topology"}
+              </Button>
+
+              {/* Simulation controls (only when editor is closed) */}
+              {!showEditor && (
+                <>
+                  {trace.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant={showSimulation ? "primary" : "secondary"}
+                      onClick={() => setShowSimulation((v) => !v)}
+                    >
+                      {showSimulation ? (
+                        <><EyeOff size={12} aria-hidden="true" /> Hide sim</>
+                      ) : (
+                        <><Eye size={12} aria-hidden="true" /> Show sim</>
+                      )}
+                    </Button>
                   )}
-                </Button>
-              )}
-              {!sessionId ? (
-                <Button size="sm" onClick={handleCreateSession} loading={creating}>
-                  <Play size={12} aria-hidden="true" />
-                  Start simulation
-                </Button>
-              ) : (
-                <Button size="sm" variant="secondary" onClick={handleReset} loading={resetting}>
-                  <RotateCcw size={12} aria-hidden="true" />
-                  Reset
-                </Button>
+                  {!sessionId ? (
+                    <Button size="sm" onClick={handleCreateSession} loading={creating}>
+                      <Play size={12} aria-hidden="true" />
+                      Start simulation
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="secondary" onClick={handleReset} loading={resetting}>
+                      <RotateCcw size={12} aria-hidden="true" />
+                      Reset
+                    </Button>
+                  )}
+                </>
               )}
             </div>
           </div>
         </CardHeader>
-        <CardBody className="p-0">
-          <TopologyCanvas
-            topology={DEFAULT_TOPOLOGY}
-            trace={trace}
-            isPlaying={isPlaying}
-            currentStep={currentStep}
-            speed={speed}
-            onStepChange={handleStepChange}
-            totalSteps={totalSteps}
-            showSimulation={showSimulation}
-          />
-          {/* Playback controls */}
-          {trace.length > 0 && showSimulation && (
-            <div className="px-4 py-3 border-t border-[var(--surface-border)]">
-              <PlaybackControls
+        <CardBody className={showEditor ? "p-4" : "p-0"}>
+          {showEditor ? (
+            <TopologyEditor onApply={handleApplyTopology} />
+          ) : (
+            <>
+              <TopologyCanvas
+                topology={topology}
+                trace={trace}
                 isPlaying={isPlaying}
-                onPlay={handlePlay}
-                onPause={handlePause}
-                onStep={handleStep}
-                onReset={handleResetPlayback}
                 currentStep={currentStep}
-                totalSteps={totalSteps}
                 speed={speed}
-                onSpeedChange={setSpeed}
+                onStepChange={handleStepChange}
+                totalSteps={totalSteps}
+                showSimulation={showSimulation}
               />
-            </div>
+              {trace.length > 0 && showSimulation && (
+                <div className="px-4 py-3 border-t border-[var(--surface-border)]">
+                  <PlaybackControls
+                    isPlaying={isPlaying}
+                    onPlay={handlePlay}
+                    onPause={handlePause}
+                    onStep={handleStep}
+                    onReset={handleResetPlayback}
+                    currentStep={currentStep}
+                    totalSteps={totalSteps}
+                    speed={speed}
+                    onSpeedChange={setSpeed}
+                  />
+                </div>
+              )}
+            </>
           )}
         </CardBody>
       </Card>
 
-      {/* Ping + trace panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <Card>
-          <CardHeader>
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Ping</h2>
-          </CardHeader>
-          <CardBody>
-            {!sessionId ? (
-              <p className="text-sm text-[var(--text-secondary)] text-center py-8">
-                Start a simulation first.
-              </p>
-            ) : (
-              <PingPanel sessionId={sessionId} onTraceUpdate={handleTraceUpdate} />
-            )}
-          </CardBody>
-        </Card>
+      {/* ── Ping + trace ───────────────────────────────────────────────────── */}
+      {!showEditor && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <Card>
+            <CardHeader>
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Ping</h2>
+            </CardHeader>
+            <CardBody>
+              {!sessionId ? (
+                <p className="text-sm text-[var(--text-secondary)] text-center py-8">
+                  Start a simulation to run pings.
+                </p>
+              ) : (
+                <PingPanel sessionId={sessionId} onTraceUpdate={handleTraceUpdate} />
+              )}
+            </CardBody>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Event trace</h2>
-          </CardHeader>
-          <CardBody>
-            <TraceViewer
-              events={trace}
-              currentStep={showSimulation ? currentStep : undefined}
-            />
-          </CardBody>
-        </Card>
-      </div>
+          <Card>
+            <CardHeader>
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Event trace</h2>
+            </CardHeader>
+            <CardBody>
+              <TraceViewer
+                events={trace}
+                currentStep={showSimulation ? currentStep : undefined}
+              />
+            </CardBody>
+          </Card>
+        </div>
+      )}
 
-      {!sessionId && (
+      {!sessionId && !showEditor && (
         <p className="text-center text-xs text-[var(--text-muted)] py-2">
-          Default topology: PC-A — SW1 — PC-B. Click &quot;Start simulation&quot;,
-          then run a ping to watch packet flow.
+          Use the default topology or click &quot;Build topology&quot; to design your own.
+          Then click &quot;Start simulation&quot; and run a ping.
         </p>
       )}
     </div>
