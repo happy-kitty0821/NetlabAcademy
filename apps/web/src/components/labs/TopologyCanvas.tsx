@@ -1,266 +1,283 @@
 "use client";
 
 /**
- * TopologyCanvas — SVG-based animated network topology.
+ * TopologyCanvas — SVG topology with real-time animated PDU flow.
  *
- * Renders devices as positioned nodes with GNS3-style icons and draws
- * links between them.  When a trace is replayed, packets animate as
- * coloured dots moving along the links between devices.
- *
- * Layout: devices are placed at fixed coordinates for this PoC.  A
- * drag-and-drop layout engine will replace this in the topology-editor
- * spec.
+ * Key design decisions:
+ * - Packets move along the actual link line using requestAnimationFrame,
+ *   not CSS transitions (which snap instead of animate in React SVG).
+ * - Clicking a packet opens an inline PDU inspector panel.
+ * - Simulation mode can be toggled on/off via props.
+ * - Each device glows when it is the active node in the current step.
  */
 
-import { useEffect, useMemo, useRef } from "react";
-import { DeviceIcon } from "./icons";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { PcIconSVG, SwitchIconSVG } from "./icons";
 import { TopologyDocument, TraceEvent } from "@/lib/simulation-api";
 
-// ── Layout types ──────────────────────────────────────────────────────────────
+// ── Layout ────────────────────────────────────────────────────────────────────
 
-interface NodePosition {
+const W = 640;
+const H = 300;
+const ICON_SIZE = 52;
+
+interface NodePos {
   id: string;
   x: number;
   y: number;
   model: "host" | "switch";
   hostname: string;
+  interfaces: string[];
 }
 
-interface LinkPath {
+interface LinkLine {
   id: string;
-  from: NodePosition;
-  to: NodePosition;
-  fromInterface: string;
-  toInterface: string;
+  ax: number; ay: number;
+  bx: number; by: number;
+  fromIface: string;
+  toIface: string;
+  fromId: string;
+  toId: string;
 }
 
-interface ActivePacket {
-  id: number;
-  x: number;
-  y: number;
-  color: string;
-  label: string;
-}
+function buildLayout(topo: TopologyDocument) {
+  const hosts = topo.nodes.filter((n) => n.model === "host");
+  const switches = topo.nodes.filter((n) => n.model === "switch");
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+  const nodeMap = new Map<string, NodePos>();
 
-const NODE_Y = 130;
-const CANVAS_WIDTH = 560;
-const CANVAS_HEIGHT = 260;
-const PACKET_RADIUS = 6;
-
-// Packet colors by event type
-const PACKET_COLORS: Record<string, string> = {
-  ARPRequestSent:      "#d29922",
-  ARPReplySent:        "#d29922",
-  ARPCacheUpdated:      "#d4a72c",
-  MACTableLearned:      "#bf96ff",
-  ICMPEchoRequestSent:  "#3fb950",
-  ICMPEchoReplySent:    "#3fb950",
-  FrameTransmit:       "#58a6ff",
-  FrameArrival:        "#8b949e",
-  FrameDropped:        "#f85149",
-};
-
-const PACKET_LABELS: Record<string, string> = {
-  ARPRequestSent:      "ARP Request",
-  ARPReplySent:        "ARP Reply",
-  ICMPEchoRequestSent: "ICMP Echo Req",
-  ICMPEchoReplySent:   "ICMP Echo Rep",
-  FrameDropped:        "Dropped",
-};
-
-// ── Build layout from topology ────────────────────────────────────────────────
-
-function buildLayout(topology: TopologyDocument): {
-  nodes: NodePosition[];
-  links: LinkPath[];
-  nodeMap: Map<string, NodePosition>;
-} {
-  const hosts = topology.nodes.filter((n) => n.model === "host");
-  const switches = topology.nodes.filter((n) => n.model === "switch");
-
-  const nodes: NodePosition[] = [];
-  // Place hosts: first on left, second on right
-  hosts.forEach((host, i) => {
-    const x = i === 0 ? 60 : CANVAS_WIDTH - 60;
-    nodes.push({
-      id: host.id,
+  // Hosts: spread across top/bottom quadrants.  For 2 hosts: left and right.
+  hosts.forEach((h, i) => {
+    const x = hosts.length === 1 ? W / 2 : 90 + (i * (W - 180)) / Math.max(hosts.length - 1, 1);
+    nodeMap.set(h.id, {
+      id: h.id,
       x,
-      y: NODE_Y,
-      model: "host" as const,
-      hostname: host.hostname || host.id,
+      y: H / 2,
+      model: "host",
+      hostname: h.hostname ?? h.id,
+      interfaces: h.interfaces.map((ifc) => ifc.name),
     });
   });
-  // Place switches in the center
+
+  // Switches: center, spread vertically if multiple
   switches.forEach((sw, i) => {
-    const offset = switches.length > 1 ? (i - (switches.length - 1) / 2) * 120 : 0;
-    nodes.push({
+    const offset = switches.length > 1 ? (i - (switches.length - 1) / 2) * 110 : 0;
+    nodeMap.set(sw.id, {
       id: sw.id,
-      x: CANVAS_WIDTH / 2 + offset,
-      y: NODE_Y,
-      model: "switch" as const,
-      hostname: sw.hostname || sw.id,
+      x: W / 2 + offset,
+      y: H / 2,
+      model: "switch",
+      hostname: sw.hostname ?? sw.id,
+      interfaces: sw.interfaces.map((ifc) => ifc.name),
     });
   });
 
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
-  // Build link paths
-  const links: LinkPath[] = topology.links.map((link) => {
-    const from = nodeMap.get(link.device_a)!;
-    const to = nodeMap.get(link.device_b)!;
+  // Links
+  const links: LinkLine[] = topo.links.map((l) => {
+    const a = nodeMap.get(l.device_a)!;
+    const b = nodeMap.get(l.device_b)!;
     return {
-      id: link.id,
-      from,
-      to,
-      fromInterface: link.interface_a,
-      toInterface: link.interface_b,
+      id: l.id,
+      ax: a.x, ay: a.y,
+      bx: b.x, by: b.y,
+      fromIface: l.interface_a,
+      toIface: l.interface_b,
+      fromId: l.device_a,
+      toId: l.device_b,
     };
   });
 
-  return { nodes, links, nodeMap };
+  return { nodeMap, links };
 }
 
-// ── Parse trace into animation steps ──────────────────────────────────────────
+// ── Packet types ──────────────────────────────────────────────────────────────
+
+const PDU_COLORS: Record<string, string> = {
+  ARPRequestSent:      "#d4a017",
+  ARPReplySent:        "#d4a017",
+  ICMPEchoRequestSent: "#3fb950",
+  ICMPEchoReplySent:   "#26a641",
+  FrameDropped:        "#f85149",
+  FrameTransmit:       "#58a6ff",
+  MACTableLearned:     "#bf96ff",
+  ARPCacheUpdated:     "#d4a017",
+};
+
+const PDU_SHORT: Record<string, string> = {
+  ARPRequestSent:      "ARP?",
+  ARPReplySent:        "ARP!",
+  ICMPEchoRequestSent: "ICMP",
+  ICMPEchoReplySent:   "ICMP",
+  FrameDropped:        "DROP",
+  FrameTransmit:       "ETH",
+  MACTableLearned:     "MAC",
+  ARPCacheUpdated:     "ARP",
+};
+
+// ── Animation step ────────────────────────────────────────────────────────────
 
 interface AnimStep {
-  eventIndex: number;
   event: TraceEvent;
-  // Packet animation: source and destination coordinates
-  fromX?: number;
-  fromY?: number;
-  toX?: number;
-  toY?: number;
+  fromX: number; fromY: number;
+  toX: number; toY: number;
   color: string;
   label: string;
-  // Device to highlight
-  highlightDevice?: string;
-  // Whether this step moves a packet (vs just highlighting)
-  isPacketMove: boolean;
+  highlight: string | undefined;
+  isMove: boolean;  // true = animate packet along the link
 }
 
-function parseTraceToSteps(
+function buildSteps(
   trace: TraceEvent[],
-  nodeMap: Map<string, NodePosition>,
-  links: LinkPath[]
+  nodeMap: Map<string, NodePos>,
+  links: LinkLine[],
 ): AnimStep[] {
-  const steps: AnimStep[] = [];
-
-  // Build a lookup: (deviceId, interfaceName) → peer position
-  const peerLookup = new Map<string, { x: number; y: number; deviceId: string } >();
-  for (const link of links) {
-    peerLookup.set(`${link.from.id}:${link.fromInterface}`, {
-      x: link.to.x,
-      y: link.to.y,
-      deviceId: link.to.id,
-    });
-    peerLookup.set(`${link.to.id}:${link.toInterface}`, {
-      x: link.from.x,
-      y: link.from.y,
-      deviceId: link.from.id,
-    });
+  // peer lookup: "deviceId:iface" → { x, y, id }
+  const peer = new Map<string, { x: number; y: number; id: string }>();
+  for (const l of links) {
+    peer.set(`${l.fromId}:${l.fromIface}`, { x: l.bx, y: l.by, id: l.toId });
+    peer.set(`${l.toId}:${l.toIface}`, { x: l.ax, y: l.ay, id: l.fromId });
   }
 
-  // Track the current packet type (set by ARP*/ICMP* events, used by FrameTransmit)
-  let currentPacketType = "FrameTransmit";
-  let currentLabel = "Frame";
+  const steps: AnimStep[] = [];
+  let curType = "FrameTransmit";
+  let curLabel = "ETH";
 
-  for (let i = 0; i < trace.length; i++) {
-    const evt = trace[i];
-    const color = PACKET_COLORS[evt.type] || "#58a6ff";
-    const label = PACKET_LABELS[evt.type] || evt.type;
+  for (const evt of trace) {
+    const color = PDU_COLORS[evt.type] ?? "#58a6ff";
+    const label = PDU_SHORT[evt.type] ?? evt.type.replace("Sent", "").replace("Updated", "");
 
     if (evt.type.startsWith("ARP") || evt.type.startsWith("ICMP")) {
-      // Origin event — sets the packet type for subsequent FrameTransmit
-      currentPacketType = evt.type;
-      currentLabel = label;
+      curType = evt.type;
+      curLabel = PDU_SHORT[evt.type] ?? label;
+      const deviceId = evt.device_id ?? evt.src_device_id;
+      const node = deviceId ? nodeMap.get(deviceId) : undefined;
       steps.push({
-        eventIndex: i,
         event: evt,
+        fromX: node?.x ?? W / 2,
+        fromY: node?.y ?? H / 2,
+        toX: node?.x ?? W / 2,
+        toY: node?.y ?? H / 2,
         color,
-        label,
-        highlightDevice: evt.device_id || evt.src_device_id,
-        isPacketMove: false,
+        label: curLabel,
+        highlight: deviceId,
+        isMove: false,
       });
+
     } else if (evt.type === "FrameTransmit") {
-      // Packet leaving a device — animate from source to peer
-      const deviceId = evt.device_id!;
-      const iface = evt.interface_name || "";
-      const sourceNode = nodeMap.get(deviceId);
-      const peer = peerLookup.get(`${deviceId}:${iface}`);
-      if (sourceNode && peer) {
-        steps.push({
-          eventIndex: i,
-          event: evt,
-          fromX: sourceNode.x,
-          fromY: sourceNode.y,
-          toX: peer.x,
-          toY: peer.y,
-          color: PACKET_COLORS[currentPacketType] || color,
-          label: currentLabel,
-          highlightDevice: deviceId,
-          isPacketMove: true,
-        });
-      } else {
-        steps.push({
-          eventIndex: i,
-          event: evt,
-          color,
-          label,
-          highlightDevice: deviceId,
-          isPacketMove: false,
-        });
-      }
-    } else if (evt.type === "FrameArrival") {
-      // Packet arriving at a device
-      const deviceId = evt.device_id!;
+      const deviceId = evt.device_id ?? "";
+      const iface = evt.interface_name ?? "";
+      const src = nodeMap.get(deviceId);
+      const dst = peer.get(`${deviceId}:${iface}`);
+
+      steps.push({
+        event: evt,
+        fromX: src?.x ?? W / 2,
+        fromY: src?.y ?? H / 2,
+        toX: dst?.x ?? W / 2,
+        toY: dst?.y ?? H / 2,
+        color: PDU_COLORS[curType] ?? "#58a6ff",
+        label: curLabel,
+        highlight: deviceId,
+        isMove: !!(src && dst),
+      });
+
+    } else if (evt.type === "FrameDropped") {
+      const deviceId = evt.device_id ?? "";
       const node = nodeMap.get(deviceId);
       steps.push({
-        eventIndex: i,
         event: evt,
-        toX: node?.x,
-        toY: node?.y,
-        color: PACKET_COLORS[currentPacketType] || color,
-        label: currentLabel,
-        highlightDevice: deviceId,
-        isPacketMove: false,
-      });
-    } else if (evt.type === "FrameDropped") {
-      steps.push({
-        eventIndex: i,
-        event: evt,
+        fromX: node?.x ?? W / 2,
+        fromY: node?.y ?? H / 2,
+        toX: node?.x ?? W / 2,
+        toY: node?.y ?? H / 2,
         color: "#f85149",
-        label: "Dropped",
-        highlightDevice: evt.device_id,
-        isPacketMove: false,
+        label: "DROP",
+        highlight: deviceId,
+        isMove: false,
       });
+
     } else {
-      // MACTableLearned, ARPCacheUpdated, etc.
+      const deviceId = evt.switch_id ?? evt.device_id;
+      const node = deviceId ? nodeMap.get(deviceId) : undefined;
       steps.push({
-        eventIndex: i,
         event: evt,
+        fromX: node?.x ?? W / 2,
+        fromY: node?.y ?? H / 2,
+        toX: node?.x ?? W / 2,
+        toY: node?.y ?? H / 2,
         color,
         label,
-        highlightDevice: evt.switch_id || evt.device_id,
-        isPacketMove: false,
+        highlight: deviceId,
+        isMove: false,
       });
     }
   }
-
   return steps;
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ── PDU Inspector panel ────────────────────────────────────────────────────────
+
+function PDUInspector({ step, onClose }: { step: AnimStep; onClose: () => void }) {
+  const evt = step.event;
+  const rows: [string, string][] = [
+    ["Event type", evt.type],
+    ["Logical time", String(evt.time)],
+    ["Sequence", String(evt.seq)],
+  ];
+  if (evt.device_id)      rows.push(["Device", evt.device_id]);
+  if (evt.interface_name) rows.push(["Interface", evt.interface_name]);
+  if (evt.operation)      rows.push(["ARP op", evt.operation]);
+  if (evt.sender_ip)      rows.push(["Sender IP", evt.sender_ip]);
+  if (evt.target_ip)      rows.push(["Target IP", evt.target_ip]);
+  if (evt.icmp_type)      rows.push(["ICMP type", evt.icmp_type]);
+  if (evt.sequence !== undefined) rows.push(["Seq#", String(evt.sequence)]);
+  if (evt.mac_address)    rows.push(["MAC", evt.mac_address]);
+  if (evt.ip_address)     rows.push(["IP", evt.ip_address]);
+  if (evt.vlan !== undefined) rows.push(["VLAN", String(evt.vlan)]);
+  if (evt.reason)         rows.push(["Drop reason", evt.reason]);
+
+  return (
+    <div className="absolute right-0 top-0 z-20 w-64 rounded-lg border border-[#30363d] bg-[#161b22] shadow-xl text-xs font-mono">
+      {/* Header */}
+      <div
+        className="flex items-center justify-between px-3 py-2 border-b border-[#30363d]"
+        style={{ borderLeftColor: step.color, borderLeftWidth: 3 }}
+      >
+        <span className="font-semibold" style={{ color: step.color }}>
+          PDU — {step.label}
+        </span>
+        <button
+          onClick={onClose}
+          className="text-[#8b949e] hover:text-[#e6edf3] ml-2"
+          aria-label="Close PDU inspector"
+        >
+          ✕
+        </button>
+      </div>
+      {/* Fields */}
+      <div className="p-3 space-y-1.5 max-h-72 overflow-y-auto">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex gap-2">
+            <span className="text-[#8b949e] shrink-0 w-24">{k}</span>
+            <span className="text-[#e6edf3] break-all">{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 interface TopologyCanvasProps {
   topology: TopologyDocument;
   trace: TraceEvent[];
   isPlaying: boolean;
   currentStep: number;
-  speed: number; // ms per step
+  speed: number;
   onStepChange: (step: number) => void;
   totalSteps: number;
+  showSimulation: boolean;
 }
 
 export function TopologyCanvas({
@@ -270,226 +287,271 @@ export function TopologyCanvas({
   currentStep,
   speed,
   onStepChange,
+  showSimulation,
 }: TopologyCanvasProps) {
-  const { nodes, links, nodeMap } = useMemo(() => buildLayout(topology), [topology]);
-  const steps = useMemo(() => parseTraceToSteps(trace, nodeMap, links), [trace, nodeMap, links]);
+  const { nodeMap, links } = useMemo(() => buildLayout(topology), [topology]);
+  const steps = useMemo(
+    () => buildSteps(trace, nodeMap, links),
+    [trace, nodeMap, links],
+  );
 
-  // Auto-advance when playing
+  // ── Packet position interpolated via RAF ──────────────────────────────────
+
+  const [pktPos, setPktPos] = useState<{ x: number; y: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const startRef = useRef<number | null>(null);
+
+  const animatePacket = useCallback(
+    (step: AnimStep, duration: number) => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      startRef.current = null;
+
+      const { fromX, fromY, toX, toY } = step;
+      if (!step.isMove || (fromX === toX && fromY === toY)) {
+        setPktPos({ x: toX, y: toY });
+        return;
+      }
+
+      function tick(ts: number) {
+        if (startRef.current === null) startRef.current = ts;
+        const elapsed = ts - startRef.current;
+        const t = Math.min(elapsed / duration, 1);
+        // Ease in-out
+        const ease = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+        setPktPos({ x: fromX + (toX - fromX) * ease, y: fromY + (toY - fromY) * ease });
+        if (t < 1) {
+          rafRef.current = requestAnimationFrame(tick);
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    },
+    [],
+  );
+
+  // ── Auto-advance ──────────────────────────────────────────────────────────
+
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (isPlaying && currentStep < steps.length) {
-      timerRef.current = setTimeout(() => {
-        onStepChange(currentStep + 1);
-      }, speed);
-    }
+    if (!isPlaying || !showSimulation) return;
+    if (currentStep >= steps.length) return;
+
+    const step = steps[currentStep];
+    if (step) animatePacket(step, speed * 0.7);
+
+    timerRef.current = setTimeout(() => {
+      onStepChange(currentStep + 1);
+    }, speed);
+
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [isPlaying, currentStep, speed, steps.length, onStepChange]);
+  }, [isPlaying, currentStep, speed, steps, animatePacket, onStepChange, showSimulation]);
 
-  // Current active packet (if the current step is a packet move)
+  // Animate immediately on manual step too
+  useEffect(() => {
+    if (!showSimulation) return;
+    const step = steps[currentStep];
+    if (step) animatePacket(step, speed * 0.7);
+  }, [currentStep, steps, animatePacket, speed, showSimulation]);
+
+  // Cleanup RAF on unmount
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  // ── PDU inspector ─────────────────────────────────────────────────────────
+
+  const [inspectedStep, setInspectedStep] = useState<AnimStep | null>(null);
+
   const currentAnimStep = steps[currentStep];
-  const activePacket: ActivePacket | null = useMemo(() => {
-    if (!currentAnimStep || !currentAnimStep.isPacketMove) return null;
-    return {
-      id: currentStep,
-      x: currentAnimStep.toX || 0,
-      y: currentAnimStep.toY || 0,
-      color: currentAnimStep.color,
-      label: currentAnimStep.label,
-    };
-  }, [currentAnimStep, currentStep]);
+  const highlightedDevice = currentAnimStep?.highlight;
 
-  const highlightedDevice = currentAnimStep?.highlightDevice;
+  const nodes = useMemo(() => Array.from(nodeMap.values()), [nodeMap]);
 
   return (
-    <div className="relative w-full">
+    <div className="relative rounded-lg overflow-hidden border border-[#30363d] bg-[#0d1117]">
+
+      {/* Simulation mode badge */}
+      {showSimulation && trace.length > 0 && (
+        <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#1c2128] border border-[#30363d] text-[10px] font-mono text-[#3fb950]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#3fb950] animate-pulse" />
+          SIM {currentStep}/{steps.length}
+        </div>
+      )}
+
       <svg
-        viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
-        className="w-full h-auto"
-        style={{ maxHeight: "320px" }}
-        role="img"
-        aria-label="Network topology with packet animation"
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        style={{ minHeight: 260, maxHeight: 340 }}
+        aria-label="Network topology"
       >
-        {/* Background grid */}
+        {/* Dot grid */}
         <defs>
-          <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-            <path d="M 20 0 L 0 0 0 20" fill="none" stroke="var(--canvas-grid)" strokeWidth="0.5" opacity="0.3" />
+          <pattern id="dots" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="1" fill="#21262d" />
           </pattern>
         </defs>
-        <rect width={CANVAS_WIDTH} height={CANVAS_HEIGHT} fill="url(#grid)" />
+        <rect width={W} height={H} fill="url(#dots)" />
 
-        {/* Links */}
-        {links.map((link) => (
-          <g key={link.id}>
-            <line
-              x1={link.from.x}
-              y1={link.from.y}
-              x2={link.to.x}
-              y2={link.to.y}
-              stroke="var(--canvas-link)"
-              strokeWidth="2"
-              strokeDasharray="4 3"
-            />
-            {/* Interface labels at link endpoints */}
-            <text
-              x={link.from.x + (link.to.x - link.from.x) * 0.15}
-              y={link.from.y - 8}
-              fill="var(--text-muted)"
-              fontSize="8"
-              fontFamily="monospace"
-              textAnchor="middle"
-            >
-              {link.fromInterface}
-            </text>
-            <text
-              x={link.to.x + (link.from.x - link.to.x) * 0.15}
-              y={link.to.y - 8}
-              fill="var(--text-muted)"
-              fontSize="8"
-              fontFamily="monospace"
-              textAnchor="middle"
-            >
-              {link.toInterface}
-            </text>
-          </g>
-        ))}
+        {/* ── Links ── */}
+        {links.map((l) => {
+          const isActive = showSimulation && (
+            (currentAnimStep?.highlight === l.fromId || currentAnimStep?.highlight === l.toId) &&
+            currentAnimStep?.isMove
+          );
+          return (
+            <g key={l.id}>
+              {/* Shadow line for depth */}
+              <line x1={l.ax} y1={l.ay} x2={l.bx} y2={l.by}
+                stroke="#0d1117" strokeWidth="5" />
+              {/* Main cable */}
+              <line x1={l.ax} y1={l.ay} x2={l.bx} y2={l.by}
+                stroke={isActive ? "#58a6ff" : "#30363d"}
+                strokeWidth="2.5"
+                style={{ transition: "stroke 0.2s" }}
+              />
+              {/* Interface labels */}
+              <text
+                x={l.ax + (l.bx - l.ax) * 0.18}
+                y={l.ay + (l.by - l.ay) * 0.18 - 7}
+                fill="#6e7681"
+                fontSize="8"
+                fontFamily="ui-monospace,monospace"
+                textAnchor="middle"
+              >
+                {l.fromIface}
+              </text>
+              <text
+                x={l.bx + (l.ax - l.bx) * 0.18}
+                y={l.by + (l.ay - l.by) * 0.18 - 7}
+                fill="#6e7681"
+                fontSize="8"
+                fontFamily="ui-monospace,monospace"
+                textAnchor="middle"
+              >
+                {l.toIface}
+              </text>
+            </g>
+          );
+        })}
 
-        {/* Nodes */}
-        {nodes.map((node) => (
+        {/* ── Device nodes ── */}
+        {nodes.map((node) => {
+          const isHighlighted = showSimulation && highlightedDevice === node.id;
+          const Icon = node.model === "switch" ? SwitchIconSVG
+            : node.model === "host" ? PcIconSVG
+            : PcIconSVG;
+
+          return (
+            <g key={node.id}>
+              {/* Glow ring when active */}
+              {isHighlighted && (
+                <circle cx={node.x} cy={node.y} r={ICON_SIZE / 2 + 10}
+                  fill="none" stroke="#58a6ff" strokeWidth="1.5" opacity="0.35">
+                  <animate attributeName="r"
+                    values={`${ICON_SIZE / 2 + 8};${ICON_SIZE / 2 + 14};${ICON_SIZE / 2 + 8}`}
+                    dur="0.8s" repeatCount="indefinite" />
+                  <animate attributeName="opacity"
+                    values="0.35;0.15;0.35" dur="0.8s" repeatCount="indefinite" />
+                </circle>
+              )}
+              {/* Device backing circle */}
+              <circle cx={node.x} cy={node.y} r={ICON_SIZE / 2 + 4}
+                fill="#161b22"
+                stroke={isHighlighted ? "#58a6ff" : "#30363d"}
+                strokeWidth={isHighlighted ? 2 : 1}
+                style={{ transition: "stroke 0.2s, stroke-width 0.2s" }}
+              />
+              {/* Icon (native SVG, no foreignObject) */}
+              <Icon x={node.x} y={node.y} size={ICON_SIZE} active={isHighlighted} />
+              {/* Hostname */}
+              <text x={node.x} y={node.y + ICON_SIZE / 2 + 16}
+                fill="#e6edf3" fontSize="11"
+                fontFamily="ui-monospace,monospace"
+                fontWeight="bold" textAnchor="middle">
+                {node.hostname}
+              </text>
+              {/* IP address if available */}
+              {topology.nodes.find((n) => n.id === node.id)?.interfaces[0]?.ip && (
+                <text x={node.x} y={node.y + ICON_SIZE / 2 + 28}
+                  fill="#58a6ff" fontSize="9"
+                  fontFamily="ui-monospace,monospace"
+                  textAnchor="middle">
+                  {topology.nodes.find((n) => n.id === node.id)!.interfaces[0].ip}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {/* ── Animated PDU ── */}
+        {showSimulation && pktPos && currentAnimStep && (
           <g
-            key={node.id}
-            transform={`translate(${node.x - 24}, ${node.y - 24})`}
-            style={{
-              filter: highlightedDevice === node.id
-                ? "drop-shadow(0 0 6px var(--accent-primary))"
-                : "none",
-              transition: "filter 0.2s ease",
-            }}
+            style={{ cursor: "pointer" }}
+            onClick={() => setInspectedStep(
+              inspectedStep?.event === currentAnimStep.event ? null : currentAnimStep
+            )}
           >
-            {/* Icon background circle */}
-            <circle
-              cx="24"
-              cy="24"
-              r="26"
-              fill="var(--surface-raised)"
-              stroke={highlightedDevice === node.id ? "var(--accent-primary)" : "var(--surface-border)"}
-              strokeWidth={highlightedDevice === node.id ? "2" : "1"}
-              style={{ transition: "stroke 0.2s ease, stroke-width 0.2s ease" }}
-            />
-            {/* Icon */}
-            <foreignObject x="0" y="0" width="48" height="48">
-              <DeviceIcon model={node.model} size={48} />
-            </foreignObject>
-            {/* Hostname label below */}
-            <text
-              x="24"
-              y="60"
-              fill="var(--text-primary)"
-              fontSize="10"
-              fontFamily="var(--font-sans)"
-              fontWeight="600"
-              textAnchor="middle"
-            >
-              {node.hostname}
+            {/* Outer glow */}
+            <circle cx={pktPos.x} cy={pktPos.y} r={14}
+              fill={currentAnimStep.color}
+              opacity="0.15" />
+            {/* Body */}
+            <circle cx={pktPos.x} cy={pktPos.y} r={9}
+              fill={currentAnimStep.color}
+              stroke="#0d1117"
+              strokeWidth="1.5" />
+            {/* Label inside the packet dot */}
+            <text x={pktPos.x} y={pktPos.y + 3}
+              fill="#0d1117"
+              fontSize="6"
+              fontFamily="ui-monospace,monospace"
+              fontWeight="bold"
+              textAnchor="middle">
+              {currentAnimStep.label}
             </text>
-            {/* Device ID (smaller, muted) */}
-            <text
-              x="24"
-              y="72"
-              fill="var(--text-muted)"
-              fontSize="8"
-              fontFamily="monospace"
-              textAnchor="middle"
-            >
-              {node.id}
-            </text>
-          </g>
-        ))}
-
-        {/* Active packet animation */}
-        {activePacket && (
-          <g key={activePacket.id}>
-            {/* Packet dot */}
-            <circle
-              cx={activePacket.x}
-              cy={activePacket.y}
-              r={PACKET_RADIUS}
-              fill={activePacket.color}
-              style={{
-                transition: `cx ${speed * 0.8}ms ease-in-out, cy ${speed * 0.8}ms ease-in-out`,
-              }}
-            >
-              <animate attributeName="r" values="6;8;6" dur="0.5s" repeatCount="indefinite" />
-            </circle>
-            {/* Packet glow */}
-            <circle
-              cx={activePacket.x}
-              cy={activePacket.y}
-              r={PACKET_RADIUS + 4}
-              fill="none"
-              stroke={activePacket.color}
-              strokeWidth="1"
-              opacity="0.3"
-              style={{
-                transition: `cx ${speed * 0.8}ms ease-in-out, cy ${speed * 0.8}ms ease-in-out`,
-              }}
-            />
-            {/* Packet label */}
-            <text
-              x={activePacket.x}
-              y={activePacket.y - 14}
-              fill={activePacket.color}
-              fontSize="8"
-              fontFamily="monospace"
-              textAnchor="middle"
-              style={{
-                transition: `x ${speed * 0.8}ms ease-in-out, y ${speed * 0.8}ms ease-in-out`,
-              }}
-            >
-              {activePacket.label}
-            </text>
+            {/* Click hint */}
+            <title>Click to inspect PDU</title>
           </g>
         )}
 
-        {/* Drop indicator */}
-        {currentAnimStep?.event.type === "FrameDropped" && (
+        {/* Drop X marker */}
+        {showSimulation && currentAnimStep?.event.type === "FrameDropped" && pktPos && (
           <g>
-            {currentAnimStep.highlightDevice && nodeMap.get(currentAnimStep.highlightDevice) && (
-              <text
-                x={nodeMap.get(currentAnimStep.highlightDevice)!.x}
-                y={nodeMap.get(currentAnimStep.highlightDevice)!.y - 34}
-                fill="#f85149"
-                fontSize="10"
-                fontFamily="monospace"
-                textAnchor="middle"
-              >
-                X DROP
-              </text>
-            )}
+            <line x1={pktPos.x - 8} y1={pktPos.y - 8}
+              x2={pktPos.x + 8} y2={pktPos.y + 8}
+              stroke="#f85149" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1={pktPos.x + 8} y1={pktPos.y - 8}
+              x2={pktPos.x - 8} y2={pktPos.y + 8}
+              stroke="#f85149" strokeWidth="2.5" strokeLinecap="round" />
           </g>
         )}
       </svg>
 
-      {/* Current event info bar */}
-      {currentAnimStep && (
-        <div className="mt-2 px-3 py-1.5 rounded-md bg-[var(--surface-overlay)] border border-[var(--surface-border)] text-xs font-mono">
-          <span className="text-[var(--text-muted)]">
-            [{String(currentAnimStep.event.time).padStart(3, " ")}]{" "}
+      {/* PDU Inspector overlay */}
+      {inspectedStep && (
+        <PDUInspector
+          step={inspectedStep}
+          onClose={() => setInspectedStep(null)}
+        />
+      )}
+
+      {/* Event info strip at bottom */}
+      {showSimulation && currentAnimStep && (
+        <div className="px-3 py-1.5 border-t border-[#30363d] flex items-center gap-2 text-[11px] font-mono bg-[#161b22]">
+          <span className="text-[#484f58]">
+            t={String(currentAnimStep.event.time).padStart(3, "0")}
           </span>
-          <span style={{ color: currentAnimStep.color }}>
+          <span style={{ color: currentAnimStep.color }} className="font-semibold">
             {currentAnimStep.event.type}
           </span>
           {currentAnimStep.event.device_id && (
-            <span className="text-[var(--text-secondary)] ml-2">
-              {currentAnimStep.event.device_id}
-            </span>
+            <span className="text-[#8b949e]">{currentAnimStep.event.device_id}</span>
           )}
           {currentAnimStep.event.reason && (
-            <span className="text-[var(--status-error)] ml-2">
-              {currentAnimStep.event.reason}
-            </span>
+            <span className="text-[#f85149]">{currentAnimStep.event.reason}</span>
+          )}
+          {!inspectedStep && pktPos && (
+            <span className="ml-auto text-[#484f58]">click packet to inspect</span>
           )}
         </div>
       )}

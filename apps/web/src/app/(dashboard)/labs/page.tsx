@@ -14,7 +14,7 @@ import {
   createSimulation,
   resetSimulation,
 } from "@/lib/simulation-api";
-import { Play, RotateCcw, Wifi } from "lucide-react";
+import { Play, RotateCcw, Wifi, Eye, EyeOff } from "lucide-react";
 
 export default function LabsPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -23,39 +23,40 @@ export default function LabsPage() {
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Playback state
+  // Playback
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
-  const [speed, setSpeed] = useState(800); // ms per step
+  const [speed, setSpeed] = useState(700);
 
-  // Total animation steps = trace length
+  // Simulation overlay toggle
+  const [showSimulation, setShowSimulation] = useState(true);
+
   const totalSteps = trace.length;
 
-  // When a ping result comes in, load the trace and auto-play
   const handleTraceUpdate = useCallback((newTrace: TraceEvent[]) => {
     setTrace(newTrace);
     setCurrentStep(0);
-    setIsPlaying(true); // auto-play on new trace
+    setIsPlaying(true);
+    setShowSimulation(true);
   }, []);
 
-  // Playback handlers
   const handlePlay = useCallback(() => setIsPlaying(true), []);
   const handlePause = useCallback(() => setIsPlaying(false), []);
-  const handleStep = useCallback(() => {
-    setCurrentStep((s) => Math.min(s + 1, totalSteps));
-  }, [totalSteps]);
+  const handleStep = useCallback(
+    () => setCurrentStep((s) => Math.min(s + 1, totalSteps)),
+    [totalSteps],
+  );
   const handleResetPlayback = useCallback(() => {
     setIsPlaying(false);
     setCurrentStep(0);
   }, []);
-  const handleStepChange = useCallback((s: number) => {
-    setCurrentStep(s);
-    if (s >= totalSteps) setIsPlaying(false);
-  }, [totalSteps]);
-
-  // Highlight the current trace event in the TraceViewer during playback.
-  const traceHighlight =
-    trace.length > 0 && currentStep < trace.length ? currentStep : undefined;
+  const handleStepChange = useCallback(
+    (s: number) => {
+      setCurrentStep(s);
+      if (s >= totalSteps) setIsPlaying(false);
+    },
+    [totalSteps],
+  );
 
   const handleCreateSession = useCallback(async () => {
     setError(null);
@@ -67,8 +68,8 @@ export default function LabsPage() {
       const session = await createSimulation(DEFAULT_TOPOLOGY, 42);
       setSessionId(session.id);
     } catch (err) {
-      const apiErr = err as { error?: { message?: string } };
-      setError(apiErr?.error?.message ?? "Failed to create simulation.");
+      const e = err as { error?: { message?: string } };
+      setError(e?.error?.message ?? "Failed to create simulation.");
     } finally {
       setCreating(false);
     }
@@ -84,8 +85,8 @@ export default function LabsPage() {
       setTrace(result.trace);
       setCurrentStep(0);
     } catch (err) {
-      const apiErr = err as { error?: { message?: string } };
-      setError(apiErr?.error?.message ?? "Failed to reset simulation.");
+      const e = err as { error?: { message?: string } };
+      setError(e?.error?.message ?? "Failed to reset.");
     } finally {
       setResetting(false);
     }
@@ -93,66 +94,69 @@ export default function LabsPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      {/* Page header */}
-      <div className="flex items-center justify-between">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-semibold text-[var(--text-primary)]">
             Lab Workspace
           </h1>
-          <p className="mt-1 text-sm text-[var(--text-secondary)]">
-            Build a topology, run simulations and watch packet flow in real time.
+          <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+            Build topologies, run simulations, and inspect packet-by-packet flow.
           </p>
         </div>
-        {sessionId && (
-          <Badge variant="success">
-            <Wifi size={11} className="mr-1" aria-hidden="true" />
-            Session active
-          </Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {sessionId && (
+            <Badge variant="success">
+              <Wifi size={10} className="mr-1" />
+              Session active
+            </Badge>
+          )}
+        </div>
       </div>
 
-      {/* Error banner */}
       {error && (
-        <div
-          role="alert"
-          className="rounded-md px-4 py-3 text-sm bg-[#3a1a1a] border border-[var(--status-error)] text-[var(--status-error)]"
-        >
+        <div role="alert" className="rounded-md px-4 py-3 text-sm bg-[#3a1a1a] border border-[#f85149] text-[#f85149]">
           {error}
         </div>
       )}
 
-      {/* Animated topology canvas */}
+      {/* Topology + controls */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">
               Topology
             </h2>
             <div className="flex items-center gap-2">
-              {!sessionId ? (
+              {/* Simulation mode toggle */}
+              {trace.length > 0 && (
                 <Button
                   size="sm"
-                  onClick={handleCreateSession}
-                  loading={creating}
+                  variant={showSimulation ? "primary" : "secondary"}
+                  onClick={() => setShowSimulation((v) => !v)}
                 >
+                  {showSimulation ? (
+                    <><EyeOff size={12} aria-hidden="true" /> Hide simulation</>
+                  ) : (
+                    <><Eye size={12} aria-hidden="true" /> Show simulation</>
+                  )}
+                </Button>
+              )}
+              {!sessionId ? (
+                <Button size="sm" onClick={handleCreateSession} loading={creating}>
                   <Play size={12} aria-hidden="true" />
                   Start simulation
                 </Button>
               ) : (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={handleReset}
-                  loading={resetting}
-                >
+                <Button size="sm" variant="secondary" onClick={handleReset} loading={resetting}>
                   <RotateCcw size={12} aria-hidden="true" />
-                  Reset sim
+                  Reset
                 </Button>
               )}
             </div>
           </div>
         </CardHeader>
-        <CardBody>
+        <CardBody className="p-0">
           <TopologyCanvas
             topology={DEFAULT_TOPOLOGY}
             trace={trace}
@@ -161,11 +165,11 @@ export default function LabsPage() {
             speed={speed}
             onStepChange={handleStepChange}
             totalSteps={totalSteps}
+            showSimulation={showSimulation}
           />
-
-          {/* Playback controls — only show when there's a trace */}
-          {trace.length > 0 && (
-            <div className="mt-4 pt-4 border-t border-[var(--surface-border)]">
+          {/* Playback controls */}
+          {trace.length > 0 && showSimulation && (
+            <div className="px-4 py-3 border-t border-[var(--surface-border)]">
               <PlaybackControls
                 isPlaying={isPlaying}
                 onPlay={handlePlay}
@@ -182,53 +186,41 @@ export default function LabsPage() {
         </CardBody>
       </Card>
 
-      {/* Two-column: ping panel + trace viewer */}
+      {/* Ping + trace panel */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* Ping panel */}
         <Card>
           <CardHeader>
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-              Ping
-            </h2>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Ping</h2>
           </CardHeader>
           <CardBody>
             {!sessionId ? (
-              <div className="flex flex-col items-center gap-2 py-8 text-center">
-                <p className="text-sm text-[var(--text-secondary)]">
-                  Start a simulation to run pings.
-                </p>
-              </div>
+              <p className="text-sm text-[var(--text-secondary)] text-center py-8">
+                Start a simulation first.
+              </p>
             ) : (
-              <PingPanel
-                sessionId={sessionId}
-                onTraceUpdate={handleTraceUpdate}
-              />
+              <PingPanel sessionId={sessionId} onTraceUpdate={handleTraceUpdate} />
             )}
           </CardBody>
         </Card>
 
-        {/* Trace viewer */}
         <Card>
           <CardHeader>
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-              Event trace
-            </h2>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Event trace</h2>
           </CardHeader>
           <CardBody>
-            <TraceViewer events={trace} currentStep={traceHighlight} />
+            <TraceViewer
+              events={trace}
+              currentStep={showSimulation ? currentStep : undefined}
+            />
           </CardBody>
         </Card>
       </div>
 
-      {/* Info banner */}
       {!sessionId && (
-        <div className="text-center py-4">
-          <p className="text-xs text-[var(--text-muted)]">
-            The default topology has two PCs connected through a switch.
-            Click &quot;Start simulation&quot; to create a live session, then run a ping
-            to watch ARP resolution and ICMP echo packets animate across the topology.
-          </p>
-        </div>
+        <p className="text-center text-xs text-[var(--text-muted)] py-2">
+          Default topology: PC-A — SW1 — PC-B. Click &quot;Start simulation&quot;,
+          then run a ping to watch packet flow.
+        </p>
       )}
     </div>
   );

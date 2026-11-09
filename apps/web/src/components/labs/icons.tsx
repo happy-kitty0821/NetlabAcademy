@@ -1,119 +1,154 @@
 /**
- * Network device icons — GNS3/Cisco Packet Tracer style.
+ * Network device icons — GNS3 / Cisco Packet Tracer logical style.
  *
- * Clean, flat SVG icons drawn at 48x48 viewport.  These are the standard
- * logical representations used in networking education:
- *  - PC: monitor with screen
- *  - Switch: chassis with ports and arrows
- *  - Router: circle with directional arrows
+ * All icons are self-contained SVG paths with explicit fill/stroke colors
+ * passed as props. They do NOT use CSS variables because they are rendered
+ * inside an SVG canvas where CSS custom properties do not resolve reliably.
  *
- * Each icon accepts a size prop and className for styling.
+ * Each icon renders at the exact pixel size requested via viewBox scaling.
+ * They are designed to be embedded directly inside a parent <svg> using
+ * <image> or rendered as standalone <svg> elements outside the canvas.
  */
 
-interface IconProps {
-  size?: number;
-  className?: string;
-}
+// ── PC / End-host ─────────────────────────────────────────────────────────────
+// Iconic Cisco-style PC: monitor + base.
 
-// ── PC / End Host ─────────────────────────────────────────────────────────────
-
-export function PcIcon({ size = 48, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 48 48"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-    >
-      {/* Monitor body */}
-      <rect x="8" y="6" width="32" height="24" rx="2" fill="var(--surface-overlay)" stroke="var(--accent-primary)" strokeWidth="1.5" />
-      {/* Screen inner */}
-      <rect x="11" y="9" width="26" height="18" rx="1" fill="var(--surface-base)" />
-      {/* Screen content lines */}
-      <line x1="14" y1="13" x2="26" y2="13" stroke="var(--accent-primary)" strokeWidth="1" opacity="0.6" />
-      <line x1="14" y1="17" x2="30" y2="17" stroke="var(--accent-primary)" strokeWidth="1" opacity="0.4" />
-      <line x1="14" y1="21" x2="22" y2="21" stroke="var(--accent-primary)" strokeWidth="1" opacity="0.4" />
-      {/* Stand */}
-      <rect x="20" y="30" width="8" height="4" fill="var(--surface-overlay)" stroke="var(--accent-primary)" strokeWidth="1" />
-      {/* Base */}
-      <rect x="14" y="34" width="20" height="3" rx="1" fill="var(--surface-overlay)" stroke="var(--accent-primary)" strokeWidth="1" />
-    </svg>
-  );
-}
-
-// ── Switch ────────────────────────────────────────────────────────────────────
-
-export function SwitchIcon({ size = 48, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 48 48"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-    >
-      {/* Chassis */}
-      <rect x="4" y="14" width="40" height="20" rx="2" fill="var(--surface-overlay)" stroke="var(--accent-primary)" strokeWidth="1.5" />
-      {/* Top label bar */}
-      <rect x="4" y="14" width="40" height="5" rx="2" fill="var(--accent-primary)" opacity="0.15" />
-      {/* Bidirectional arrows (switching) */}
-      <path d="M12 24 L20 24 M17 21 L20 24 L17 27" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      <path d="M36 24 L28 24 M31 21 L28 24 L31 27" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      {/* Ports (bottom row) */}
-      <rect x="8" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-      <rect x="14" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-      <rect x="20" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-      <rect x="26" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-      <rect x="32" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-      <rect x="38" y="31" width="4" height="3" rx="0.5" fill="var(--accent-primary)" opacity="0.5" />
-    </svg>
-  );
-}
-
-// ── Router ────────────────────────────────────────────────────────────────────
-
-export function RouterIcon({ size = 48, className }: IconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 48 48"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-    >
-      {/* Outer circle */}
-      <circle cx="24" cy="24" r="18" fill="var(--surface-overlay)" stroke="var(--accent-primary)" strokeWidth="1.5" />
-      {/* Inner circle */}
-      <circle cx="24" cy="24" r="12" fill="var(--surface-base)" stroke="var(--accent-primary)" strokeWidth="0.75" opacity="0.5" />
-      {/* Four directional arrows (routing) */}
-      {/* Up */}
-      <path d="M24 10 L24 18 M21 13 L24 10 L27 13" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      {/* Right */}
-      <path d="M38 24 L30 24 M35 21 L38 24 L35 27" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      {/* Down */}
-      <path d="M24 38 L24 30 M21 35 L24 38 L27 35" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      {/* Left */}
-      <path d="M10 24 L18 24 M13 21 L10 24 L13 27" stroke="var(--accent-primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </svg>
-  );
-}
-
-// ── Dispatcher ─────────────────────────────────────────────────────────────────
-
-export function DeviceIcon({
-  model,
-  size,
-  className,
+export function PcIconSVG({
+  x = 0,
+  y = 0,
+  size = 52,
+  active = false,
 }: {
-  model: "host" | "switch" | "router";
+  x?: number;
+  y?: number;
   size?: number;
-  className?: string;
+  active?: boolean;
 }) {
-  if (model === "switch") return <SwitchIcon size={size} className={className} />;
-  if (model === "router") return <RouterIcon size={size} className={className} />;
-  return <PcIcon size={size} className={className} />;
+  const s = size / 52;
+  const bodyColor = "#1c2128";
+  const screenColor = "#010409";
+  const strokeColor = active ? "#58a6ff" : "#58a6ff";
+  const labelLineColor = active ? "#58a6ff" : "#3d5a80";
+
+  return (
+    <g transform={`translate(${x - size / 2}, ${y - size / 2}) scale(${s})`}>
+      {/* Monitor outer */}
+      <rect x="6" y="4" width="40" height="30" rx="2.5"
+        fill={bodyColor} stroke={strokeColor} strokeWidth="2" />
+      {/* Screen */}
+      <rect x="10" y="8" width="32" height="22" rx="1"
+        fill={screenColor} />
+      {/* Prompt cursor */}
+      <text x="13" y="22" fill={labelLineColor}
+        fontSize="9" fontFamily="monospace" fontWeight="bold">
+        {active ? "_" : ">_"}
+      </text>
+      {/* Neck */}
+      <rect x="22" y="34" width="8" height="5"
+        fill={bodyColor} stroke={strokeColor} strokeWidth="1.5" />
+      {/* Base */}
+      <rect x="14" y="39" width="24" height="4" rx="2"
+        fill={bodyColor} stroke={strokeColor} strokeWidth="1.5" />
+      {/* Active indicator */}
+      {active && (
+        <circle cx="26" cy="10" r="2" fill="#3fb950" />
+      )}
+    </g>
+  );
+}
+
+// ── Ethernet Switch ────────────────────────────────────────────────────────────
+// Cisco-style switch: flat chassis with port LEDs.
+
+export function SwitchIconSVG({
+  x = 0,
+  y = 0,
+  size = 56,
+  active = false,
+}: {
+  x?: number;
+  y?: number;
+  size?: number;
+  active?: boolean;
+}) {
+  const s = size / 56;
+  const strokeColor = active ? "#58a6ff" : "#58a6ff";
+  const bodyColor = "#1c2128";
+  const portActiveColor = "#3fb950";
+  const portInactiveColor = "#484f58";
+
+  return (
+    <g transform={`translate(${x - size / 2}, ${y - size / 2}) scale(${s})`}>
+      {/* Chassis */}
+      <rect x="2" y="16" width="52" height="24" rx="3"
+        fill={bodyColor} stroke={strokeColor} strokeWidth="2" />
+      {/* Brand stripe */}
+      <rect x="2" y="16" width="52" height="6" rx="3"
+        fill={active ? "#1d3558" : "#161b22"} />
+      {/* Left arrow */}
+      <path d="M10 29 L18 29" stroke={strokeColor} strokeWidth="2"
+        strokeLinecap="round" />
+      <path d="M15 25 L18 29 L15 33" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Right arrow */}
+      <path d="M46 29 L38 29" stroke={strokeColor} strokeWidth="2"
+        strokeLinecap="round" />
+      <path d="M41 25 L38 29 L41 33" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Port LEDs */}
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <rect key={i}
+          x={22 + i * 5} y={28}
+          width="3" height="5" rx="0.5"
+          fill={active && i < 2 ? portActiveColor : portInactiveColor}
+        />
+      ))}
+    </g>
+  );
+}
+
+// ── Router ─────────────────────────────────────────────────────────────────────
+// Cisco-style router: cylinder circle with arrows.
+
+export function RouterIconSVG({
+  x = 0,
+  y = 0,
+  size = 52,
+  active = false,
+}: {
+  x?: number;
+  y?: number;
+  size?: number;
+  active?: boolean;
+}) {
+  const s = size / 52;
+  const strokeColor = active ? "#58a6ff" : "#58a6ff";
+  const fillColor = active ? "#1d3558" : "#1c2128";
+
+  return (
+    <g transform={`translate(${x - size / 2}, ${y - size / 2}) scale(${s})`}>
+      {/* Outer circle */}
+      <circle cx="26" cy="26" r="22"
+        fill={fillColor} stroke={strokeColor} strokeWidth="2" />
+      {/* Inner ring */}
+      <circle cx="26" cy="26" r="14"
+        fill="none" stroke={strokeColor} strokeWidth="1" opacity="0.4" />
+      {/* Up arrow */}
+      <path d="M26 8 L26 16" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
+      <path d="M22 12 L26 8 L30 12" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Right arrow */}
+      <path d="M44 26 L36 26" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
+      <path d="M40 22 L44 26 L40 30" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Down arrow */}
+      <path d="M26 44 L26 36" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
+      <path d="M22 40 L26 44 L30 40" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Left arrow */}
+      <path d="M8 26 L16 26" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
+      <path d="M12 22 L8 26 L12 30" stroke={strokeColor} strokeWidth="2"
+        fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </g>
+  );
 }
