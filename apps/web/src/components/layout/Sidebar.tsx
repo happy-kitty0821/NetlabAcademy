@@ -19,10 +19,10 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { label: "Dashboard",  href: "/dashboard", icon: LayoutDashboard },
-  { label: "Courses",    href: "/courses",   icon: BookOpen },
-  { label: "Labs",       href: "/labs",      icon: FlaskConical },
-  { label: "Topology",   href: "/topology",  icon: Network },
+  { label: "Dashboard",  href: "/dashboard",       icon: LayoutDashboard },
+  { label: "Courses",    href: "/courses",          icon: BookOpen },
+  { label: "Labs",       href: "/labs",             icon: FlaskConical },
+  { label: "Workspace",  href: "/labs/workspace",   icon: Network },
 ];
 
 const BOTTOM_NAV: NavItem[] = [
@@ -79,7 +79,11 @@ export function Sidebar() {
 }
 
 function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
-  const active = pathname === item.href || pathname.startsWith(item.href + "/");
+  // Exact match for /labs to prevent /labs/workspace from highlighting it
+  const active =
+    item.href === "/labs"
+      ? pathname === "/labs"
+      : pathname === item.href || pathname.startsWith(item.href + "/");
   const Icon = item.icon;
 
   return (
