@@ -383,12 +383,24 @@ class Host:
         sequence: int,
         result: PingResult,
     ) -> None:
-        """Schedule one ICMP echo request and register it as pending."""
+        """
+        Schedule one ICMP echo request and register it as pending.
+
+        Each request is offset by its sequence number so requests are
+        spaced one tick apart and the trace interleaves correctly:
+          seq 0 → clock + 2
+          seq 1 → clock + 3
+          seq 2 → clock + 4
+          ...
+        This mirrors a real host where each echo request is sent after
+        the previous one, not all simultaneously.
+        """
         own_ip = self._own_ip()
         own_mac = self._own_mac()
         assert own_ip is not None
 
-        t = self._sim.clock + 2
+        # Space each request by one tick per sequence number.
+        t = self._sim.clock + 2 + sequence
 
         icmp = ICMPMessage(
             type=ICMPMessage.ECHO_REQUEST,
@@ -414,7 +426,7 @@ class Host:
         icmp_event = ICMPEchoRequestSent(
             time=t, seq=seq_icmp,
             src_device_id=self.device_id,
-            dst_device_id="unknown",  # filled by reply
+            dst_device_id="unknown",
             message=icmp,
         )
         self._sim.schedule(icmp_event)
@@ -437,7 +449,14 @@ class Host:
         pkt: IPv4Packet,
         icmp: ICMPMessage,
     ) -> None:
-        """Schedule an ICMP echo reply in response to a received request."""
+        """
+        Schedule an ICMP echo reply in response to a received request.
+
+        The reply is sent at event.time + 1, which is naturally spaced
+        because the requests themselves arrive at different ticks (seq 0
+        arrives at tick T, seq 1 at T+1, etc.) thanks to the spacing fix
+        in _schedule_echo_request.
+        """
         own_ip = self._own_ip()
         own_mac = self._own_mac()
         assert own_ip is not None
@@ -456,7 +475,6 @@ class Host:
             ttl=64,
             payload=reply_icmp,
         )
-        # Destination MAC = sender of the echo request.
         dst_mac = event.frame.src_mac
         reply_frame = EthernetFrame(
             src_mac=own_mac,

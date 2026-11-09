@@ -171,6 +171,11 @@ class ICMPEchoRequestSent(SimulationEvent):
     dst_device_id: str
     message: ICMPMessage
 
+    @property
+    def device_id(self) -> str:
+        """Convenience alias so the canvas can treat this like other events."""
+        return self.src_device_id
+
 
 @dataclass(frozen=True)
 class ICMPEchoReplySent(SimulationEvent):
@@ -179,6 +184,11 @@ class ICMPEchoReplySent(SimulationEvent):
     src_device_id: str
     dst_device_id: str
     message: ICMPMessage
+
+    @property
+    def device_id(self) -> str:
+        """Convenience alias so the canvas can treat this like other events."""
+        return self.src_device_id
 
 
 # ---------------------------------------------------------------------------

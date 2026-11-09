@@ -218,6 +218,7 @@ def _icmp_echo_request_sent_to_dict(e: ICMPEchoRequestSent) -> dict[str, Any]:
     d = _base_dict(e, "ICMPEchoRequestSent")
     d["src_device_id"] = e.src_device_id
     d["dst_device_id"] = e.dst_device_id
+    d["device_id"] = e.src_device_id   # canvas convenience alias
     d["message"] = _icmp_to_dict(e.message)
     return d
 
@@ -226,6 +227,7 @@ def _icmp_echo_reply_sent_to_dict(e: ICMPEchoReplySent) -> dict[str, Any]:
     d = _base_dict(e, "ICMPEchoReplySent")
     d["src_device_id"] = e.src_device_id
     d["dst_device_id"] = e.dst_device_id
+    d["device_id"] = e.src_device_id   # canvas convenience alias
     d["message"] = _icmp_to_dict(e.message)
     return d
 
