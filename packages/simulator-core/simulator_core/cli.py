@@ -26,6 +26,7 @@ from ipaddress import IPv4Address, IPv4Network
 from typing import TYPE_CHECKING, Callable, Optional
 
 from simulator_core.exceptions import UnsupportedCommandError
+from simulator_core.topology import Interface
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -63,12 +64,14 @@ class Cmd:
 def _match(token: str, keywords: list[str]) -> list[str]:
     """
     Return all keywords that *token* is a valid prefix of.
+    Case-insensitive comparison.
     Exact match wins: if token == one keyword exactly, return just that one.
     """
-    exact = [k for k in keywords if k == token]
+    tl = token.lower()
+    exact = [k for k in keywords if k.lower() == tl]
     if exact:
         return exact
-    return [k for k in keywords if k.startswith(token)]
+    return [k for k in keywords if k.lower().startswith(tl)]
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +235,11 @@ class CLISession:
                 children=[
                     Cmd("terminal", "Enter global configuration mode",
                         handler=lambda s, t: s._cmd_conf_terminal(t)),
-                ]),
+                ],
+                # 'configure' alone also works as 'configure terminal'
+                handler=lambda s, t: s._cmd_conf_terminal(t)),
+            Cmd("enable",    "Enter privileged EXEC mode (already enabled)",
+                handler=lambda s, t: ""),
             Cmd("disable",   "Exit privileged EXEC mode",
                 handler=lambda s, t: s._cmd_disable(t)),
             Cmd("ping",      "Send ICMP echo messages",
@@ -250,11 +257,15 @@ class CLISession:
                 handler=lambda s, t: "% reload: not supported in simulation."),
             Cmd("write",     "Write running configuration to memory",
                 children=[
-                    Cmd("memory", "Write to NV memory",
+                    Cmd("memory",   "Write to NV memory",
                         handler=lambda s, t: "Building configuration...\n[OK]"),
-                    Cmd("terminal","Write to terminal",
+                    Cmd("terminal", "Write to terminal",
                         handler=lambda s, t: s._cmd_show_running(t)),
-                ], handler=None),
+                    Cmd("erase",    "Erase the startup configuration",
+                        handler=lambda s, t: "Erasing the nvram filesystem will remove all configuration files! Continue? [confirm]y\n[OK]\nErase of nvram: complete"),
+                ],
+                # 'write' alone defaults to 'write memory'
+                handler=lambda s, t: "Building configuration...\n[OK]"),
             Cmd("copy",      "Copy from one file to another",
                 handler=lambda s, t: "% copy: not supported in this simulator."),
             Cmd("clear",     "Reset functions",
@@ -274,7 +285,7 @@ class CLISession:
                 args_hint="<hostname>",
                 handler=lambda s, t: s._cmd_hostname(t)),
             Cmd("interface",  "Select an interface to configure",
-                args_hint="<interface-name>",
+                args_hint="<interface-name> | range | vlan | loopback",
                 handler=lambda s, t: s._cmd_enter_iface(t)),
             Cmd("vlan",       "Configure a VLAN",
                 args_hint="<vlan-id>",
@@ -495,7 +506,9 @@ class CLISession:
                             Cmd(name, f"Interface {name}",
                                 handler=lambda s, t, n=name: s._cmd_show_ip_iface(t, n))
                             for name in self._iface_names()
-                        ]),
+                        ],
+                        # Also handle abbreviated name via the parent handler
+                        handler=lambda s, t: s._show_ip_iface_dispatch(t)),
                     Cmd("route",     "IP routing table",
                         handler=lambda s, t: s._cmd_show_ip_route(t)),
                     Cmd("arp",       "IP ARP table",
@@ -510,7 +523,7 @@ class CLISession:
                         handler=lambda s, t, n=name: s._cmd_show_interface(t, n))
                     for name in self._iface_names()
                 ],
-                handler=lambda s, t: s._cmd_show_interfaces_all(t)),
+                handler=lambda s, t: s._show_interfaces_dispatch(t)),
             Cmd("arp",         "ARP table",
                 handler=lambda s, t: s._cmd_show_arp(t)),
             Cmd("mac",         "MAC forwarding table commands",
@@ -521,23 +534,20 @@ class CLISession:
             Cmd("running-config", "Current operating configuration",
                 children=[
                     Cmd("interface", "Interface configuration",
-                        children=[
-                            Cmd(name, f"Interface {name}",
-                                handler=lambda s, t, n=name: s._cmd_show_running_iface(t, n))
-                            for name in self._iface_names()
-                        ]),
+                        args_hint="<interface-name>",
+                        handler=lambda s, t: s._show_running_iface_dispatch(t)),
                 ],
                 handler=lambda s, t: s._cmd_show_running(t)),
             Cmd("startup-config", "Contents of startup configuration",
-                handler=lambda s, t: "% startup-config is not supported in this simulator."),
+                handler=lambda s, t: "% startup-config: not supported in this simulator."),
             Cmd("vlan",        "VTP VLAN status",
                 children=[
-                    Cmd("brief", "VTP management domain status and one line for each VLAN",
+                    Cmd("brief", "VTP management domain status",
                         handler=lambda s, t: s._cmd_show_vlan_brief(t)),
                 ],
                 handler=lambda s, t: s._cmd_show_vlan_brief(t)),
             Cmd("cdp",         "CDP information (not simulated)",
-                handler=lambda s, t: "% CDP is not supported in this simulator."),
+                handler=lambda s, t: "% CDP: not supported in this simulator."),
             Cmd("clock",       "Display the system clock",
                 handler=lambda s, t: f"% Logical clock: tick {self.simulation.clock}"),
             Cmd("history",     "Display the session command history",
@@ -709,11 +719,24 @@ class CLISession:
     def _cmd_enter_iface(self, tokens: list[str]) -> str:
         if len(tokens) < 2:
             return "% Incomplete command."
+        sub = tokens[1].lower()
+
+        # Dispatch sub-types handled inline so the tree stays simple
+        if sub == "range":
+            return self._cmd_enter_iface_range(tokens)
+        if sub == "vlan":
+            return self._cmd_enter_svi(tokens)
+        if sub in ("loopback", "lo"):
+            return self._cmd_enter_loopback(tokens)
+
         iface_name = tokens[1]
         device = self.simulation.topology.devices.get(self.device_id)
-        # Try prefix match on interface names
-        iface_names = list(device.interfaces.keys()) if device else []
-        matches = [n for n in iface_names if n.lower().startswith(iface_name.lower())]
+        if not device:
+            return "% Device not found."
+        iface_names = list(device.interfaces.keys())
+
+        # Match with Cisco abbreviation support
+        matches = _match_iface(iface_name, iface_names)
         if not matches:
             return f"% Invalid interface name: {iface_name!r}"
         if len(matches) > 1:
@@ -721,9 +744,83 @@ class CLISession:
             if exact:
                 matches = exact
             else:
-                return f"% Ambiguous interface: {iface_name!r}\n  Matches: {', '.join(matches)}"
+                return (
+                    f"% Ambiguous interface: {iface_name!r}\n"
+                    f"  Matches: {', '.join(matches)}"
+                )
         self.mode = CLIMode.IFACE_CONFIG
         self.current_iface = matches[0]
+        return ""
+
+    def _cmd_enter_iface_range(self, tokens: list[str]) -> str:
+        # tokens: ['interface', 'range', '<iface1>', '-', '<iface2>']
+        # For now, enter the first interface in the range
+        if len(tokens) < 4:
+            return "% Incomplete command.\nUsage: interface range <iface1> - <iface2>"
+        device = self.simulation.topology.devices.get(self.device_id)
+        if not device:
+            return "% Device not found."
+        iface_names = list(device.interfaces.keys())
+        first_name = tokens[2]
+        matches = _match_iface(first_name, iface_names)
+        if not matches:
+            return f"% Invalid interface name: {first_name!r}"
+        # Enter the first interface; the range concept applies config to all
+        # but for the PoC we enter the first one and note the range
+        self.mode = CLIMode.IFACE_CONFIG
+        self.current_iface = matches[0]
+        # Store the range for potential future use
+        if len(tokens) > 4 and tokens[3] == "-":
+            device._iface_range = tokens[2:]  # type: ignore[attr-defined]
+        return ""
+
+    def _cmd_enter_svi(self, tokens: list[str]) -> str:
+        # tokens: ['interface', 'vlan', '<vlan-id>']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[2])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[2]!r}"
+        device = self.simulation.topology.devices.get(self.device_id)
+        if not device:
+            return "% Device not found."
+        iface_name = f"Vlan{vlan_id}"
+        if iface_name not in device.interfaces:
+            # Create the SVI interface
+            from simulator_core.addresses import MACAddress
+            import random
+            iface = Interface(
+                name=iface_name,
+                mac=MACAddress.generate(random.Random(hash(iface_name) % 1000)),
+            )
+            device.add_interface(iface)
+        self.mode = CLIMode.IFACE_CONFIG
+        self.current_iface = iface_name
+        return ""
+
+    def _cmd_enter_loopback(self, tokens: list[str]) -> str:
+        # tokens: ['interface', 'loopback', '<id>']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        try:
+            lb_id = int(tokens[2])
+        except ValueError:
+            return f"% Invalid loopback ID: {tokens[2]!r}"
+        device = self.simulation.topology.devices.get(self.device_id)
+        if not device:
+            return "% Device not found."
+        iface_name = f"Loopback{lb_id}"
+        if iface_name not in device.interfaces:
+            from simulator_core.addresses import MACAddress
+            import random
+            iface = Interface(
+                name=iface_name,
+                mac=MACAddress.generate(random.Random(hash(iface_name) % 1000)),
+            )
+            device.add_interface(iface)
+        self.mode = CLIMode.IFACE_CONFIG
+        self.current_iface = iface_name
         return ""
 
     def _cmd_do(self, tokens: list[str]) -> str:
@@ -1365,6 +1462,48 @@ class CLISession:
             lines.append(f"% {result.results[0].drop_reason}")
         return "\n".join(lines)
 
+    def _show_ip_iface_dispatch(self, tokens: list[str]) -> str:
+        """Dispatch 'show ip interface <name>' with fuzzy match."""
+        sub = tokens[2].lower() if len(tokens) > 2 else ""
+        if sub in ("brief", "bri", "br"):
+            return self._cmd_show_ip_int_brief(tokens)
+        if len(tokens) > 2:
+            # Try fuzzy match on the interface name token
+            device = self.simulation.topology.devices.get(self.device_id)
+            if device:
+                matches = _match_iface(tokens[2], list(device.interfaces.keys()))
+                if matches:
+                    return self._cmd_show_ip_iface(tokens, matches[0])
+        return self._cmd_show_ip_int_brief(tokens)
+
+    def _show_interfaces_dispatch(self, tokens: list[str]) -> str:
+        """Dispatch 'show interfaces [<name>]' with fuzzy match."""
+        if len(tokens) < 3:
+            return self._cmd_show_interfaces_all(tokens)
+        sub = tokens[2].lower()
+        if sub in ("brief", "bri", "br"):
+            return self._cmd_show_ip_int_brief(tokens)
+        # Fuzzy match on interface name
+        device = self.simulation.topology.devices.get(self.device_id)
+        if device:
+            matches = _match_iface(tokens[2], list(device.interfaces.keys()))
+            if matches:
+                return self._cmd_show_interface(tokens, matches[0])
+        return self._cmd_show_interfaces_all(tokens)
+
+    def _show_running_iface_dispatch(self, tokens: list[str]) -> str:
+        """Dispatch 'show running-config interface <name>' with fuzzy match."""
+        # tokens: ['show', 'running-config', 'interface', '<name>']
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        iface_name = tokens[3]
+        device = self.simulation.topology.devices.get(self.device_id)
+        if device:
+            matches = _match_iface(iface_name, list(device.interfaces.keys()))
+            if matches:
+                return self._cmd_show_running_iface(tokens, matches[0])
+        return f"% Interface {iface_name!r} not found."
+
     # ── Show commands ─────────────────────────────────────────────────────────
 
     def _cmd_show_version(self, tokens: list[str]) -> str:
@@ -1582,16 +1721,21 @@ class CLISession:
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
-        iface = device.interfaces.get(iface_name)
-        if not iface:
+        # Support abbreviations — try to match the name
+        iface_names = list(device.interfaces.keys())
+        matches = _match_iface(iface_name, iface_names)
+        if not matches:
             return f"% Interface {iface_name!r} not found."
+        iface = device.interfaces.get(matches[0])
+        if not iface:
+            return f"% Interface {matches[0]!r} not found."
         from simulator_core.types import InterfaceState
         from ipaddress import IPv4Network as _Net
         lines = [
             "Building configuration...\n",
             "Current configuration:",
             "!",
-            f"interface {iface_name}",
+            f"interface {matches[0]}",
         ]
         desc = getattr(iface, "_description", "")
         if desc:
@@ -1660,6 +1804,66 @@ class CLISession:
             for username, user in config.users.items():
                 lines.append(f"  {username} (privilege {user.privilege})")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Interface name matching
+# ---------------------------------------------------------------------------
+
+# Cisco interface type abbreviations
+_IFACE_PREFIX_MAP = {
+    "gi": "Gi", "gig": "Gi", "giga": "Gi", "gigabitethernet": "Gi",
+    "fa": "Fa", "fast": "Fa", "fastethernet": "Fa",
+    "eth": "eth", "e": "eth",
+    "vl": "Vlan", "vlan": "Vlan",
+    "lo": "Loopback", "loop": "Loopback", "loopback": "Loopback",
+}
+
+def _match_iface(input_name: str, iface_names: list[str]) -> list[str]:
+    """
+    Match an interface name with Cisco-style abbreviation support.
+    
+    Tries in order:
+    1. Exact match (case-insensitive)
+    2. Case-insensitive prefix match
+    3. Cisco type abbreviation (gig0/0 -> Gi0/0, fa0/1 -> Fa0/1)
+    """
+    lower_input = input_name.lower()
+    
+    # 1. Exact match
+    exact = [n for n in iface_names if n.lower() == lower_input]
+    if exact:
+        return exact
+    
+    # 2. Case-insensitive prefix match
+    prefix_matches = [n for n in iface_names if n.lower().startswith(lower_input)]
+    if prefix_matches:
+        return prefix_matches
+    
+    # 3. Cisco abbreviation: try replacing known type prefixes
+    for abbrev, full_prefix in _IFACE_PREFIX_MAP.items():
+        if lower_input.startswith(abbrev):
+            # Replace the abbreviation with the full prefix
+            rest = input_name[len(abbrev):]
+            normalized = full_prefix + rest
+            norm_matches = [n for n in iface_names if n.lower() == normalized.lower()]
+            if norm_matches:
+                return norm_matches
+            # Also try prefix match with the normalized name
+            norm_prefix = [n for n in iface_names if n.lower().startswith(normalized.lower())]
+            if norm_prefix:
+                return norm_prefix
+    
+    # 4. Try matching just the numeric portion (e.g. "0/0" matches "Gi0/0")
+    import re
+    num_match = re.search(r'[/\d]+$', lower_input)
+    if num_match:
+        num_part = num_match.group()
+        num_matches = [n for n in iface_names if n.lower().endswith(num_part)]
+        if num_matches:
+            return num_matches
+    
+    return []
 
 
 # ---------------------------------------------------------------------------
