@@ -8,10 +8,9 @@ Data-plane behaviour:
 - Trunk ports: carry multiple VLANs with 802.1Q tagging.
   Frames on the native VLAN are sent untagged.
 - EtherChannel (port-channel): multiple physical links bundled as one
-  logical interface. Frames are load-balanced by src/dst MAC.
+  logical interface. LACP and PAgP negotiation rules are enforced.
 - STP: before forwarding, the switch checks whether the port is in a
-  FORWARDING state for the VLAN. Ports in BLOCKING/DISCARDING do not
-  learn or forward (except STP BPDUs themselves).
+  FORWARDING state for the VLAN.
 
 No host I/O, no sockets, no subprocess.
 """
@@ -19,6 +18,7 @@ No host I/O, no sockets, no subprocess.
 from __future__ import annotations
 
 import hashlib
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
 from simulator_core.events import (
@@ -38,6 +38,90 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# EtherChannel protocol types
+# ---------------------------------------------------------------------------
+
+class EtherChannelProtocol(Enum):
+    """EtherChannel negotiation protocol."""
+    NONE    = "none"      # static "on" — no negotiation
+    LACP    = "lacp"      # IEEE 802.3ad
+    PAGP    = "pagp"      # Cisco PAgP
+
+
+class EtherChannelMode(Enum):
+    """Port mode within the protocol."""
+    ON          = "on"           # static, always bundle
+    ACTIVE      = "active"       # LACP: initiates negotiation
+    PASSIVE     = "passive"      # LACP: responds only
+    DESIRABLE   = "desirable"    # PAgP: initiates negotiation
+    AUTO        = "auto"         # PAgP: responds only
+    OFF         = "off"          # disabled
+
+
+# Protocol compatibility matrix
+# Returns True if the two modes can form a bundle
+_LACP_COMPATIBLE = {
+    (EtherChannelMode.ACTIVE,  EtherChannelMode.ACTIVE):  True,
+    (EtherChannelMode.ACTIVE,  EtherChannelMode.PASSIVE): True,
+    (EtherChannelMode.PASSIVE, EtherChannelMode.ACTIVE):  True,
+    (EtherChannelMode.PASSIVE, EtherChannelMode.PASSIVE): False,  # both passive = no bundle
+}
+
+_PAGP_COMPATIBLE = {
+    (EtherChannelMode.DESIRABLE, EtherChannelMode.DESIRABLE): True,
+    (EtherChannelMode.DESIRABLE, EtherChannelMode.AUTO):       True,
+    (EtherChannelMode.AUTO,      EtherChannelMode.DESIRABLE):  True,
+    (EtherChannelMode.AUTO,      EtherChannelMode.AUTO):       False,  # both auto = no bundle
+}
+
+
+def protocols_compatible(mode_a: str, mode_b: str) -> tuple[bool, str]:
+    """
+    Check if two EtherChannel modes are compatible.
+    Returns (is_compatible, reason_if_not).
+    """
+    try:
+        ma = EtherChannelMode(mode_a)
+        mb = EtherChannelMode(mode_b)
+    except ValueError:
+        return False, f"Unknown mode(s): {mode_a!r}, {mode_b!r}"
+
+    # Static "on" — only compatible with another "on"
+    if ma == EtherChannelMode.ON and mb == EtherChannelMode.ON:
+        return True, ""
+    if ma == EtherChannelMode.ON or mb == EtherChannelMode.ON:
+        return False, "Static 'on' requires both sides to use 'on' (no negotiation protocol)."
+
+    # LACP modes
+    lacp_modes = {EtherChannelMode.ACTIVE, EtherChannelMode.PASSIVE}
+    pagp_modes  = {EtherChannelMode.DESIRABLE, EtherChannelMode.AUTO}
+
+    if ma in lacp_modes and mb in lacp_modes:
+        ok = _LACP_COMPATIBLE.get((ma, mb), False)
+        if not ok:
+            return False, (
+                f"LACP: both sides are '{mode_a}/{mode_b}'. "
+                "At least one side must be 'active' to initiate negotiation."
+            )
+        return True, ""
+
+    if ma in pagp_modes and mb in pagp_modes:
+        ok = _PAGP_COMPATIBLE.get((ma, mb), False)
+        if not ok:
+            return False, (
+                f"PAgP: both sides are '{mode_a}/{mode_b}'. "
+                "At least one side must be 'desirable' to initiate negotiation."
+            )
+        return True, ""
+
+    # Mixed protocols
+    return False, (
+        f"Protocol mismatch: cannot mix LACP modes ({mode_a!r}) with "
+        f"PAgP modes ({mode_b!r}). Both sides must use the same protocol."
+    )
+
+
+# ---------------------------------------------------------------------------
 # EtherChannel bundle
 # ---------------------------------------------------------------------------
 
@@ -48,20 +132,63 @@ class PortChannelGroup:
     Members are physical interface names; the logical port-channel
     interface is 'Port-channel<id>'.
 
-    Protocol:
-      "on"      — static (no negotiation)
-      "active"  — LACP active
-      "passive" — LACP passive
-      "desirable"— PAgP desirable
-      "auto"    — PAgP auto
+    Protocol state:
+      negotiated_up  — True when the bundle is operationally up based on
+                       protocol negotiation rules (or static "on").
     """
 
     def __init__(self, group_id: int) -> None:
         self.group_id: int = group_id
         self.name: str = f"Port-channel{group_id}"
         self.members: list[str] = []
-        self.protocol: str = "on"   # "on" | "active" | "passive" | "desirable" | "auto"
+        self.protocol: str = "on"
         self.admin_state: str = "up"
+        # Peer protocol mode — set by CLI or discovered via topology
+        self._peer_protocol: Optional[str] = None
+
+    @property
+    def lacp_protocol(self) -> EtherChannelProtocol:
+        """Classify which protocol family this group uses."""
+        if self.protocol in ("active", "passive"):
+            return EtherChannelProtocol.LACP
+        if self.protocol in ("desirable", "auto"):
+            return EtherChannelProtocol.PAGP
+        return EtherChannelProtocol.NONE
+
+    @property
+    def is_operationally_up(self) -> bool:
+        """
+        True if the bundle can carry traffic.
+
+        For 'on': always up (no negotiation).
+        For LACP/PAgP: depends on compatibility with peer.
+        Without a known peer, we assume up (educational default).
+        """
+        if self.protocol == "on":
+            return True
+        if self.protocol == "off":
+            return False
+        if self._peer_protocol is None:
+            # No peer known — treat as up for educational purposes
+            return True
+        compatible, _ = protocols_compatible(self.protocol, self._peer_protocol)
+        return compatible
+
+    @property
+    def status_flags(self) -> str:
+        """Return Cisco-style status flags for show etherchannel summary."""
+        if not self.members:
+            return "SD"  # S=Layer2, D=down
+        if self.is_operationally_up:
+            return "SU"  # S=Layer2, U=in-use
+        return "SD"
+
+    @property
+    def member_flags(self) -> str:
+        """Flags shown next to member port names."""
+        if self.is_operationally_up:
+            return "P"  # P=bundled
+        return "s"  # s=suspended
 
     def add_member(self, iface_name: str) -> None:
         if iface_name not in self.members:
@@ -73,12 +200,16 @@ class PortChannelGroup:
 
     def select_egress(self, src_mac: str, dst_mac: str) -> Optional[str]:
         """
-        Load-balance across member links using XOR of MAC bytes.
+        Load-balance across active member links using XOR of MAC bytes.
         Returns the selected member interface name or None.
         """
-        active = [m for m in self.members if m]  # filter None
+        if not self.is_operationally_up:
+            return None
+        active = [m for m in self.members if m]
         if not active:
             return None
+        h = int(hashlib.md5((src_mac + dst_mac).encode()).hexdigest(), 16)
+        return active[h % len(active)]
         h = int(hashlib.md5((src_mac + dst_mac).encode()).hexdigest(), 16)
         return active[h % len(active)]
 

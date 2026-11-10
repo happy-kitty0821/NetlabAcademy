@@ -684,12 +684,16 @@ class CLISession:
                 handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
             Cmd("etherchannel", "EtherChannel information",
                 children=[
-                    Cmd("summary", "EtherChannel summary",
+                    Cmd("summary",      "EtherChannel summary",
                         handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
-                    Cmd("detail",  "EtherChannel detail",
+                    Cmd("detail",       "EtherChannel detail",
                         handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
                     Cmd("port-channel", "Port-channel detail",
                         handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
+                    Cmd("neighbors",    "LACP/PAgP neighbor information",
+                        handler=lambda s, t: s._cmd_show_etherchannel_neighbors(t)),
+                    Cmd("protocol",     "EtherChannel protocol",
+                        handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
                 ],
                 handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
             Cmd("port-channel", "EtherChannel info (alias)",
@@ -1501,6 +1505,11 @@ class CLISession:
     def _cmd_channel_group(self, tokens: list[str]) -> str:
         """
         channel-group <1-6> mode <on|active|passive|desirable|auto>
+
+        Enforces LACP and PAgP compatibility rules:
+          LACP: at least one side must be 'active'
+          PAgP: at least one side must be 'desirable'
+          Static: both sides must use 'on'
         """
         if len(tokens) < 4:
             return "% Incomplete command.\nUsage: channel-group <1-6> mode <on|active|passive|desirable|auto>"
@@ -1515,21 +1524,34 @@ class CLISession:
             return f"% Invalid group ID: {tokens[1]!r}"
         if tokens[2].lower() != "mode":
             return "% Expected 'mode' after channel-group ID."
-        protocol_map = {
-            "on":         "on",
-            "active":     "active",
-            "passive":    "passive",
-            "desirable":  "desirable",
-            "auto":       "auto",
-        }
+        valid_modes = {"on", "active", "passive", "desirable", "auto"}
         proto = tokens[3].lower()
-        if proto not in protocol_map:
-            return f"% Invalid mode: {tokens[3]!r}\nValid modes: {', '.join(protocol_map)}"
+        if proto not in valid_modes:
+            return (
+                f"% Invalid mode: {tokens[3]!r}\n"
+                f"  Valid modes: on, active, passive (LACP), desirable, auto (PAgP)"
+            )
         iface_name = self.current_iface
         if iface_name is None:
             return "% No interface selected."
-        switch.add_port_channel(group_id, iface_name, protocol_map[proto])
-        return ""
+
+        pc = switch.add_port_channel(group_id, iface_name, proto)
+
+        # Warn if mode may not bundle without the right peer
+        from simulator_core.devices.switch import protocols_compatible
+        warnings = []
+        if proto == "passive":
+            warnings.append(
+                "% Warning: LACP 'passive' mode requires the peer to be 'active'.\n"
+                "  passive + passive = no bundle. Configure peer as 'active'."
+            )
+        elif proto == "auto":
+            warnings.append(
+                "% Warning: PAgP 'auto' mode requires the peer to be 'desirable'.\n"
+                "  auto + auto = no bundle. Configure peer as 'desirable'."
+            )
+
+        return "\n".join(warnings) if warnings else ""
 
     # ── Show STP ──────────────────────────────────────────────────────────────
 
@@ -1662,16 +1684,22 @@ class CLISession:
             "------+-------------+-----------+-----------------------------------------------",
         ]
         for gid, pc in sorted(pcs.items()):
-            proto_str = {
+            proto_map = {
                 "on":        "        -",
                 "active":    "    LACP",
                 "passive":   "    LACP",
                 "desirable": "    PAgP",
                 "auto":      "    PAgP",
-            }.get(pc.protocol, "        -")
-            members_str = " ".join(f"{m}(P)" for m in pc.members) if pc.members else "(none)"
+            }
+            proto_str = proto_map.get(pc.protocol, "        -")
+            status = pc.status_flags
+            members_str = " ".join(f"{m}({pc.member_flags})" for m in pc.members) if pc.members else "(none)"
+            # Show negotiation warning if bundle is not up
+            if not pc.is_operationally_up and pc.protocol != "on":
+                _, reason = protocols_compatible(pc.protocol, pc._peer_protocol or "unknown")
+                members_str += f"  ← {reason[:60]}"
             lines.append(
-                f"{gid:<6} {pc.name:<13} {proto_str:<11} {members_str}"
+                f"{gid:<6} {pc.name}({status}){' ' * (11 - len(pc.name) - len(status))} {proto_str:<11} {members_str}"
             )
         return "\n".join(lines)
 
@@ -1711,6 +1739,51 @@ class CLISession:
                 lines.append(f"  Channel group       = {gid}  Mode = {'Active' if pc.protocol == 'active' else 'Passive' if pc.protocol == 'passive' else pc.protocol.capitalize()}")
                 lines.append(f"  Port-channel        = Po{gid}")
                 lines.append(f"")
+        return "\n".join(lines)
+
+    def _cmd_show_etherchannel_neighbors(self, tokens: list[str]) -> str:
+        """show etherchannel neighbors — LACP/PAgP neighbor information."""
+        switch = self._get_switch()
+        if switch is None:
+            return "% show etherchannel is only available on switch devices."
+        pcs = switch.port_channels
+        if not pcs:
+            return "% No EtherChannel groups configured."
+
+        lines = []
+        for gid, pc in sorted(pcs.items()):
+            from simulator_core.devices.switch import EtherChannelProtocol
+            proto = pc.lacp_protocol
+            if proto == EtherChannelProtocol.LACP:
+                lines.append(f"Channel group {gid}  LACP role: {'Initiator' if pc.protocol == 'active' else 'Responder'}")
+                lines.append(f"  {'Port':<10} {'Flags':<6} {'State':<12} {'Priority':<10} {'Dev ID':<20}")
+                lines.append(f"  {'-'*60}")
+                for m in pc.members:
+                    flags = "SA" if pc.protocol == "active" else "SP"  # S=LACP,A=active/P=passive
+                    state = "bundled" if pc.is_operationally_up else "suspended"
+                    lines.append(f"  {m:<10} {flags:<6} {state:<12} {'32768':<10} {'(no LACPDU received)':<20}")
+            elif proto == EtherChannelProtocol.PAGP:
+                lines.append(f"Channel group {gid}  PAgP role: {'Desirable' if pc.protocol == 'desirable' else 'Auto'}")
+                lines.append(f"  {'Port':<10} {'Flags':<6} {'State':<12} {'Hello':<10}")
+                lines.append(f"  {'-'*50}")
+                for m in pc.members:
+                    flags = "D" if pc.protocol == "desirable" else "A"
+                    state = "bundled" if pc.is_operationally_up else "suspended"
+                    lines.append(f"  {m:<10} {flags:<6} {state:<12} {'1':<10}")
+            else:
+                lines.append(f"Channel group {gid}  Mode: Static (on)")
+                for m in pc.members:
+                    lines.append(f"  {m} — static bundled")
+            lines.append("")
+
+        if not pc.is_operationally_up:
+            compatible, reason = protocols_compatible(
+                pc.protocol, pc._peer_protocol or "unknown"
+            )
+            if not compatible:
+                lines.append(f"% Note: Group {gid} is NOT operationally up.")
+                lines.append(f"% Reason: {reason}")
+
         return "\n".join(lines)
 
     # ── VLAN list formatter ────────────────────────────────────────────────────
