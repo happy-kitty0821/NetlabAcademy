@@ -66,10 +66,26 @@ class Interface:
     oper_state: InterfaceState = InterfaceState.UP
     ip_config: Optional[IPv4Interface] = None
     default_gateway: Optional[str] = None  # dotted-decimal IPv4 string
-    # VLAN support: access port VLAN assignment (default 1)
-    vlan: int = 1
-    # Port mode: "access" for end-host ports, "trunk" for switch-to-switch (future)
+
+    # ── Switchport configuration ──────────────────────────────────────────────
+    # Port mode: "access" | "trunk" | "dynamic_auto" | "dynamic_desirable" | "routed"
     switchport_mode: str = "access"
+    # Access VLAN (used when mode == "access")
+    vlan: int = 1
+    # Trunk configuration (used when mode == "trunk")
+    trunk_native_vlan: int = 1
+    trunk_allowed_vlans: Optional[list] = None   # None = all; list of ints
+    trunk_encapsulation: str = "dot1q"           # "dot1q" | "isl" (ISL not simulated)
+
+    # ── STP per-interface settings ────────────────────────────────────────────
+    stp_portfast: bool = False
+    stp_bpduguard: bool = False
+    stp_bpdufilter: bool = False
+    stp_guard: str = "none"          # "none" | "root" | "loop"
+    stp_port_priority: int = 128     # 0-240, increment of 16
+    stp_path_cost: Optional[int] = None   # None = auto-calculated from speed
+
+    # ── Counters ──────────────────────────────────────────────────────────────
     rx_frames: int = field(default=0, repr=False)
     tx_frames: int = field(default=0, repr=False)
 

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from simulator_core.exceptions import UnsupportedCommandError
 from simulator_core.topology import Interface
+from simulator_core.types import InterfaceState
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -284,6 +285,45 @@ class CLISession:
             Cmd("hostname",   "Set system's network name",
                 args_hint="<hostname>",
                 handler=lambda s, t: s._cmd_hostname(t)),
+            Cmd("spanning-tree", "Spanning tree configuration",
+                children=[
+                    Cmd("mode",    "Set STP mode",
+                        children=[
+                            Cmd("pvst",       "PVST+ mode",
+                                handler=lambda s, t: s._cmd_stp_mode(t, "pvst")),
+                            Cmd("rapid-pvst", "Rapid PVST+ mode",
+                                handler=lambda s, t: s._cmd_stp_mode(t, "rapid-pvst")),
+                            Cmd("mst",        "MSTP mode",
+                                handler=lambda s, t: s._cmd_stp_mode(t, "mst")),
+                        ]),
+                    Cmd("vlan",    "VLAN spanning tree settings",
+                        args_hint="<vlan-id> priority|root ...",
+                        handler=lambda s, t: s._cmd_stp_global_vlan(t)),
+                    Cmd("portfast", "Global PortFast settings",
+                        children=[
+                            Cmd("default", "Enable PortFast on all access ports",
+                                handler=lambda s, t: s._cmd_stp_portfast_default(t)),
+                            Cmd("bpduguard", "Enable BPDU Guard globally",
+                                children=[
+                                    Cmd("default", "Enable globally",
+                                        handler=lambda s, t: s._cmd_stp_bpduguard_default(t)),
+                                ]),
+                        ]),
+                    Cmd("backbonefast", "BackboneFast (no-op in sim)",
+                        handler=lambda s, t: ""),
+                    Cmd("uplinkfast",   "UplinkFast (no-op in sim)",
+                        handler=lambda s, t: ""),
+                    Cmd("pathcost",     "Global path-cost method",
+                        children=[
+                            Cmd("method", "Path-cost method",
+                                children=[
+                                    Cmd("short", "16-bit short method",
+                                        handler=lambda s, t: ""),
+                                    Cmd("long",  "32-bit long method",
+                                        handler=lambda s, t: ""),
+                                ]),
+                        ]),
+                ]),
             Cmd("interface",  "Select an interface to configure",
                 args_hint="<interface-name> | range | vlan | loopback",
                 handler=lambda s, t: s._cmd_enter_iface(t)),
@@ -400,19 +440,102 @@ class CLISession:
                 children=[
                     Cmd("mode",   "Set interface mode",
                         children=[
-                            Cmd("access", "Set access mode",
+                            Cmd("access",  "Set access mode",
                                 handler=lambda s, t: s._cmd_switchport_mode_access(t)),
-                            Cmd("trunk",  "Set trunk mode (not yet supported)",
-                                handler=lambda s, t: "% Trunk mode is not yet supported."),
+                            Cmd("trunk",   "Set trunk mode",
+                                handler=lambda s, t: s._cmd_switchport_mode_trunk(t)),
+                            Cmd("dynamic", "Set dynamic negotiation mode",
+                                children=[
+                                    Cmd("auto",      "Set to dynamic auto",
+                                        handler=lambda s, t: s._cmd_switchport_mode_dynamic(t, "auto")),
+                                    Cmd("desirable", "Set to dynamic desirable",
+                                        handler=lambda s, t: s._cmd_switchport_mode_dynamic(t, "desirable")),
+                                ]),
                         ]),
                     Cmd("access", "Set access VLAN",
-                        args_hint="vlan <vlan-id>",
                         children=[
                             Cmd("vlan", "Assign access VLAN",
                                 args_hint="<vlan-id>",
                                 handler=lambda s, t: s._cmd_switchport_access_vlan(t)),
                         ]),
+                    Cmd("trunk",  "Trunk configuration",
+                        children=[
+                            Cmd("native",  "Set native VLAN on trunk",
+                                children=[
+                                    Cmd("vlan", "Native VLAN",
+                                        args_hint="<vlan-id>",
+                                        handler=lambda s, t: s._cmd_switchport_trunk_native_vlan(t)),
+                                ]),
+                            Cmd("allowed", "Set allowed VLANs on trunk",
+                                children=[
+                                    Cmd("vlan", "Allowed VLANs",
+                                        args_hint="<vlan-list>",
+                                        handler=lambda s, t: s._cmd_switchport_trunk_allowed_vlan(t)),
+                                ]),
+                            Cmd("encapsulation", "Set trunk encapsulation",
+                                children=[
+                                    Cmd("dot1q", "IEEE 802.1Q encapsulation",
+                                        handler=lambda s, t: s._cmd_switchport_trunk_encap(t, "dot1q")),
+                                    Cmd("isl",   "ISL encapsulation (not simulated)",
+                                        handler=lambda s, t: "% ISL encapsulation is not supported."),
+                                ]),
+                            Cmd("pruning", "Prune VLANs from trunk (no-op in sim)",
+                                handler=lambda s, t: ""),
+                        ]),
+                    Cmd("nonegotiate", "Disable DTP negotiation",
+                        handler=lambda s, t: ""),
+                    Cmd("port-security", "Enable port security",
+                        handler=lambda s, t: s._cmd_switchport_port_security(t)),
                 ]),
+            Cmd("spanning-tree", "Spanning tree configuration",
+                children=[
+                    Cmd("portfast",    "Enable PortFast on this interface",
+                        children=[
+                            Cmd("disable", "Disable PortFast",
+                                handler=lambda s, t: s._cmd_stp_portfast(t, False)),
+                            Cmd("trunk",   "Enable PortFast on trunk (no-op)",
+                                handler=lambda s, t: ""),
+                        ],
+                        handler=lambda s, t: s._cmd_stp_portfast(t, True)),
+                    Cmd("bpduguard",   "BPDU guard",
+                        children=[
+                            Cmd("enable",  "Enable BPDU guard",
+                                handler=lambda s, t: s._cmd_stp_bpduguard(t, True)),
+                            Cmd("disable", "Disable BPDU guard",
+                                handler=lambda s, t: s._cmd_stp_bpduguard(t, False)),
+                        ]),
+                    Cmd("bpdufilter",  "BPDU filter",
+                        children=[
+                            Cmd("enable",  "Enable BPDU filter",
+                                handler=lambda s, t: s._cmd_stp_bpdufilter(t, True)),
+                            Cmd("disable", "Disable BPDU filter",
+                                handler=lambda s, t: s._cmd_stp_bpdufilter(t, False)),
+                        ]),
+                    Cmd("guard",       "Spanning tree guard",
+                        children=[
+                            Cmd("root", "Enable root guard",
+                                handler=lambda s, t: s._cmd_stp_guard(t, "root")),
+                            Cmd("loop", "Enable loop guard",
+                                handler=lambda s, t: s._cmd_stp_guard(t, "loop")),
+                            Cmd("none", "Disable guard",
+                                handler=lambda s, t: s._cmd_stp_guard(t, "none")),
+                        ]),
+                    Cmd("cost",        "Port path cost",
+                        args_hint="<1-200000000>",
+                        handler=lambda s, t: s._cmd_stp_port_cost(t)),
+                    Cmd("port-priority", "Port priority",
+                        args_hint="<0-240>",
+                        handler=lambda s, t: s._cmd_stp_port_priority_iface(t)),
+                    Cmd("vlan",        "VLAN-specific STP settings",
+                        args_hint="<vlan-id> cost|port-priority <value>",
+                        handler=lambda s, t: s._cmd_stp_iface_vlan(t)),
+                ]),
+            Cmd("channel-group", "Assign this interface to a port-channel",
+                args_hint="<1-6> mode <on|active|passive|desirable|auto>",
+                handler=lambda s, t: s._cmd_channel_group(t)),
+            Cmd("channel-protocol", "EtherChannel protocol (lacp/pagp)",
+                args_hint="<lacp|pagp>",
+                handler=lambda s, t: ""),
             Cmd("duplex",      "Configure duplex operation (no effect in sim)",
                 handler=lambda s, t: ""),
             Cmd("speed",       "Configure interface speed (no effect in sim)",
@@ -514,16 +637,6 @@ class CLISession:
                     Cmd("arp",       "IP ARP table",
                         handler=lambda s, t: s._cmd_show_arp(t)),
                 ]),
-            Cmd("interfaces",  "Interface status and configuration",
-                children=[
-                    Cmd("brief", "Brief summary of interface status (alias)",
-                        handler=lambda s, t: s._cmd_show_ip_int_brief(t)),
-                ] + [
-                    Cmd(name, f"Interface {name}",
-                        handler=lambda s, t, n=name: s._cmd_show_interface(t, n))
-                    for name in self._iface_names()
-                ],
-                handler=lambda s, t: s._show_interfaces_dispatch(t)),
             Cmd("arp",         "ARP table",
                 handler=lambda s, t: s._cmd_show_arp(t)),
             Cmd("mac",         "MAC forwarding table commands",
@@ -556,6 +669,45 @@ class CLISession:
                 handler=lambda s, t: s._cmd_show_logging(t)),
             Cmd("users",        "Display information about terminal lines",
                 handler=lambda s, t: s._cmd_show_users(t)),
+            Cmd("spanning-tree", "Spanning tree information",
+                children=[
+                    Cmd("summary", "Summary of port states",
+                        handler=lambda s, t: s._cmd_show_stp_summary(t)),
+                    Cmd("detail",  "Detailed STP state",
+                        handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
+                    Cmd("vlan",    "Per-VLAN spanning tree state",
+                        args_hint="<vlan-id>",
+                        handler=lambda s, t: s._cmd_show_stp_vlan_dispatch(t)),
+                    Cmd("active",  "Active ports in spanning tree",
+                        handler=lambda s, t: s._cmd_show_stp_summary(t)),
+                ],
+                handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
+            Cmd("etherchannel", "EtherChannel information",
+                children=[
+                    Cmd("summary", "EtherChannel summary",
+                        handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
+                    Cmd("detail",  "EtherChannel detail",
+                        handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
+                    Cmd("port-channel", "Port-channel detail",
+                        handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
+                ],
+                handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
+            Cmd("port-channel", "EtherChannel info (alias)",
+                handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
+            Cmd("interfaces",   "Show interfaces (with trunk support)",
+                children=[
+                    Cmd("trunk",   "Show trunk interfaces",
+                        handler=lambda s, t: s._cmd_show_interfaces_trunk(t)),
+                    Cmd("status",  "Brief interface status",
+                        handler=lambda s, t: s._cmd_show_interfaces_status(t)),
+                    Cmd("brief",   "Brief IP interface summary",
+                        handler=lambda s, t: s._cmd_show_ip_int_brief(t)),
+                ] + [
+                    Cmd(name, f"Interface {name}",
+                        handler=lambda s, t, n=name: s._cmd_show_interface(t, n))
+                    for name in self._iface_names()
+                ],
+                handler=lambda s, t: s._show_interfaces_dispatch(t)),
         ]
 
     def _iface_names(self) -> list[str]:
@@ -1041,6 +1193,99 @@ class CLISession:
             iface.switchport_mode = "access"
         return ""
 
+    def _cmd_switchport_mode_trunk(self, tokens: list[str]) -> str:
+        """switchport mode trunk"""
+        switch = self._get_switch()
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        iface.switchport_mode = "trunk"
+        if iface.trunk_allowed_vlans is None:
+            iface.trunk_allowed_vlans = None  # all
+        if switch:
+            # Update STP to know about this trunk
+            for vlan_id in switch.vlans:
+                switch.stp.ensure_vlan(vlan_id)
+        return ""
+
+    def _cmd_switchport_mode_dynamic(self, tokens: list[str], mode: str) -> str:
+        iface = self._get_current_iface()
+        if iface:
+            iface.switchport_mode = f"dynamic_{mode}"
+        return ""
+
+    def _cmd_switchport_trunk_native_vlan(self, tokens: list[str]) -> str:
+        # tokens: ['switchport', 'trunk', 'native', 'vlan', '<id>']
+        if len(tokens) < 5:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[4])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[4]!r}"
+        switch = self._get_switch()
+        if switch is None:
+            return "% switchport commands only on switch devices."
+        try:
+            switch.set_trunk_native_vlan(self.current_iface, vlan_id)
+        except ValueError as exc:
+            return f"% {exc}"
+        return ""
+
+    def _cmd_switchport_trunk_allowed_vlan(self, tokens: list[str]) -> str:
+        # tokens: ['switchport', 'trunk', 'allowed', 'vlan', '<list-or-add-remove-except>']
+        if len(tokens) < 5:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None:
+            return "% switchport commands only on switch devices."
+        # Parse: add | remove | except | all | <list>
+        arg = tokens[4].lower()
+        mode = "set"
+        vlans_str = tokens[4]
+        if arg in ("add", "remove", "except"):
+            mode = arg
+            if len(tokens) < 6:
+                return f"% Incomplete command. Expected VLAN list after {arg}."
+            vlans_str = tokens[5]
+        vlans = self._parse_vlan_list(vlans_str)
+        if vlans is None and vlans_str.lower() != "all":
+            return f"% Invalid VLAN list: {vlans_str!r}"
+        try:
+            switch.set_trunk_allowed_vlans(self.current_iface, vlans, mode)
+        except ValueError as exc:
+            return f"% {exc}"
+        return ""
+
+    def _cmd_switchport_trunk_encap(self, tokens: list[str], encap: str) -> str:
+        iface = self._get_current_iface()
+        if iface:
+            iface.trunk_encapsulation = encap
+        return ""
+
+    def _cmd_switchport_port_security(self, tokens: list[str]) -> str:
+        """Basic port security (store config; enforcement not yet simulated)."""
+        iface = self._get_current_iface()
+        if iface:
+            iface._port_security_enabled = True  # type: ignore[attr-defined]
+        return ""
+
+    def _parse_vlan_list(self, s: str) -> Optional[list]:
+        """Parse a Cisco VLAN list string like '1,10,20-30' into a list of ints."""
+        if s.lower() == "all":
+            return None
+        result: list[int] = []
+        try:
+            for part in s.split(","):
+                part = part.strip()
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    result.extend(range(int(a.strip()), int(b.strip()) + 1))
+                else:
+                    result.append(int(part))
+            return sorted(set(result))
+        except ValueError:
+            return None
+
     def _cmd_switchport_access_vlan(self, tokens: list[str]) -> str:
         # tokens: ['switchport', 'access', 'vlan', '<id>']
         if len(tokens) < 4:
@@ -1067,6 +1312,425 @@ class CLISession:
             iface.vlan = 1
             iface.switchport_mode = "access"
         return ""
+
+    def _cmd_no_switchport(self, tokens: list[str]) -> str:
+        iface = self._get_current_iface()
+        if iface:
+            iface.vlan = 1
+            iface.switchport_mode = "access"
+        return ""
+
+    # ── STP per-interface commands ────────────────────────────────────────────
+
+    def _cmd_stp_portfast(self, tokens: list[str], enabled: bool) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        iface_name = self.current_iface
+        if iface_name is None:
+            return "% No interface selected."
+        switch.stp.set_portfast(iface_name, enabled)
+        return ""
+
+    def _cmd_stp_bpduguard(self, tokens: list[str], enabled: bool) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        if self.current_iface:
+            switch.stp.set_bpduguard(self.current_iface, enabled)
+        return ""
+
+    def _cmd_stp_bpdufilter(self, tokens: list[str], enabled: bool) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        if self.current_iface:
+            switch.stp.set_bpdufilter(self.current_iface, enabled)
+        return ""
+
+    def _cmd_stp_guard(self, tokens: list[str], guard: str) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        if self.current_iface:
+            switch.stp.set_guard(self.current_iface, guard)
+        return ""
+
+    def _cmd_stp_port_cost(self, tokens: list[str]) -> str:
+        # tokens: ['spanning-tree', 'cost', '<value>']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        try:
+            cost = int(tokens[2])
+        except ValueError:
+            return f"% Invalid cost: {tokens[2]!r}"
+        for vlan_id in switch.vlans:
+            if self.current_iface:
+                switch.stp.set_port_cost(self.current_iface, vlan_id, cost)
+        return ""
+
+    def _cmd_stp_port_priority_iface(self, tokens: list[str]) -> str:
+        # tokens: ['spanning-tree', 'port-priority', '<value>']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        try:
+            priority = int(tokens[2])
+        except ValueError:
+            return f"% Invalid priority: {tokens[2]!r}"
+        for vlan_id in switch.vlans:
+            if self.current_iface:
+                switch.stp.set_port_priority(self.current_iface, vlan_id, priority)
+        return ""
+
+    def _cmd_stp_iface_vlan(self, tokens: list[str]) -> str:
+        # tokens: ['spanning-tree', 'vlan', '<id>', 'cost|port-priority', '<val>']
+        if len(tokens) < 5:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        try:
+            vlan_id = int(tokens[2])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[2]!r}"
+        sub = tokens[3].lower()
+        if sub == "cost":
+            try:
+                switch.stp.set_port_cost(self.current_iface or "", vlan_id, int(tokens[4]))
+            except ValueError as exc:
+                return f"% {exc}"
+        elif sub == "port-priority":
+            try:
+                switch.stp.set_port_priority(self.current_iface or "", vlan_id, int(tokens[4]))
+            except ValueError as exc:
+                return f"% {exc}"
+        return ""
+
+    # ── Global STP commands ────────────────────────────────────────────────────
+
+    def _cmd_stp_mode(self, tokens: list[str], mode_str: str) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree mode is only available on switch devices."
+        from simulator_core.stp import STPMode
+        mode_map = {
+            "pvst": STPMode.PVST,
+            "rapid-pvst": STPMode.RAPID_PVST,
+            "mst": STPMode.MST,
+        }
+        switch.stp.mode = mode_map.get(mode_str, STPMode.RAPID_PVST)
+        return ""
+
+    def _cmd_stp_global_vlan(self, tokens: list[str]) -> str:
+        """
+        spanning-tree vlan <id> priority <value>
+        spanning-tree vlan <id> root primary|secondary
+        spanning-tree vlan <id> hello-time|forward-time|max-age <value>
+        """
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        try:
+            vlan_id = int(tokens[2])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[2]!r}"
+        sub = tokens[3].lower()
+        if sub == "priority":
+            if len(tokens) < 5:
+                return "% Incomplete command."
+            try:
+                priority = int(tokens[4])
+                switch.stp.set_bridge_priority(vlan_id, priority)
+            except ValueError as exc:
+                return f"% {exc}"
+        elif sub == "root":
+            if len(tokens) < 5:
+                return "% Incomplete command."
+            level = tokens[4].lower()
+            if level == "primary":
+                switch.stp.set_root_primary(vlan_id)
+            elif level == "secondary":
+                switch.stp.set_root_secondary(vlan_id)
+            else:
+                return f"% Unknown root option: {level!r}"
+        elif sub in ("hello-time", "forward-time", "max-age"):
+            if len(tokens) < 5:
+                return "% Incomplete command."
+            try:
+                val = int(tokens[4])
+            except ValueError:
+                return f"% Invalid value: {tokens[4]!r}"
+            inst = switch.stp.get_instance(vlan_id)
+            if inst:
+                if sub == "hello-time":
+                    inst.timers.hello_time = val
+                elif sub == "forward-time":
+                    inst.timers.forward_delay = val
+                elif sub == "max-age":
+                    inst.timers.max_age = val
+        else:
+            return f"% Unknown spanning-tree vlan option: {sub!r}"
+        return ""
+
+    def _cmd_stp_portfast_default(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch:
+            switch.stp._portfast_default = True
+        return ""
+
+    def _cmd_stp_bpduguard_default(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch:
+            # Apply bpduguard to all current portfast ports
+            for inst in switch.stp.all_instances():
+                for port in inst.port_states.values():
+                    if port.portfast:
+                        port.bpduguard = True
+        return ""
+
+    # ── EtherChannel commands ──────────────────────────────────────────────────
+
+    def _cmd_channel_group(self, tokens: list[str]) -> str:
+        """
+        channel-group <1-6> mode <on|active|passive|desirable|auto>
+        """
+        if len(tokens) < 4:
+            return "% Incomplete command.\nUsage: channel-group <1-6> mode <on|active|passive|desirable|auto>"
+        switch = self._get_switch()
+        if switch is None:
+            return "% channel-group is only available on switch devices."
+        try:
+            group_id = int(tokens[1])
+            if not (1 <= group_id <= 6):
+                return "% Channel group ID must be 1-6."
+        except ValueError:
+            return f"% Invalid group ID: {tokens[1]!r}"
+        if tokens[2].lower() != "mode":
+            return "% Expected 'mode' after channel-group ID."
+        protocol_map = {
+            "on":         "on",
+            "active":     "active",
+            "passive":    "passive",
+            "desirable":  "desirable",
+            "auto":       "auto",
+        }
+        proto = tokens[3].lower()
+        if proto not in protocol_map:
+            return f"% Invalid mode: {tokens[3]!r}\nValid modes: {', '.join(protocol_map)}"
+        iface_name = self.current_iface
+        if iface_name is None:
+            return "% No interface selected."
+        switch.add_port_channel(group_id, iface_name, protocol_map[proto])
+        return ""
+
+    # ── Show STP ──────────────────────────────────────────────────────────────
+
+    def _cmd_show_stp_vlan(self, tokens: list[str], vlan_id: Optional[int]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show spanning-tree is only available on switch devices."
+        return switch.stp.show_spanning_tree(vlan_id)
+
+    def _cmd_show_stp_vlan_dispatch(self, tokens: list[str]) -> str:
+        """show spanning-tree vlan <id>"""
+        # tokens: ['show', 'spanning-tree', 'vlan', '<id>']
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        try:
+            vlan_id = int(tokens[3])
+        except ValueError:
+            return f"% Invalid VLAN ID: {tokens[3]!r}"
+        return self._cmd_show_stp_vlan(tokens, vlan_id)
+
+    def _cmd_show_stp_summary(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show spanning-tree is only available on switch devices."
+        return switch.stp.show_spanning_tree_brief()
+
+    # ── Show interfaces trunk / status ────────────────────────────────────────
+
+    def _cmd_show_interfaces_trunk(self, tokens: list[str]) -> str:
+        """show interfaces trunk — Cisco-style trunk info table."""
+        device = self.simulation.topology.devices.get(self.device_id)
+        if not device:
+            return "% Device not found."
+        switch = self._get_switch()
+
+        trunk_ifaces = [
+            (name, iface)
+            for name, iface in device.interfaces.items()
+            if iface.switchport_mode == "trunk"
+        ]
+
+        if not trunk_ifaces:
+            return "% No trunk interfaces configured."
+
+        lines = [
+            "Port        Mode         Encapsulation  Status        Native vlan",
+        ]
+        for name, iface in trunk_ifaces:
+            status = "trunking" if iface.admin_state == InterfaceState.UP else "not-trunking"
+            mode_abbr = "on"
+            lines.append(
+                f"{name:<11} {mode_abbr:<12} {iface.trunk_encapsulation:<14} {status:<13} {iface.trunk_native_vlan}"
+            )
+
+        lines += ["", "Port        VLANs allowed on trunk", ]
+        for name, iface in trunk_ifaces:
+            allowed = iface.trunk_allowed_vlans
+            if allowed is None:
+                vlan_str = "1-4094"
+            else:
+                vlan_str = self._format_vlan_list(allowed)
+            lines.append(f"{name:<11} {vlan_str}")
+
+        if switch:
+            lines += ["", "Port        VLANs allowed and active in management domain"]
+            for name, iface in trunk_ifaces:
+                active = switch.get_active_trunk_vlans(name)
+                vlan_str = self._format_vlan_list(active) if active else "none"
+                lines.append(f"{name:<11} {vlan_str}")
+
+            lines += ["", "Port        VLANs in spanning tree forwarding state and not pruned"]
+            for name, iface in trunk_ifaces:
+                active = switch.get_active_trunk_vlans(name)
+                forwarding = [
+                    v for v in active
+                    if switch.stp.is_port_forwarding(name, v)
+                ]
+                vlan_str = self._format_vlan_list(forwarding) if forwarding else "none"
+                lines.append(f"{name:<11} {vlan_str}")
+
+        return "\n".join(lines)
+
+    def _cmd_show_interfaces_status(self, tokens: list[str]) -> str:
+        """show interfaces status — brief port status table."""
+        device = self.simulation.topology.devices.get(self.device_id)
+        if not device:
+            return "% Device not found."
+        from simulator_core.types import InterfaceState
+
+        lines = [
+            "Port      Name               Status       Vlan       Duplex  Speed Type",
+        ]
+        for name, iface in device.interfaces.items():
+            status = "connected" if iface.admin_state == InterfaceState.UP else "notconnect"
+            mode = iface.switchport_mode
+            if mode == "trunk":
+                vlan_field = "trunk"
+            elif mode == "access":
+                vlan_field = str(iface.vlan)
+            else:
+                vlan_field = "routed"
+            desc = getattr(iface, "_description", "")[:18]
+            lines.append(
+                f"{name:<9} {desc:<18} {status:<12} {vlan_field:<10} a-full  a-100 10/100BaseTX"
+            )
+        return "\n".join(lines)
+
+    # ── Show EtherChannel ─────────────────────────────────────────────────────
+
+    def _cmd_show_etherchannel_summary(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show etherchannel is only available on switch devices."
+        pcs = switch.port_channels
+        if not pcs:
+            return "% No EtherChannel groups configured."
+        flags = (
+            "Flags:  D - down        P - bundled in port-channel\n"
+            "        I - stand-alone s - suspended\n"
+            "        H - Hot-standby (LACP only)\n"
+            "        R - Layer3      S - Layer2\n"
+            "        U - in use      f - failed to allocate aggregator\n"
+            "        M - not in use, minimum links not met\n"
+            "        u - unsuitable for bundling\n"
+        )
+        lines = [
+            flags,
+            "Number of channel-groups in use: " + str(len(pcs)),
+            "Group  Port-channel  Protocol    Ports",
+            "------+-------------+-----------+-----------------------------------------------",
+        ]
+        for gid, pc in sorted(pcs.items()):
+            proto_str = {
+                "on":        "        -",
+                "active":    "    LACP",
+                "passive":   "    LACP",
+                "desirable": "    PAgP",
+                "auto":      "    PAgP",
+            }.get(pc.protocol, "        -")
+            members_str = " ".join(f"{m}(P)" for m in pc.members) if pc.members else "(none)"
+            lines.append(
+                f"{gid:<6} {pc.name:<13} {proto_str:<11} {members_str}"
+            )
+        return "\n".join(lines)
+
+    def _cmd_show_etherchannel_detail(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show etherchannel is only available on switch devices."
+        pcs = switch.port_channels
+        if not pcs:
+            return "% No EtherChannel groups configured."
+        lines = []
+        for gid, pc in sorted(pcs.items()):
+            lines += [
+                f"Group state = L2",
+                f"Ports: {len(pc.members)}  Maxports = 8",
+                f"Port-channels: 1 Max Port-channels = 1",
+                f"Protocol: {'LACP' if pc.protocol in ('active','passive') else 'PAgP' if pc.protocol in ('desirable','auto') else 'None'}",
+                f"Minimum Links: 0",
+                f"",
+                f"                Ports in the group:",
+                f"                -------------------",
+                f" Port: {pc.name}",
+                f"------------",
+                f"Age of the Port-channel   = 0d:00h:00m:00s",
+                f"Logical slot/port   = 1/{gid}  Number of ports = {len(pc.members)}",
+                f"HotStandBy port = null",
+                f"Port state          = Port-channel Ag-Inuse",
+                f"Protocol            =   {'LACP' if pc.protocol in ('active','passive') else 'PAgP' if pc.protocol in ('desirable','auto') else 'None'}",
+                f"Port security       = Disabled",
+                f"",
+            ]
+            for m in pc.members:
+                lines.append(f"  Port: {m}")
+                lines.append(f"  ---")
+                lines.append(f"  Age of the port in the current state: 0d:00h:00m:00s")
+                lines.append(f"  Port state          = Up Mstr Assoc In-Bndl")
+                lines.append(f"  Channel group       = {gid}  Mode = {'Active' if pc.protocol == 'active' else 'Passive' if pc.protocol == 'passive' else pc.protocol.capitalize()}")
+                lines.append(f"  Port-channel        = Po{gid}")
+                lines.append(f"")
+        return "\n".join(lines)
+
+    # ── VLAN list formatter ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_vlan_list(vlans: list[int]) -> str:
+        """Format a list of VLAN IDs as a compact Cisco-style string (e.g. '1,10,20-30')."""
+        if not vlans:
+            return "none"
+        sorted_vlans = sorted(set(vlans))
+        ranges = []
+        start = end = sorted_vlans[0]
+        for v in sorted_vlans[1:]:
+            if v == end + 1:
+                end = v
+            else:
+                ranges.append(f"{start}-{end}" if end > start else str(start))
+                start = end = v
+        ranges.append(f"{start}-{end}" if end > start else str(start))
+        return ",".join(ranges)
 
     # ── User accounts ────────────────────────────────────────────────────────
 

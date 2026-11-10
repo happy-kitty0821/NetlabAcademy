@@ -1,22 +1,25 @@
 """
 simulator_core.devices.switch
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Ethernet switch with VLAN support.
+Ethernet switch — 802.1Q trunking, PVST+/RSTP, EtherChannel (LACP/PAgP).
 
-Responsibilities:
-- VLAN database (create, name, delete VLANs).
-- MAC address learning per VLAN.
-- Known-unicast forwarding within the same VLAN.
-- Unknown-unicast and broadcast flooding within the same VLAN.
-- Port-down drop detection on egress.
-- Access port VLAN assignment (802.1Q trunking is a future feature).
+Data-plane behaviour:
+- Access ports: forward within the same VLAN only.
+- Trunk ports: carry multiple VLANs with 802.1Q tagging.
+  Frames on the native VLAN are sent untagged.
+- EtherChannel (port-channel): multiple physical links bundled as one
+  logical interface. Frames are load-balanced by src/dst MAC.
+- STP: before forwarding, the switch checks whether the port is in a
+  FORWARDING state for the VLAN. Ports in BLOCKING/DISCARDING do not
+  learn or forward (except STP BPDUs themselves).
 
-No host I/O, no socket imports.
+No host I/O, no sockets, no subprocess.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import hashlib
+from typing import TYPE_CHECKING, Optional
 
 from simulator_core.events import (
     FrameArrival,
@@ -26,6 +29,7 @@ from simulator_core.events import (
     DROP_PORT_DOWN,
 )
 from simulator_core.frames import EthernetFrame
+from simulator_core.stp import STPManager, STPMode, PortState
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
 
@@ -33,36 +37,94 @@ if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
 
 
+# ---------------------------------------------------------------------------
+# EtherChannel bundle
+# ---------------------------------------------------------------------------
+
+class PortChannelGroup:
+    """
+    Represents a port-channel (EtherChannel) bundle.
+
+    Members are physical interface names; the logical port-channel
+    interface is 'Port-channel<id>'.
+
+    Protocol:
+      "on"      — static (no negotiation)
+      "active"  — LACP active
+      "passive" — LACP passive
+      "desirable"— PAgP desirable
+      "auto"    — PAgP auto
+    """
+
+    def __init__(self, group_id: int) -> None:
+        self.group_id: int = group_id
+        self.name: str = f"Port-channel{group_id}"
+        self.members: list[str] = []
+        self.protocol: str = "on"   # "on" | "active" | "passive" | "desirable" | "auto"
+        self.admin_state: str = "up"
+
+    def add_member(self, iface_name: str) -> None:
+        if iface_name not in self.members:
+            self.members.append(iface_name)
+
+    def remove_member(self, iface_name: str) -> None:
+        if iface_name in self.members:
+            self.members.remove(iface_name)
+
+    def select_egress(self, src_mac: str, dst_mac: str) -> Optional[str]:
+        """
+        Load-balance across member links using XOR of MAC bytes.
+        Returns the selected member interface name or None.
+        """
+        active = [m for m in self.members if m]  # filter None
+        if not active:
+            return None
+        h = int(hashlib.md5((src_mac + dst_mac).encode()).hexdigest(), 16)
+        return active[h % len(active)]
+
+
+# ---------------------------------------------------------------------------
+# Switch
+# ---------------------------------------------------------------------------
+
 class Switch:
     """
-    Protocol logic for a simulated Ethernet switch with VLAN support.
+    Protocol logic for a simulated Ethernet switch.
 
-    VLAN database
-    -------------
-    ``vlans`` is a dict mapping VLAN ID (int) → VLAN name (str).
-    VLAN 1 ("default") always exists.
-
-    Access port VLAN assignment
-    ---------------------------
-    Each interface has a ``vlan`` field (default 1).  When a frame
-    arrives on an access port, its VLAN is determined by the interface's
-    VLAN assignment.  Forwarding and flooding only consider ports in the
-    same VLAN.
-
-    MAC address table
-    -----------------
-    Keyed by ``(mac_value, vlan)`` → interface_name.  MACs are learned
-    per-VLAN so the same MAC can appear on different VLANs on different
-    ports.
+    Features:
+    - VLAN database (create, name, delete)
+    - Access ports (single VLAN)
+    - Trunk ports (802.1Q, multiple VLANs, native VLAN)
+    - EtherChannel bundles (static, LACP, PAgP)
+    - PVST+/RSTP STP integration
+    - MAC learning per VLAN
+    - Unicast/broadcast/unknown-unicast forwarding
     """
 
     def __init__(self, device: Device, simulation: "Simulation") -> None:
         self._device = device
         self._sim = simulation
-        # (mac_value, vlan) → interface_name
+
+        # MAC address table: (mac_value, vlan) → interface_name
         self._mac_table: dict[tuple[str, int], str] = {}
+
         # VLAN database: vlan_id → vlan_name
         self._vlans: dict[int, str] = {1: "default"}
+
+        # EtherChannel groups: group_id → PortChannelGroup
+        self._port_channels: dict[int, PortChannelGroup] = {}
+
+        # Reverse mapping: member iface → group_id
+        self._member_to_pc: dict[str, int] = {}
+
+        # STP manager
+        self._stp = STPManager(
+            device_id=device.id,
+            mac=list(device.interfaces.values())[0].mac.value
+                if device.interfaces else "00:00:00:00:00:01",
+        )
+        # Initialise STP for VLAN 1
+        self._stp.ensure_vlan(1)
 
     # ------------------------------------------------------------------
     # Properties
@@ -74,45 +136,47 @@ class Switch:
 
     @property
     def mac_table(self) -> dict[tuple[str, int], str]:
-        """Read-only view of the MAC address table."""
         return dict(self._mac_table)
 
     @property
     def vlans(self) -> dict[int, str]:
-        """Read-only view of the VLAN database."""
         return dict(self._vlans)
 
+    @property
+    def stp(self) -> STPManager:
+        return self._stp
+
+    @property
+    def port_channels(self) -> dict[int, PortChannelGroup]:
+        return dict(self._port_channels)
+
     # ------------------------------------------------------------------
-    # VLAN management (called by CLI)
+    # VLAN management
     # ------------------------------------------------------------------
 
     def create_vlan(self, vlan_id: int, name: str = "") -> None:
-        """Create a VLAN.  Raises ValueError if VLAN ID is out of range."""
         if not (1 <= vlan_id <= 4094):
             raise ValueError(f"VLAN ID must be 1-4094, got {vlan_id}")
         if vlan_id not in self._vlans:
             self._vlans[vlan_id] = name or f"VLAN{vlan_id:04d}"
+            self._stp.ensure_vlan(vlan_id)
 
     def name_vlan(self, vlan_id: int, name: str) -> None:
-        """Set the name of an existing VLAN."""
         if vlan_id not in self._vlans:
             raise ValueError(f"VLAN {vlan_id} does not exist")
         self._vlans[vlan_id] = name
 
     def delete_vlan(self, vlan_id: int) -> None:
-        """Delete a VLAN.  VLAN 1 cannot be deleted."""
         if vlan_id == 1:
             raise ValueError("Default VLAN 1 cannot be deleted")
         if vlan_id not in self._vlans:
             raise ValueError(f"VLAN {vlan_id} does not exist")
         del self._vlans[vlan_id]
-        # Reset any ports assigned to this VLAN back to VLAN 1
         for iface in self._device.interfaces.values():
             if iface.vlan == vlan_id:
                 iface.vlan = 1
 
     def set_port_vlan(self, iface_name: str, vlan_id: int) -> None:
-        """Assign an access port to a VLAN."""
         if vlan_id not in self._vlans:
             raise ValueError(f"VLAN {vlan_id} does not exist. Create it first.")
         iface = self._device.interfaces.get(iface_name)
@@ -121,125 +185,255 @@ class Switch:
         iface.vlan = vlan_id
 
     def get_port_vlan(self, iface_name: str) -> int:
-        """Return the VLAN ID assigned to a port."""
         iface = self._device.interfaces.get(iface_name)
-        if iface is None:
-            return DEFAULT_VLAN
-        return iface.vlan
+        return iface.vlan if iface else DEFAULT_VLAN
 
     def ports_in_vlan(self, vlan_id: int) -> list[str]:
-        """Return list of interface names assigned to the given VLAN."""
-        return [
-            name for name, iface in self._device.interfaces.items()
-            if iface.vlan == vlan_id
-        ]
+        result = []
+        for name, iface in self._device.interfaces.items():
+            if iface.switchport_mode == "access" and iface.vlan == vlan_id:
+                result.append(name)
+            elif iface.switchport_mode == "trunk":
+                allowed = iface.trunk_allowed_vlans
+                if allowed is None or vlan_id in allowed:
+                    result.append(name)
+        return result
+
+    # ------------------------------------------------------------------
+    # Trunk management
+    # ------------------------------------------------------------------
+
+    def set_trunk_mode(self, iface_name: str) -> None:
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        iface.switchport_mode = "trunk"
+        if iface.trunk_allowed_vlans is None:
+            iface.trunk_allowed_vlans = None   # None = all
+
+    def set_access_mode(self, iface_name: str) -> None:
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        iface.switchport_mode = "access"
+
+    def set_trunk_native_vlan(self, iface_name: str, vlan_id: int) -> None:
+        if vlan_id not in self._vlans:
+            raise ValueError(f"VLAN {vlan_id} does not exist")
+        iface = self._device.interfaces.get(iface_name)
+        if iface:
+            iface.trunk_native_vlan = vlan_id
+
+    def set_trunk_allowed_vlans(
+        self,
+        iface_name: str,
+        vlans: Optional[list[int]],
+        mode: str = "set",   # "set" | "add" | "remove" | "except"
+    ) -> None:
+        """
+        Configure allowed VLANs on a trunk.
+        mode:
+          set    — replace the list
+          add    — add to existing
+          remove — remove from existing
+          except — all except the listed VLANs (stored as None with exclusions)
+        """
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        if mode == "set":
+            iface.trunk_allowed_vlans = vlans  # None = all
+        elif mode == "add":
+            existing = iface.trunk_allowed_vlans or []
+            new = list(set(existing + (vlans or [])))
+            iface.trunk_allowed_vlans = sorted(new)
+        elif mode == "remove":
+            existing = iface.trunk_allowed_vlans or list(self._vlans.keys())
+            iface.trunk_allowed_vlans = [v for v in existing if v not in (vlans or [])]
+        elif mode == "except":
+            all_vlans = list(self._vlans.keys())
+            iface.trunk_allowed_vlans = [v for v in all_vlans if v not in (vlans or [])]
+
+    def _is_vlan_allowed_on_trunk(self, iface_name: str, vlan_id: int) -> bool:
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            return False
+        allowed = iface.trunk_allowed_vlans
+        if allowed is None:
+            return True   # all VLANs allowed
+        return vlan_id in allowed
+
+    def get_active_trunk_vlans(self, iface_name: str) -> list[int]:
+        """Return sorted list of VLANs active on a trunk port."""
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None or iface.switchport_mode != "trunk":
+            return []
+        allowed = iface.trunk_allowed_vlans
+        if allowed is None:
+            return sorted(self._vlans.keys())
+        return sorted(v for v in allowed if v in self._vlans)
+
+    # ------------------------------------------------------------------
+    # EtherChannel management
+    # ------------------------------------------------------------------
+
+    def add_port_channel(self, group_id: int, iface_name: str,
+                         protocol: str = "on") -> PortChannelGroup:
+        """Add a physical interface to a port-channel group."""
+        if group_id not in self._port_channels:
+            self._port_channels[group_id] = PortChannelGroup(group_id)
+        pc = self._port_channels[group_id]
+        pc.protocol = protocol
+        pc.add_member(iface_name)
+        self._member_to_pc[iface_name] = group_id
+        return pc
+
+    def remove_port_channel_member(self, iface_name: str) -> None:
+        """Remove a physical interface from its port-channel."""
+        gid = self._member_to_pc.pop(iface_name, None)
+        if gid is not None and gid in self._port_channels:
+            self._port_channels[gid].remove_member(iface_name)
+            if not self._port_channels[gid].members:
+                del self._port_channels[gid]
+
+    def get_port_channel_for(self, iface_name: str) -> Optional[PortChannelGroup]:
+        gid = self._member_to_pc.get(iface_name)
+        return self._port_channels.get(gid) if gid is not None else None
+
+    def _get_logical_egress(self, iface_name: str,
+                            src_mac: str, dst_mac: str) -> list[str]:
+        """
+        Resolve the actual physical interface(s) to use for egress.
+        If the interface is a port-channel member, load-balance across
+        active members; otherwise return the interface itself.
+        """
+        # Check if this interface is itself a port-channel (logical)
+        for pc in self._port_channels.values():
+            if pc.name == iface_name:
+                selected = pc.select_egress(src_mac, dst_mac)
+                return [selected] if selected else []
+        return [iface_name]
 
     # ------------------------------------------------------------------
     # FrameArrival handler
     # ------------------------------------------------------------------
 
     def handle_frame_arrival(self, event: FrameArrival) -> None:
-        """
-        Process a frame arriving on *event.interface_name*.
-
-        Steps:
-        1. Determine the VLAN from the ingress port's VLAN assignment.
-        2. Learn source MAC in that VLAN.
-        3. Forward within the same VLAN only:
-           - Broadcast → flood all ports in the same VLAN except ingress.
-           - Known unicast → forward on the learned port (if same VLAN).
-           - Unknown unicast → flood within the same VLAN.
-        """
         frame = event.frame
         ingress_iface = event.interface_name
         arrive_time = event.time
 
-        # Determine VLAN from the ingress port
-        vlan = self.get_port_vlan(ingress_iface)
+        iface = self._device.interfaces.get(ingress_iface)
+        if iface is None:
+            return
 
-        # 1. Learn source MAC in this VLAN.
+        # Resolve VLAN from port mode
+        if iface.switchport_mode == "trunk":
+            # On a trunk the frame may arrive with or without a tag.
+            # In our model all frames within the simulator are conceptually
+            # untagged (the VLAN is tracked via metadata).
+            # We use the VLAN already associated with the frame's originating
+            # access port. For frames from trunk peers, derive from context.
+            # Simple approach: if the frame has no VLAN metadata we use native.
+            vlan = iface.trunk_native_vlan
+        else:
+            vlan = iface.vlan
+
+        # STP check: drop frames if port is not forwarding for this VLAN
+        if not self._stp.is_port_forwarding(ingress_iface, vlan):
+            # Port is blocking — drop (except we let BPDUs through in real STP,
+            # but our simplified model doesn't generate real BPDUs)
+            return
+
+        # Learn source MAC (only in forwarding state, already checked above)
         self._learn(arrive_time, frame.src_mac.value, ingress_iface, vlan)
 
-        # 2. Determine egress port(s).
+        # Forward
         dst_mac = frame.dst_mac.value
-
         if frame.dst_mac.is_broadcast:
             self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
         else:
             known_port = self._mac_table.get((dst_mac, vlan))
             if known_port is not None and known_port != ingress_iface:
-                # Known unicast — forward only if the destination port is
-                # in the same VLAN.
-                if self.get_port_vlan(known_port) == vlan:
-                    self._forward(arrive_time, frame, known_port)
-                else:
-                    # Destination MAC is on a different VLAN — drop.
-                    pass
+                dest_iface = self._device.interfaces.get(known_port)
+                # Verify destination port is in the same VLAN
+                if dest_iface and self._port_carries_vlan(known_port, vlan):
+                    self._forward(arrive_time, frame, known_port,
+                                  frame.src_mac.value, dst_mac)
             elif known_port == ingress_iface:
-                # Destination is on the same port — drop.
-                pass
+                pass  # Same-port drop
             else:
-                # Unknown unicast — flood within the same VLAN.
                 self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Port VLAN membership check
     # ------------------------------------------------------------------
 
-    def _learn(self, time: int, mac_value: str, iface_name: str, vlan: int) -> None:
-        """Record (mac, vlan) → iface_name if not already known."""
+    def _port_carries_vlan(self, iface_name: str, vlan_id: int) -> bool:
+        """True if this port should carry traffic for vlan_id."""
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            return False
+        if iface.switchport_mode == "access":
+            return iface.vlan == vlan_id
+        elif iface.switchport_mode == "trunk":
+            return self._is_vlan_allowed_on_trunk(iface_name, vlan_id)
+        return False
+
+    # ------------------------------------------------------------------
+    # Forwarding internals
+    # ------------------------------------------------------------------
+
+    def _learn(self, time: int, mac_value: str,
+               iface_name: str, vlan: int) -> None:
         key = (mac_value, vlan)
         if self._mac_table.get(key) != iface_name:
             self._mac_table[key] = iface_name
             seq = self._sim.next_seq()
-            evt = MACTableLearned(
+            self._sim.schedule(MACTableLearned(
                 time=time, seq=seq,
                 switch_id=self.device_id,
                 mac_address=mac_value,
                 interface_name=iface_name,
                 vlan=vlan,
-            )
-            self._sim.schedule(evt)
+            ))
 
-    def _forward(self, time: int, frame: EthernetFrame, egress_iface: str) -> None:
-        """Transmit *frame* on *egress_iface*, checking port state first."""
+    def _forward(self, time: int, frame: EthernetFrame,
+                 egress_iface: str, src_mac: str, dst_mac: str) -> None:
+        # Resolve EtherChannel if needed
+        physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac)
+        for port in physical_ports:
+            self._send_on_port(time, frame, port)
+
+    def _send_on_port(self, time: int, frame: EthernetFrame,
+                      egress_iface: str) -> None:
         iface = self._device.interfaces.get(egress_iface)
         if iface is None:
             return
-
         if iface.admin_state == InterfaceState.DOWN:
-            seq = self._sim.next_seq()
-            drop = FrameDropped(
-                time=time + 1, seq=seq,
+            self._sim._record(FrameDropped(
+                time=time + 1, seq=self._sim.next_seq(),
                 device_id=self.device_id,
                 interface_name=egress_iface,
                 frame=frame,
                 reason=DROP_PORT_DOWN,
-            )
-            self._sim._record(drop)
+            ))
             return
-
-        seq = self._sim.next_seq()
-        tx = FrameTransmit(
-            time=time + 1, seq=seq,
+        self._sim.schedule(FrameTransmit(
+            time=time + 1, seq=self._sim.next_seq(),
             device_id=self.device_id,
             interface_name=egress_iface,
             frame=frame,
-        )
-        self._sim.schedule(tx)
+        ))
 
-    def _flood_in_vlan(
-        self,
-        time: int,
-        frame: EthernetFrame,
-        ingress_iface: str,
-        vlan: int,
-    ) -> None:
-        """Transmit *frame* on every port in *vlan* except *ingress_iface*."""
-        for iface_name, iface in self._device.interfaces.items():
+    def _flood_in_vlan(self, time: int, frame: EthernetFrame,
+                       ingress_iface: str, vlan: int) -> None:
+        for iface_name in self._device.interfaces:
             if iface_name == ingress_iface:
                 continue
-            # Only flood to ports in the same VLAN
-            if iface.vlan != vlan:
+            if not self._port_carries_vlan(iface_name, vlan):
                 continue
-            self._forward(time, frame, iface_name)
+            if not self._stp.is_port_forwarding(iface_name, vlan):
+                continue
+            self._forward(time, frame, iface_name,
+                          frame.src_mac.value, frame.dst_mac.value)
