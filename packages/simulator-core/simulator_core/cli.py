@@ -29,6 +29,18 @@ from simulator_core.exceptions import UnsupportedCommandError
 from simulator_core.topology import Interface
 from simulator_core.types import InterfaceState
 
+# ── Speed to STP cost mapping ──────────────────────────────────────────────────
+
+def _speed_to_stp_cost(speed_kbps: int) -> int:
+    """Map a link speed (Kbps) to an STP path cost (short method)."""
+    if speed_kbps <= 10_000:
+        return 100
+    if speed_kbps <= 100_000:
+        return 19
+    if speed_kbps <= 1_000_000:
+        return 4
+    return 2
+
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
 
@@ -536,10 +548,18 @@ class CLISession:
             Cmd("channel-protocol", "EtherChannel protocol (lacp/pagp)",
                 args_hint="<lacp|pagp>",
                 handler=lambda s, t: ""),
-            Cmd("duplex",      "Configure duplex operation (no effect in sim)",
-                handler=lambda s, t: ""),
-            Cmd("speed",       "Configure interface speed (no effect in sim)",
-                handler=lambda s, t: ""),
+            Cmd("speed",       "Configure interface speed",
+                args_hint="<10|100|1000|10000|auto>",
+                handler=lambda s, t: s._cmd_iface_speed(t)),
+            Cmd("duplex",      "Configure duplex operation",
+                children=[
+                    Cmd("auto", "Auto-duplex",
+                        handler=lambda s, t: s._cmd_iface_duplex(t, "auto")),
+                    Cmd("full", "Full-duplex",
+                        handler=lambda s, t: s._cmd_iface_duplex(t, "full")),
+                    Cmd("half", "Half-duplex",
+                        handler=lambda s, t: s._cmd_iface_duplex(t, "half")),
+                ]),
             Cmd("do",          "Run an EXEC command from config mode",
                 args_hint="<exec-command>",
                 handler=lambda s, t: s._cmd_do(t)),
@@ -1056,6 +1076,43 @@ class CLISession:
         iface = self._get_current_iface()
         if iface:
             iface._description = ""  # type: ignore[attr-defined]
+        return ""
+
+    # ── Interface speed / duplex ────────────────────────────────────────────────
+
+    def _cmd_iface_speed(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        val = tokens[1].lower()
+        if val == "auto":
+            from simulator_core.port_types import detect_port_type
+            pt = detect_port_type(iface.name)
+            iface.speed_kbps = pt.speed_kbps
+        else:
+            try:
+                mbps = int(val)
+                iface.speed_kbps = mbps * 1000
+            except ValueError:
+                return f"% Invalid speed: {val!r}\n  Valid: 10, 100, 1000, 10000, auto"
+        # Update STP cost if port is in STP
+        switch = self._get_switch()
+        if switch:
+            from simulator_core.port_types import detect_port_type
+            pt = detect_port_type(iface.name)
+            cost = iface.speed_kbps and _speed_to_stp_cost(iface.speed_kbps) or pt.stp_cost_short
+            for inst in switch.stp.all_instances():
+                port = switch.stp._get_or_create_port(inst, self.current_iface or "")
+                port.path_cost = cost
+        return ""
+
+    def _cmd_iface_duplex(self, tokens: list[str], mode: str) -> str:
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        iface.duplex = mode
         return ""
 
     # ── VLAN config commands ────────────────────────────────────────────────────
@@ -1635,14 +1692,15 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_interfaces_status(self, tokens: list[str]) -> str:
-        """show interfaces status — brief port status table."""
+        """show interfaces status — brief port status table with speed/type."""
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
         from simulator_core.types import InterfaceState
+        from simulator_core.port_types import detect_port_type, format_speed
 
         lines = [
-            "Port      Name               Status       Vlan       Duplex  Speed Type",
+            "Port      Name               Status       Vlan       Duplex  Speed   Type",
         ]
         for name, iface in device.interfaces.items():
             status = "connected" if iface.admin_state == InterfaceState.UP else "notconnect"
@@ -1654,8 +1712,12 @@ class CLISession:
             else:
                 vlan_field = "routed"
             desc = getattr(iface, "_description", "")[:18]
+            pt = detect_port_type(name)
+            speed_str = format_speed(iface.speed_kbps or pt.speed_kbps)
+            duplex_str = iface.duplex if iface.duplex != "auto" else "a-full"
+            type_str = pt.value
             lines.append(
-                f"{name:<9} {desc:<18} {status:<12} {vlan_field:<10} a-full  a-100 10/100BaseTX"
+                f"{name:<9} {desc:<18} {status:<12} {vlan_field:<10} {duplex_str:<7} {speed_str:<7} {type_str}"
             )
         return "\n".join(lines)
 
@@ -2350,6 +2412,8 @@ class CLISession:
 
     def _iface_block(self, iface_name: str) -> str:
         from simulator_core.types import InterfaceState
+        from ipaddress import IPv4Network as _Net
+        from simulator_core.port_types import detect_port_type, format_speed
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return ""
@@ -2359,17 +2423,21 @@ class CLISession:
         up    = iface.admin_state == InterfaceState.UP
         proto = iface.oper_state  == InterfaceState.UP
         desc  = getattr(iface, "_description", "")
+        port_type = detect_port_type(iface_name)
+        speed_str = format_speed(iface.speed_kbps or port_type.speed_kbps)
         lines = [
             f"{iface_name} is {'up' if up else 'administratively down'}, line protocol is {'up' if proto else 'down'}",
         ]
         if desc:
             lines.append(f"  Description: {desc}")
-        lines.append(f"  Hardware is Ethernet, address is {iface.mac} (bia {iface.mac})")
+        lines.append(f"  Hardware is {port_type.cisco_prefix}, address is {iface.mac} (bia {iface.mac})")
         if iface.ip_config:
             lines.append(f"  Internet address is {iface.ip_config.address}/{iface.ip_config.prefix_length}")
-        lines.append(f"  MTU 1500 bytes, BW 100000 Kbit/sec")
+        lines.append(f"  MTU 1500 bytes, BW {speed_str}, DLY 100 usec,")
+        lines.append(f"     reliability 255/255, txload 1/255, rxload 1/255")
         lines.append(f"  Encapsulation ARPA, loopback not set")
-        lines.append(f"  Full-duplex, 100Mb/s")
+        lines.append(f"  Full-duplex, {speed_str}, link type is auto, media type is {port_type.value}")
+        lines.append(f"  Auto-duplex, {speed_str if port_type.is_physical else 'N/A'}, link type is auto")
         lines.append(f"     {iface.rx_frames} packets input,  0 bytes,  0 no buffer")
         lines.append(f"     Received 0 broadcasts, 0 runts, 0 giants, 0 throttles")
         lines.append(f"     0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored")

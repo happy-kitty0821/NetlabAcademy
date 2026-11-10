@@ -593,12 +593,17 @@ class STPManager:
     def _get_or_create_port(self, inst: STPInstance, iface_name: str) -> STPPortState:
         if iface_name not in inst.port_states:
             port_num = len(inst.port_states) + 1
+            # Auto-detect path cost from port type
+            from simulator_core.port_types import detect_port_type
+            port_type = detect_port_type(iface_name)
+            cost = port_type.stp_cost_short
             inst.port_states[iface_name] = STPPortState(
                 interface_name=iface_name,
                 vlan_id=inst.vlan_id,
                 port_id=PortID(priority=128, number=port_num),
                 state=PortState.FORWARDING,
                 role=PortRole.DESIGNATED,
+                path_cost=cost,
             )
         return inst.port_states[iface_name]
 

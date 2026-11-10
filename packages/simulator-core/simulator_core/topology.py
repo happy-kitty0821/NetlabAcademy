@@ -67,6 +67,16 @@ class Interface:
     ip_config: Optional[IPv4Interface] = None
     default_gateway: Optional[str] = None  # dotted-decimal IPv4 string
 
+    # ── Port media type & speed ───────────────────────────────────────────────
+    # "ethernet" (10 Mbps), "fastethernet" (100 Mbps), "gigabitethernet" (1 Gbps),
+    # "tengigabitethernet" (10 Gbps), "loopback" (virtual, no speed)
+    port_type: str = "gigabitethernet"
+    # Configured speed in Kbps (auto-detected from port_type, overridable).
+    # None means auto (use port_type default).
+    speed_kbps: Optional[int] = None
+    # Duplex mode: "auto" | "full" | "half"
+    duplex: str = "auto"
+
     # ── Switchport configuration ──────────────────────────────────────────────
     # Port mode: "access" | "trunk" | "dynamic_auto" | "dynamic_desirable" | "routed"
     switchport_mode: str = "access"
@@ -88,6 +98,18 @@ class Interface:
     # ── Counters ──────────────────────────────────────────────────────────────
     rx_frames: int = field(default=0, repr=False)
     tx_frames: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        # Auto-detect port type from name if not explicitly set
+        if not hasattr(self, '_port_type_detected'):
+            from simulator_core.port_types import detect_port_type, PortType
+            self._port_type_detected = detect_port_type(self.name)
+            # Set port_type string from detected type if it's still default
+            if self.port_type == "gigabitethernet":
+                self.port_type = self._port_type_detected.value
+            # Auto-set speed from port type if not explicitly configured
+            if self.speed_kbps is None:
+                self.speed_kbps = self._port_type_detected.speed_kbps
 
     def set_ip(self, cidr: str) -> None:
         """
