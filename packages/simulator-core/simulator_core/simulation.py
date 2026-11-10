@@ -38,6 +38,7 @@ from simulator_core.types import InterfaceState, PROPAGATION_DELAY
 if TYPE_CHECKING:
     from simulator_core.devices.host import Host
     from simulator_core.devices.switch import Switch
+    from simulator_core.devices.router import Router
 
 
 class Simulation:
@@ -93,6 +94,7 @@ class Simulation:
         # Device protocol objects keyed by device_id.
         self._hosts: dict[str, "Host"] = {}
         self._switches: dict[str, "Switch"] = {}
+        self._routers: dict[str, "Router"] = {}
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -175,6 +177,7 @@ class Simulation:
         self._topology = copy.deepcopy(self._topology_snapshot)
         self._hosts.clear()
         self._switches.clear()
+        self._routers.clear()
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -195,15 +198,23 @@ class Simulation:
         except KeyError:
             raise KeyError(f"No switch device with id {device_id!r}.")
 
+    def get_router(self, device_id: str) -> "Router":
+        """Return the Router protocol object for *device_id*."""
+        try:
+            return self._routers[device_id]
+        except KeyError:
+            raise KeyError(f"No router device with id {device_id!r}.")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _init_devices(self) -> None:
-        """Instantiate Host and Switch protocol objects from the topology."""
+        """Instantiate Host, Switch and Router protocol objects from the topology."""
         # Deferred imports to avoid circular references at module load time.
         from simulator_core.devices.host import Host
         from simulator_core.devices.switch import Switch
+        from simulator_core.devices.router import Router
         from simulator_core.types import DeviceModel
 
         for device in self._topology.devices.values():
@@ -211,6 +222,10 @@ class Simulation:
                 self._hosts[device.id] = Host(device=device, simulation=self)
             elif device.model == DeviceModel.SWITCH:
                 self._switches[device.id] = Switch(device=device, simulation=self)
+            elif device.model == DeviceModel.ROUTER:
+                self._routers[device.id] = Router(device=device, simulation=self)
+                # Build initial connected routes from interface IPs
+                self._routers[device.id].update_connected_routes()
 
     def _record(self, event: SimulationEvent) -> None:
         """Append the event to the trace, enforcing the trace size cap."""
@@ -334,6 +349,10 @@ class Simulation:
             switch = self._switches.get(event.device_id)
             if switch is not None:
                 switch.handle_frame_arrival(event)
+        elif device.model == DeviceModel.ROUTER:
+            router = self._routers.get(event.device_id)
+            if router is not None:
+                router.handle_frame_arrival(event)
 
     def _drop(
         self,

@@ -20,7 +20,7 @@ export interface DeviceCatalogEntry {
   /** Friendly model identifier */
   modelName: string;
   /** Simulator model type */
-  model: "host" | "switch";
+  model: "host" | "switch" | "router";
   /** Icon identifier */
   icon: "pc" | "laptop" | "server" | "switch-l2" | "router";
   /** Whether the simulator supports this device type */
@@ -33,9 +33,9 @@ export interface DeviceCatalogEntry {
 
 export interface DeviceNodeData extends Record<string, unknown> {
   hostname: string;
-  model: "host" | "switch";
+  model: "host" | "switch" | "router";
   catalogId: string;        // references DeviceCatalogEntry.id
-  ip?: string;              // CIDR, e.g. "192.168.1.1/24" (hosts only)
+  ip?: string;              // CIDR, e.g. "192.168.1.1/24" (hosts/routers)
   gateway?: string;
 }
 
@@ -86,9 +86,9 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     id: "cisco-2911",
     label: "2911 Router",
     modelName: "Cisco 2911 Router",
-    model: "switch",   // mapped to switch until routing is implemented
+    model: "router",
     icon: "router",
-    simulated: false,  // routing not yet in simulator
-    description: "Layer 3 router. Routing support coming in a future update.",
+    simulated: true,
+    description: "Layer 3 router. Supports static routing, ip route commands, show ip route.",
   },
 ];

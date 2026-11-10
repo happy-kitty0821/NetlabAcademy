@@ -91,7 +91,6 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
                 f"Node {node_id!r} has invalid model {model_str!r}. "
                 f"Valid models: {', '.join(m.value for m in DeviceModel)}."
             )
-
         hostname = node.get("hostname", node_id)
         device = Device(id=str(node_id), model=model, hostname=hostname)
 
@@ -255,6 +254,25 @@ def get_device_state(session: SimulationSession, device_id: str) -> dict[str, An
         state["mac_table"] = [
             {"mac": mac, "vlan": vlan, "interface": iface}
             for (mac, vlan), iface in switch.mac_table.items()
+        ]
+        state["vlans"] = [
+            {"id": vid, "name": vname}
+            for vid, vname in switch.vlans.items()
+        ]
+    elif device.model == DeviceModel.ROUTER:
+        router = sim.get_router(device_id)
+        state["arp_cache"] = {
+            str(ip): mac.value for ip, mac in router.arp_cache.items()
+        }
+        state["routing_table"] = [
+            {
+                "network": str(r.network),
+                "next_hop": str(r.next_hop) if r.next_hop else "connected",
+                "interface": r.outgoing_interface,
+                "source": r.source.name.lower(),
+                "metric": r.metric,
+            }
+            for r in router.routing_table.routes
         ]
 
     return state

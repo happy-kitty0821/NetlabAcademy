@@ -207,6 +207,27 @@ class TraceLimitReached(SimulationEvent):
 
 
 # ---------------------------------------------------------------------------
+# Routing events
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RouteAdded(SimulationEvent):
+    """A route was added to a router's routing table."""
+    device_id: str
+    network: str    # e.g. "10.0.0.0/8"
+    next_hop: str   # e.g. "192.168.1.254" or "connected"
+    source: str     # "connected" or "static"
+
+
+@dataclass(frozen=True)
+class RouteRemoved(SimulationEvent):
+    """A route was removed from a router's routing table."""
+    device_id: str
+    network: str
+
+
+# ---------------------------------------------------------------------------
 # Convenience registry (used by serialisation)
 # ---------------------------------------------------------------------------
 

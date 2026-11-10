@@ -8,7 +8,7 @@ import { apiFetch } from "./api";
 
 export interface TopologyNode {
   id: string;
-  model: "host" | "switch";
+  model: "host" | "switch" | "router";
   hostname?: string;
   interfaces: {
     name: string;

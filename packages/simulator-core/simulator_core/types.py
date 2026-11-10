@@ -21,6 +21,7 @@ class DeviceModel(Enum):
 
     HOST = "host"
     SWITCH = "switch"
+    ROUTER = "router"
 
 
 # ---------------------------------------------------------------------------

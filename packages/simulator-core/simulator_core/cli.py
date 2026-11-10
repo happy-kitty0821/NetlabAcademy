@@ -279,6 +279,12 @@ class CLISession:
                     Cmd("vlan", "Delete a VLAN",
                         args_hint="<vlan-id>",
                         handler=lambda s, t: s._cmd_no_vlan(t)),
+                    Cmd("ip",   "Negate IP configuration",
+                        children=[
+                            Cmd("route", "Remove a static route",
+                                args_hint="<network> <mask> <next-hop>",
+                                handler=lambda s, t: s._cmd_no_ip_route(t)),
+                        ]),
                     Cmd("hostname", "Reset hostname",
                         handler=lambda s, t: s._cmd_hostname(["hostname", "Router"])),
                 ]),
@@ -286,6 +292,9 @@ class CLISession:
                 children=[
                     Cmd("routing", "Enable IP routing (no effect in L2-only sim)",
                         handler=lambda s, t: ""),
+                    Cmd("route",   "Establish a static route",
+                        args_hint="<network> <mask> <next-hop>",
+                        handler=lambda s, t: s._cmd_ip_route(t)),
                 ]),
             Cmd("banner",     "Define a login banner (not persisted)",
                 handler=lambda s, t: ""),
@@ -749,6 +758,79 @@ class CLISession:
         switch.name_vlan(self.current_vlan, f"VLAN{self.current_vlan:04d}")
         return ""
 
+    # ── Static routing commands ───────────────────────────────────────────────
+
+    def _get_router(self):
+        """Return the Router object for this session, or None."""
+        try:
+            return self.simulation.get_router(self.device_id)
+        except KeyError:
+            return None
+
+    def _parse_network_and_mask(self, net_str: str, mask_str: str):
+        """Parse a network + dotted-mask pair, return IPv4Network or None."""
+        from ipaddress import IPv4Address, IPv4Network
+        try:
+            if "." in mask_str:
+                # Dotted mask like 255.255.255.0
+                prefix = bin(int(IPv4Address(mask_str))).count("1")
+            else:
+                prefix = int(mask_str)
+            return IPv4Network(f"{net_str}/{prefix}", strict=False)
+        except Exception:
+            return None
+
+    def _cmd_ip_route(self, tokens: list[str]) -> str:
+        # tokens: ['ip', 'route', '<network>', '<mask>', '<next-hop>']
+        if len(tokens) < 5:
+            return "% Incomplete command.\nUsage: ip route <network> <mask> <next-hop>"
+        net_str, mask_str, nh_str = tokens[2], tokens[3], tokens[4]
+        network = self._parse_network_and_mask(net_str, mask_str)
+        if network is None:
+            return f"% Invalid network or mask: {net_str} {mask_str}"
+        from ipaddress import IPv4Address
+        try:
+            next_hop = IPv4Address(nh_str)
+        except ValueError:
+            return f"% Invalid next-hop address: {nh_str!r}"
+        router = self._get_router()
+        if router is None:
+            return "% ip route is only available on router devices."
+        # Find the outgoing interface for this next-hop
+        # Look for the interface whose subnet contains the next-hop
+        iface_name = None
+        for name, iface in self.simulation.topology.devices[self.device_id].interfaces.items():
+            if iface.ip_config and next_hop in iface.ip_config.network:
+                iface_name = name
+                break
+        if iface_name is None:
+            # Still add the route — the interface will be found at forward time
+            # Try to find any UP interface as a default
+            for name, iface in self.simulation.topology.devices[self.device_id].interfaces.items():
+                from simulator_core.types import InterfaceState
+                if iface.admin_state == InterfaceState.UP:
+                    iface_name = name
+                    break
+        if iface_name is None:
+            return "% No suitable interface found for this static route."
+        router.routing_table.add_static_route(network, next_hop, iface_name)
+        return ""
+
+    def _cmd_no_ip_route(self, tokens: list[str]) -> str:
+        # tokens: ['no', 'ip', 'route', '<network>', '<mask>']
+        if len(tokens) < 5:
+            return "% Incomplete command.\nUsage: no ip route <network> <mask> <next-hop>"
+        net_str, mask_str = tokens[3], tokens[4]
+        network = self._parse_network_and_mask(net_str, mask_str)
+        if network is None:
+            return f"% Invalid network or mask: {net_str} {mask_str}"
+        router = self._get_router()
+        if router is None:
+            return "% ip route is only available on router devices."
+        if not router.routing_table.remove_static_route(network):
+            return f"% Route {network} not found."
+        return ""
+
     # ── Switchport commands ───────────────────────────────────────────────────
 
     def _cmd_switchport_mode_access(self, tokens: list[str]) -> str:
@@ -890,11 +972,32 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_ip_route(self, tokens: list[str]) -> str:
-        return (
-            "Codes: C - connected, S - static\n\n"
-            "% Routing is not yet implemented in this simulator.\n"
-            "  (Stage C — static routing is a planned feature.)"
-        )
+        try:
+            router = self.simulation.get_router(self.device_id)
+        except KeyError:
+            return "% show ip route is only available on router devices."
+
+        rt = router.routing_table
+        if not rt.routes:
+            return "% No routes in routing table."
+
+        source_codes = {
+            "CONNECTED": "C",
+            "STATIC":    "S",
+        }
+
+        lines = [
+            "Codes: C - connected, S - static\n",
+            "Gateway of last resort is not set\n",
+        ]
+        for entry in rt.routes:
+            code = source_codes.get(entry.source.name, "?")
+            if entry.next_hop:
+                via = f" via {entry.next_hop}"
+            else:
+                via = f", directly connected"
+            lines.append(f"{code}    {str(entry.network):<20} [{entry.metric}/0]{via}, {entry.outgoing_interface}")
+        return "\n".join(lines)
 
     def _cmd_show_interfaces_all(self, tokens: list[str]) -> str:
         """show interfaces — all interfaces."""

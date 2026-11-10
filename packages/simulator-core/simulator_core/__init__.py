@@ -44,6 +44,7 @@ from simulator_core.simulation import Simulation
 # ---------------------------------------------------------------------------
 from simulator_core.devices.host import Host, PingResult, EchoResult
 from simulator_core.devices.switch import Switch
+from simulator_core.devices.router import Router
 
 # ---------------------------------------------------------------------------
 # Events (for trace inspection)
@@ -91,7 +92,7 @@ __all__ = [
     # Simulation
     "Simulation",
     # Devices
-    "Host", "Switch", "PingResult", "EchoResult",
+    "Host", "Switch", "Router", "PingResult", "EchoResult",
     # Events
     "SimulationEvent",
     "FrameArrival", "FrameTransmit", "FrameDropped",

@@ -129,6 +129,15 @@ export function convertFlowToTopology(
       mac_seed: idx * 10 + i,
     }));
 
+    if (data.model === "router") {
+      return {
+        id: node.id,
+        model: "router" as const,
+        hostname,
+        interfaces,
+      };
+    }
+
     return {
       id: node.id,
       model: "switch" as const,

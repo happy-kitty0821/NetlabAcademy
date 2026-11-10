@@ -20,7 +20,7 @@ class InterfaceSpecSerializer(serializers.Serializer):
 class NodeSpecSerializer(serializers.Serializer):
     """One node (device) in the topology document."""
     id = serializers.CharField(max_length=64)
-    model = serializers.ChoiceField(choices=["host", "switch"])
+    model = serializers.ChoiceField(choices=["host", "switch", "router"])
     hostname = serializers.CharField(max_length=128, required=False)
     interfaces = InterfaceSpecSerializer(many=True)
 
