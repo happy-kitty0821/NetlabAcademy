@@ -19,6 +19,7 @@ from typing import Optional
 from simulator_core.addresses import IPv4Interface, MACAddress
 from simulator_core.exceptions import ConfigurationError, TopologyError
 from simulator_core.types import DeviceModel, InterfaceState
+from simulator_core.device_config import DeviceConfig
 
 # ---------------------------------------------------------------------------
 # Topology size limits (configurable defaults)
@@ -134,12 +135,15 @@ class Device:
         Human-readable label.
     interfaces:
         Ordered mapping of interface name → Interface.
+    config:
+        Shared device configuration (users, lines, logging, enable secret).
     """
 
     id: str
     model: DeviceModel
     hostname: str
     interfaces: dict[str, Interface] = field(default_factory=dict)
+    config: DeviceConfig = field(default_factory=DeviceConfig)
 
     def add_interface(self, interface: Interface) -> None:
         """

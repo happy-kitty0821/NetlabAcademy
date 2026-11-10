@@ -81,6 +81,7 @@ class CLIMode(Enum):
     GLOBAL_CONFIG = auto()
     IFACE_CONFIG  = auto()
     VLAN_CONFIG   = auto()
+    LINE_CONFIG   = auto()
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,8 @@ class CLISession:
     simulation: "Simulation"
     mode: CLIMode = CLIMode.USER_EXEC
     current_iface: Optional[str] = None
-    current_vlan: Optional[int] = None  # VLAN ID when in VLAN_CONFIG
+    current_vlan: Optional[int] = None
+    current_line: Optional[str] = None  # e.g. "console 0", "vty 0 4"
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -110,6 +112,7 @@ class CLISession:
             CLIMode.GLOBAL_CONFIG: "(config)#",
             CLIMode.IFACE_CONFIG:  "(config-if)#",
             CLIMode.VLAN_CONFIG:   "(config-vlan)#",
+            CLIMode.LINE_CONFIG:   "(config-line)#",
         }
         return f"{hostname}{suffixes.get(self.mode, '>')}"
 
@@ -125,7 +128,7 @@ class CLISession:
 
         # Ctrl+Z is identical to 'end'
         if stripped == "\x1a" or stripped.lower() == "end":
-            return self._cmd_end([])
+            return self._cmd_end(["end"])
 
         if not stripped:
             return ""
@@ -204,6 +207,8 @@ class CLISession:
             return self._iface_tree()
         if self.mode == CLIMode.VLAN_CONFIG:
             return self._vlan_tree()
+        if self.mode == CLIMode.LINE_CONFIG:
+            return self._line_tree()
         return []
 
     def _user_tree(self) -> list[Cmd]:
@@ -274,6 +279,21 @@ class CLISession:
             Cmd("vlan",       "Configure a VLAN",
                 args_hint="<vlan-id>",
                 handler=lambda s, t: s._cmd_enter_vlan(t)),
+            Cmd("line",       "Configure a terminal line",
+                args_hint="[console|vty|aux] <first> [last]",
+                handler=lambda s, t: s._cmd_enter_line(t)),
+            Cmd("username",   "Establish User Name Authentication",
+                args_hint="<name> privilege <0-15> secret <password>",
+                handler=lambda s, t: s._cmd_username(t)),
+            Cmd("enable",     "Modify enable password parameters",
+                children=[
+                    Cmd("secret",   "Assign the privileged level secret",
+                        args_hint="<password>",
+                        handler=lambda s, t: s._cmd_enable_secret(t)),
+                    Cmd("password", "Assign the privileged level password",
+                        args_hint="<password>",
+                        handler=lambda s, t: s._cmd_enable_password(t)),
+                ]),
             Cmd("no",         "Negate a command or set its defaults",
                 children=[
                     Cmd("vlan", "Delete a VLAN",
@@ -284,20 +304,51 @@ class CLISession:
                             Cmd("route", "Remove a static route",
                                 args_hint="<network> <mask> <next-hop>",
                                 handler=lambda s, t: s._cmd_no_ip_route(t)),
+                            Cmd("domain-lookup", "Disable DNS lookups",
+                                handler=lambda s, t: s._cmd_no_ip_domain_lookup(t)),
                         ]),
                     Cmd("hostname", "Reset hostname",
                         handler=lambda s, t: s._cmd_hostname(["hostname", "Router"])),
+                    Cmd("enable", "Remove enable password",
+                        children=[
+                            Cmd("secret",   "Remove enable secret",
+                                handler=lambda s, t: s._cmd_no_enable_secret(t)),
+                            Cmd("password", "Remove enable password",
+                                handler=lambda s, t: s._cmd_no_enable_password(t)),
+                        ]),
+                    Cmd("username", "Remove a user account",
+                        args_hint="<name>",
+                        handler=lambda s, t: s._cmd_no_username(t)),
+                    Cmd("logging", "Remove a logging destination",
+                        args_hint="<host>",
+                        handler=lambda s, t: s._cmd_no_logging(t)),
                 ]),
             Cmd("ip",         "IP configuration",
                 children=[
-                    Cmd("routing", "Enable IP routing (no effect in L2-only sim)",
+                    Cmd("routing", "Enable IP routing",
                         handler=lambda s, t: ""),
                     Cmd("route",   "Establish a static route",
                         args_hint="<network> <mask> <next-hop>",
                         handler=lambda s, t: s._cmd_ip_route(t)),
+                    Cmd("domain-lookup", "Enable DNS lookups",
+                        handler=lambda s, t: s._cmd_ip_domain_lookup(t)),
+                    Cmd("domain-name", "Define the default domain name",
+                        args_hint="<name>",
+                        handler=lambda s, t: s._cmd_ip_domain_name(t)),
                 ]),
-            Cmd("banner",     "Define a login banner (not persisted)",
-                handler=lambda s, t: ""),
+            Cmd("logging",    "Modify message logging facilities",
+                args_hint="[buffered|console|host|on|synchronous] ...",
+                handler=lambda s, t: s._cmd_logging(t)),
+            Cmd("service",    "Modify use of network based services",
+                children=[
+                    Cmd("password-encryption", "Encrypt system passwords",
+                        handler=lambda s, t: s._cmd_service_password_encryption(t)),
+                    Cmd("timestamps",          "Timestamp debug/log messages",
+                        handler=lambda s, t: ""),
+                ]),
+            Cmd("banner",     "Define a login banner",
+                args_hint="motd | login | exec",
+                handler=lambda s, t: s._cmd_banner(t)),
             Cmd("do",         "Run an EXEC command from config mode",
                 args_hint="<exec-command>",
                 handler=lambda s, t: s._cmd_do(t)),
@@ -383,6 +434,53 @@ class CLISession:
                 handler=lambda s, t: s._cmd_end(t)),
         ]
 
+    def _line_tree(self) -> list[Cmd]:
+        return [
+            Cmd("login",          "Enable password checking",
+                handler=lambda s, t: s._cmd_line_login(t)),
+            Cmd("password",       "Set a password on the line",
+                args_hint="<password>",
+                handler=lambda s, t: s._cmd_line_password(t)),
+            Cmd("exec-timeout",   "Set the EXEC command-line idle timeout",
+                args_hint="<minutes> [seconds]",
+                handler=lambda s, t: s._cmd_line_exec_timeout(t)),
+            Cmd("logging",        "Control logging to this line",
+                children=[
+                    Cmd("synchronous", "Synchronous logging output",
+                        handler=lambda s, t: s._cmd_line_logging_sync(t)),
+                ]),
+            Cmd("transport",      "Define transport protocols for a line",
+                children=[
+                    Cmd("input", "Define input transport protocols",
+                        args_hint="<protocol>",
+                        handler=lambda s, t: s._cmd_line_transport(t)),
+                ]),
+            Cmd("privilege",      "Change the current privilege level for this line",
+                args_hint="<level>",
+                handler=lambda s, t: s._cmd_line_privilege(t)),
+            Cmd("no",            "Negate a command",
+                children=[
+                    Cmd("login", "Disable password checking",
+                        handler=lambda s, t: s._cmd_line_no_login(t)),
+                    Cmd("password", "Remove password",
+                        handler=lambda s, t: s._cmd_line_no_password(t)),
+                    Cmd("exec-timeout", "Remove timeout",
+                        handler=lambda s, t: s._cmd_line_no_exec_timeout(t)),
+                    Cmd("logging",  "Disable logging",
+                        children=[
+                            Cmd("synchronous", "Disable synchronous logging",
+                                handler=lambda s, t: s._cmd_line_no_logging_sync(t)),
+                        ]),
+                ]),
+            Cmd("do",            "Run an EXEC command from config mode",
+                args_hint="<exec-command>",
+                handler=lambda s, t: s._cmd_do(t)),
+            Cmd("exit",          "Exit from line configuration mode",
+                handler=lambda s, t: s._cmd_end(t)),
+            Cmd("end",           "End and return to privileged EXEC",
+                handler=lambda s, t: s._cmd_end(t)),
+        ]
+
     def _show_subcmds(self) -> list[Cmd]:
         return [
             Cmd("version",     "System hardware and software status",
@@ -444,6 +542,10 @@ class CLISession:
                 handler=lambda s, t: f"% Logical clock: tick {self.simulation.clock}"),
             Cmd("history",     "Display the session command history",
                 handler=lambda s, t: "% Command history: not yet implemented."),
+            Cmd("logging",     "Display logging information",
+                handler=lambda s, t: s._cmd_show_logging(t)),
+            Cmd("users",        "Display information about terminal lines",
+                handler=lambda s, t: s._cmd_show_users(t)),
         ]
 
     def _iface_names(self) -> list[str]:
@@ -574,6 +676,9 @@ class CLISession:
         elif self.mode == CLIMode.VLAN_CONFIG:
             self.mode = CLIMode.GLOBAL_CONFIG
             self.current_vlan = None
+        elif self.mode == CLIMode.LINE_CONFIG:
+            self.mode = CLIMode.GLOBAL_CONFIG
+            self.current_line = None
         elif self.mode == CLIMode.GLOBAL_CONFIG:
             self.mode = CLIMode.PRIV_EXEC
         elif self.mode == CLIMode.PRIV_EXEC:
@@ -866,6 +971,355 @@ class CLISession:
             iface.switchport_mode = "access"
         return ""
 
+    # ── User accounts ────────────────────────────────────────────────────────
+
+    def _get_config(self):
+        """Return the DeviceConfig for this session's device."""
+        device = self.simulation.topology.devices.get(self.device_id)
+        return device.config if device else None
+
+    def _cmd_username(self, tokens: list[str]) -> str:
+        # tokens: ['username', '<name>', 'privilege', '<level>', 'secret', '<password>']
+        # or simplified: ['username', '<name>', 'secret', '<password>']
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        username = tokens[1]
+        privilege = 1
+        password = ""
+        # Parse: privilege <level> secret <password>
+        i = 2
+        while i < len(tokens):
+            if tokens[i].lower() == "privilege" and i + 1 < len(tokens):
+                try:
+                    privilege = int(tokens[i + 1])
+                    if not (0 <= privilege <= 15):
+                        return f"% Privilege level must be 0-15."
+                except ValueError:
+                    return f"% Invalid privilege level: {tokens[i + 1]!r}"
+                i += 2
+            elif tokens[i].lower() in ("secret", "password") and i + 1 < len(tokens):
+                password = tokens[i + 1]
+                i += 2
+            else:
+                i += 1
+        if not password:
+            return "% Incomplete command. Usage: username <name> [privilege <level>] secret <password>"
+        config.add_user(username, password, privilege)
+        return ""
+
+    def _cmd_no_username(self, tokens: list[str]) -> str:
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        username = tokens[2]
+        if not config.remove_user(username):
+            return f"% User {username!r} not found."
+        return ""
+
+    # ── Enable secret / password ──────────────────────────────────────────────
+
+    def _cmd_enable_secret(self, tokens: list[str]) -> str:
+        # tokens: ['enable', 'secret', '<password>']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config:
+            config.set_enable_secret(tokens[2])
+        return ""
+
+    def _cmd_no_enable_secret(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.enable_secret_hash = None
+            config.enable_auth_required = config.enable_password_hash is not None
+        return ""
+
+    def _cmd_enable_password(self, tokens: list[str]) -> str:
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config:
+            config.set_enable_password(tokens[2])
+        return ""
+
+    def _cmd_no_enable_password(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.enable_password_hash = None
+            config.enable_auth_required = config.enable_secret_hash is not None
+        return ""
+
+    # ── Line config ───────────────────────────────────────────────────────────
+
+    def _cmd_enter_line(self, tokens: list[str]) -> str:
+        # tokens: ['line', '<console|vty|aux>', '<first>', '[last]']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        line_type_str = tokens[1].lower()
+        from simulator_core.device_config import LineType
+        if line_type_str == "console":
+            self.mode = CLIMode.LINE_CONFIG
+            self.current_line = "console 0"
+            return ""
+        elif line_type_str == "vty":
+            first = int(tokens[2]) if tokens[2].isdigit() else 0
+            last = int(tokens[3]) if len(tokens) > 3 and tokens[3].isdigit() else first
+            self.mode = CLIMode.LINE_CONFIG
+            self.current_line = f"vty {first} {last}" if last > first else f"vty {first}"
+            return ""
+        elif line_type_str == "aux":
+            self.mode = CLIMode.LINE_CONFIG
+            self.current_line = "aux 0"
+            return ""
+        return f"% Invalid line type: {line_type_str!r}"
+
+    def _cmd_line_login(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        if "local" in [t.lower() for t in tokens]:
+            for line in self._get_current_lines(config):
+                line.login_local = True
+                line.login = False
+        else:
+            for line in self._get_current_lines(config):
+                line.login = True
+                line.login_local = False
+        return ""
+
+    def _cmd_line_no_login(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.login = False
+            line.login_local = False
+        return ""
+
+    def _cmd_line_password(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.set_password(tokens[1])
+        return ""
+
+    def _cmd_line_no_password(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.password_hash = None
+        return ""
+
+    def _cmd_line_exec_timeout(self, tokens: list[str]) -> str:
+        # tokens: ['exec-timeout', '<minutes>', '[seconds]']
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        try:
+            minutes = int(tokens[1])
+            seconds = int(tokens[2]) if len(tokens) > 2 else 0
+        except ValueError:
+            return "% Invalid timeout value."
+        for line in self._get_current_lines(config):
+            line.exec_timeout = minutes * 60 + seconds
+        return ""
+
+    def _cmd_line_no_exec_timeout(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.exec_timeout = 0  # 0 = never timeout
+        return ""
+
+    def _cmd_line_logging_sync(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.logging_synchronous = True
+        return ""
+
+    def _cmd_line_no_logging_sync(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        for line in self._get_current_lines(config):
+            line.logging_synchronous = False
+        return ""
+
+    def _cmd_line_transport(self, tokens: list[str]) -> str:
+        # tokens: ['transport', 'input', '<protocol>...']
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        protocols = tokens[2:]
+        for line in self._get_current_lines(config):
+            line.transport_input = protocols
+        return ""
+
+    def _cmd_line_privilege(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None or self.current_line is None:
+            return "% Not in line configuration mode."
+        try:
+            level = int(tokens[1])
+            if not (0 <= level <= 15):
+                return "% Privilege level must be 0-15."
+        except ValueError:
+            return "% Invalid privilege level."
+        for line in self._get_current_lines(config):
+            line.privilege = level
+        return ""
+
+    def _get_current_lines(self, config):
+        """Return the LineConfig objects matching self.current_line."""
+        from simulator_core.device_config import LineType
+        if not self.current_line:
+            return []
+        parts = self.current_line.split()
+        if parts[0] == "console":
+            return [config.console_line]
+        elif parts[0] == "vty":
+            if len(parts) >= 3:
+                first, last = int(parts[1]), int(parts[2])
+            else:
+                first = last = int(parts[1])
+            return config.get_vty_range(first, last)
+        elif parts[0] == "aux":
+            return [config.aux_line]
+        return []
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+
+    def _cmd_logging(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        sub = tokens[1].lower()
+        if sub == "buffered":
+            # logging buffered [<size>] [<level>]
+            if len(tokens) > 2:
+                t2 = tokens[2]
+                if t2.isdigit():
+                    config.logging_buffered_size = int(t2)
+                    if len(tokens) > 3:
+                        try:
+                            config.logging_buffered_level = __import__(
+                                "simulator_core.device_config", fromlist=["LogSeverity"]
+                            ).LogSeverity.from_name(tokens[3])
+                        except ValueError:
+                            return f"% Invalid log level: {tokens[3]!r}"
+                else:
+                    try:
+                        config.logging_buffered_level = __import__(
+                            "simulator_core.device_config", fromlist=["LogSeverity"]
+                        ).LogSeverity.from_name(t2)
+                    except ValueError:
+                        return f"% Invalid log level: {t2!r}"
+            config.logging_enabled = True
+            return ""
+        if sub == "console":
+            if len(tokens) > 2:
+                try:
+                    config.logging_console_level = __import__(
+                        "simulator_core.device_config", fromlist=["LogSeverity"]
+                    ).LogSeverity.from_name(tokens[2])
+                except ValueError:
+                    return f"% Invalid log level: {tokens[2]!r}"
+            return ""
+        if sub == "synchronous":
+            config.logging_enabled = True
+            return ""
+        if sub == "on":
+            config.logging_enabled = True
+            return ""
+        # Assume it's a host IP for syslog
+        config.logging_hosts.append(tokens[1])
+        return ""
+
+    def _cmd_no_logging(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        host = tokens[2]
+        if host in config.logging_hosts:
+            config.logging_hosts.remove(host)
+        return ""
+
+    # ── Service ──────────────────────────────────────────────────────────────
+
+    def _cmd_service_password_encryption(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.service_password_encryption = True
+        return ""
+
+    # ── Banner ────────────────────────────────────────────────────────────────
+
+    def _cmd_banner(self, tokens: list[str]) -> str:
+        if len(tokens) < 2:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        banner_type = tokens[1].lower()
+        # Cisco uses delimiters; for simplicity we take the rest as the text
+        text = " ".join(tokens[2:]).strip("^C").strip()
+        if banner_type == "motd":
+            config.banner_motd = text
+        elif banner_type == "login":
+            config.banner_login = text
+        elif banner_type == "exec":
+            config.banner_exec = text
+        else:
+            return f"% Unknown banner type: {banner_type!r}"
+        return ""
+
+    # ── IP settings ───────────────────────────────────────────────────────────
+
+    def _cmd_ip_domain_lookup(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.no_ip_domain_lookup = False
+        return ""
+
+    def _cmd_no_ip_domain_lookup(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.no_ip_domain_lookup = True
+        return ""
+
+    def _cmd_ip_domain_name(self, tokens: list[str]) -> str:
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        config = self._get_config()
+        if config:
+            config.ip_domain_name = tokens[2]
+        return ""
+
     # ── Ping ──────────────────────────────────────────────────────────────────
 
     def _cmd_ping(self, tokens: list[str]) -> str:
@@ -1094,6 +1548,11 @@ class CLISession:
             "!",
             "version 0.1 (educational)",
             "!",
+        ]
+        # Device-level config lines (users, lines, logging, etc.)
+        lines += device.config.show_running_config_lines()
+        lines += [
+            "!",
             f"hostname {device.hostname}",
             "!",
         ]
@@ -1107,6 +1566,10 @@ class CLISession:
                 net = _Net(f"0.0.0.0/{iface.ip_config.prefix_length}", strict=False)
                 mask = str(net.netmask)
                 lines.append(f" ip address {iface.ip_config.address} {mask}")
+            if hasattr(iface, "switchport_mode") and iface.switchport_mode == "access":
+                lines.append(f" switchport mode access")
+                if iface.vlan != 1:
+                    lines.append(f" switchport access vlan {iface.vlan}")
             if iface.admin_state == InterfaceState.DOWN:
                 lines.append(" shutdown")
             else:
@@ -1158,6 +1621,44 @@ class CLISession:
             ports = switch.ports_in_vlan(vlan_id)
             port_str = ", ".join(ports) if ports else ""
             lines.append(f"{vlan_id:<4} {name:<32} active    {port_str}")
+        return "\n".join(lines)
+
+    def _cmd_show_logging(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        lines = [
+            "Syslog logging: enabled (" + config.logging_console_level.name.lower() + ")",
+            f"Logging buffer size: {config.logging_buffered_size}",
+            f"Logging hosts: {', '.join(config.logging_hosts) or 'none'}",
+            f"Facility: {config.logging_facility}",
+            "",
+            "Log Buffer:",
+        ]
+        if not config.log_buffer:
+            lines.append("(empty)")
+        else:
+            for entry in config.log_buffer[-20:]:  # last 20 entries
+                lines.append(str(entry))
+        return "\n".join(lines)
+
+    def _cmd_show_users(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config is None:
+            return "% Device not found."
+        lines = [
+            "Line       User       Host(s)         Idle     Location",
+            "----       ----       -------         ----     --------",
+            "con 0      ---        ---              00:00:00 (current session)",
+        ]
+        for vty in config.vty_lines:
+            lines.append(f"vty {vty.line_num}     ---        ---              ---     ---")
+        lines.append("\nConfigured users:")
+        if not config.users:
+            lines.append("(no local users configured)")
+        else:
+            for username, user in config.users.items():
+                lines.append(f"  {username} (privilege {user.privilege})")
         return "\n".join(lines)
 
 
