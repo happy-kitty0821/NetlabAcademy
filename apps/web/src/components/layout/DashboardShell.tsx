@@ -7,17 +7,15 @@ interface DashboardShellProps {
   title?: string;
   onLogout?: () => void;
   children: React.ReactNode;
+  fullscreen?: boolean;  // suppresses padding for workspace pages
 }
 
-/**
- * The persistent authenticated shell: sidebar + top bar + scrollable content.
- * Wrap every authenticated page in this component.
- */
 export function DashboardShell({
   user,
   title,
   onLogout,
   children,
+  fullscreen = false,
 }: DashboardShellProps) {
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--surface-base)]">
@@ -26,7 +24,7 @@ export function DashboardShell({
         <TopBar user={user} title={title} onLogout={onLogout} />
         <main
           id="main-content"
-          className="flex-1 overflow-y-auto p-6"
+          className={`flex-1 min-h-0 ${fullscreen ? "overflow-hidden" : "overflow-y-auto p-6"}`}
           tabIndex={-1}
         >
           {children}

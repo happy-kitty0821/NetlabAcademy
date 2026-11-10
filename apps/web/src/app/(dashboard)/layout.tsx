@@ -32,6 +32,7 @@ export default function DashboardLayout({
   const router = useRouter();
   const pathname = usePathname();
   const title = TITLES[pathname] ?? "";
+  const isWorkspace = pathname === "/labs/workspace" || pathname.startsWith("/labs/workspace");
 
   function handleLogout() {
     logout();
@@ -40,7 +41,12 @@ export default function DashboardLayout({
 
   return (
     <AuthGuard>
-      <DashboardShell user={user} title={title} onLogout={handleLogout}>
+      <DashboardShell
+        user={user}
+        title={isWorkspace ? "" : title}
+        onLogout={handleLogout}
+        fullscreen={isWorkspace}
+      >
         {children}
       </DashboardShell>
     </AuthGuard>
