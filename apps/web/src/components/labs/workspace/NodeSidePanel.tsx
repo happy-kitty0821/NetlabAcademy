@@ -1,13 +1,11 @@
 "use client";
 
-import { Settings2, Network, Terminal, X, Edit2 } from "lucide-react";
-import { DeviceTerminal } from "@/components/labs/DeviceTerminal";
-import { PingPanel }      from "@/components/labs/PingPanel";
+import { Settings2, Network, X, Edit2 } from "lucide-react";
 import type { DeviceNode } from "@/lib/deviceTypes";
-import type { TopologyDocument, TopologyNode, TraceEvent } from "@/lib/simulation-api";
+import type { TopologyDocument, TopologyNode } from "@/lib/simulation-api";
 import type { SimState } from "@/app/(dashboard)/labs/workspace/page";
 
-type RightTab = "properties" | "interfaces" | "terminal";
+type RightTab = "properties" | "interfaces";
 
 interface NodeSidePanelProps {
   flowNode:      DeviceNode;
@@ -15,10 +13,7 @@ interface NodeSidePanelProps {
   topology:      TopologyDocument | null;
   tab:           RightTab;
   onTabChange:   (t: RightTab) => void;
-  sessionId:     string | null;
   simState:      SimState;
-  trace:         TraceEvent[];
-  onTraceUpdate: (trace: TraceEvent[]) => void;
   onClose:       () => void;
   onOpenConfig:  () => void;
 }
@@ -37,15 +32,14 @@ const P = {
 export function NodeSidePanel({
   flowNode, topoNode, topology,
   tab, onTabChange,
-  sessionId, simState,
-  onTraceUpdate, onClose, onOpenConfig,
+  simState,
+  onClose, onOpenConfig,
 }: NodeSidePanelProps) {
   const isRunning = simState === "running";
 
   const TABS = [
-    { id: "properties" as RightTab, Icon: Settings2, label: "Props"   },
-    { id: "interfaces" as RightTab, Icon: Network,   label: "Ifaces"  },
-    { id: "terminal"   as RightTab, Icon: Terminal,  label: "Terminal"},
+    { id: "properties" as RightTab, Icon: Settings2, label: "Props"  },
+    { id: "interfaces" as RightTab, Icon: Network,   label: "Ifaces" },
   ];
 
   return (
@@ -88,7 +82,6 @@ export function NodeSidePanel({
       <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
         {tab === "properties" && <PropsTab flowNode={flowNode} topoNode={topoNode} isRunning={isRunning} />}
         {tab === "interfaces" && <IfacesTab flowNode={flowNode} topoNode={topoNode} topology={topology} />}
-        {tab === "terminal"   && <TermTab  flowNode={flowNode} sessionId={sessionId} isRunning={isRunning} onTraceUpdate={onTraceUpdate} />}
       </div>
     </div>
   );
@@ -179,33 +172,6 @@ function IfacesTab({ flowNode, topoNode, topology }: { flowNode: DeviceNode; top
         })}
       </tbody>
     </table>
-  );
-}
-
-function TermTab({ flowNode, sessionId, isRunning, onTraceUpdate }: { flowNode: DeviceNode; sessionId: string | null; isRunning: boolean; onTraceUpdate: (t: TraceEvent[]) => void }) {
-  if (!isRunning || !sessionId) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "24px 16px", textAlign: "center", color: "#9198a1" }}>
-        <Terminal size={18} />
-        <p style={{ fontSize: 10, fontFamily: "monospace", lineHeight: 1.6, margin: 0 }}>
-          Click <span style={{ color: "#1a7f37", fontWeight: 700 }}>Start</span> to bring up the simulation, then open the terminal.
-        </p>
-      </div>
-    );
-  }
-  const topoNode: TopologyNode = { id: flowNode.id, model: flowNode.data.model as TopologyNode["model"],
-    hostname: String(flowNode.data.hostname ?? flowNode.id), interfaces: [] };
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      {flowNode.data.model === "host" && (
-        <div style={{ padding: 8, borderBottom: "1px solid #d0d7de" }}>
-          <PingPanel sessionId={sessionId} onTraceUpdate={onTraceUpdate} />
-        </div>
-      )}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <DeviceTerminal key={`${flowNode.id}-${sessionId}`} sessionId={sessionId} device={topoNode} onClose={() => {}} />
-      </div>
-    </div>
   );
 }
 

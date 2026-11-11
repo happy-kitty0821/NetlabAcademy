@@ -30,6 +30,7 @@ import { WorkspaceToolbar } from "@/components/labs/workspace/WorkspaceToolbar";
 import { DevicePalette }    from "@/components/labs/workspace/DevicePalette";
 import { NodeConfigPopup }  from "@/components/labs/workspace/NodeConfigPopup";
 import { NodeSidePanel }    from "@/components/labs/workspace/NodeSidePanel";
+import { BottomPanel }      from "@/components/labs/workspace/BottomPanel";
 
 export type SimState = "stopped" | "starting" | "running" | "stopping";
 
@@ -108,7 +109,7 @@ export default function WorkspacePage() {
   // ── Selection ──────────────────────────────────────────────────────────────
   const [selectedNode, setSelectedNode] = useState<DeviceNode | null>(null);
   const [configNode,   setConfigNode]   = useState<DeviceNode | null>(null);
-  const [rightTab,     setRightTab]     = useState<"properties" | "interfaces" | "terminal">("properties");
+  const [rightTab,     setRightTab]     = useState<"properties" | "interfaces">("properties");
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rfInstanceRef = useRef<any>(null);
@@ -169,7 +170,8 @@ export default function WorkspacePage() {
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNode(node as DeviceNode);
     if (simState === "running" && sessionId) {
-      setRightTab("terminal");
+      // Double-click opens the bottom terminal panel (not right panel)
+      setRightTab("properties");
     } else {
       setConfigNode(node as DeviceNode);
     }
@@ -232,6 +234,7 @@ export default function WorkspacePage() {
         onClear={handleClearCanvas} error={simError}
       />
 
+      {/* Middle: palette + canvas + right panel */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <DevicePalette />
 
@@ -292,15 +295,21 @@ export default function WorkspacePage() {
             topology={topology}
             tab={rightTab}
             onTabChange={setRightTab}
-            sessionId={sessionId}
             simState={simState}
-            trace={trace}
-            onTraceUpdate={setTrace}
             onClose={() => setSelectedNode(null)}
             onOpenConfig={() => setConfigNode(selectedNode)}
           />
         )}
       </div>
+
+      {/* Bottom panel — Terminal + Logs (CML style) */}
+      <BottomPanel
+        selectedNode={selectedNode}
+        sessionId={sessionId}
+        simState={simState}
+        trace={trace}
+        onTraceUpdate={setTrace}
+      />
 
       {configNode && (
         <NodeConfigPopup

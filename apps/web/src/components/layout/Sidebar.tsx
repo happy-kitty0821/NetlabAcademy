@@ -2,7 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookOpen, FlaskConical, LayoutDashboard, Network, Settings, Users } from "lucide-react";
+import { useState } from "react";
+import {
+  BookOpen, FlaskConical, LayoutDashboard,
+  Network, Settings, Users, ChevronLeft, ChevronRight,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface NavItem { label: string; href: string; icon: React.ElementType; }
@@ -21,52 +25,90 @@ const BOTTOM_NAV: NavItem[] = [
 ];
 
 export function Sidebar() {
-  const pathname = usePathname();
+  const pathname    = usePathname();
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
-    <aside className={cn(
-      "flex flex-col w-56 shrink-0 h-screen sticky top-0",
-      "bg-white border-r border-[#d0d7de]"
-    )}>
-      <div className="h-14 flex items-center px-5 border-b border-[#d0d7de]">
-        <span className="flex items-center gap-2.5 font-semibold text-[#1f2328]">
-          <Network size={18} className="text-[#0969da]" aria-hidden="true" />
-          NetLab<span className="text-[#0969da]">Academy</span>
-        </span>
+    <aside
+      className={cn(
+        "flex flex-col shrink-0 h-screen sticky top-0 bg-white border-r border-[#d0d7de] transition-all duration-200",
+        collapsed ? "w-12" : "w-56"
+      )}
+    >
+      {/* Logo / collapse button */}
+      <div className="h-14 flex items-center justify-between px-3 border-b border-[#d0d7de] overflow-hidden">
+        {!collapsed && (
+          <span className="flex items-center gap-2 font-semibold text-[#1f2328] text-sm truncate">
+            <Network size={16} className="text-[#0969da] shrink-0" />
+            NetLab<span className="text-[#0969da]">Academy</span>
+          </span>
+        )}
+        {collapsed && <Network size={16} className="text-[#0969da] mx-auto" />}
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          className={cn(
+            "p-1.5 rounded-md text-[#656d76] hover:text-[#1f2328] hover:bg-[#f0f2f4] transition-colors shrink-0",
+            collapsed && "mx-auto"
+          )}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand" : "Collapse"}
+        >
+          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
       </div>
 
+      {/* Primary nav */}
       <nav aria-label="Main navigation" className="flex-1 overflow-y-auto py-3 px-2">
         <ul role="list" className="space-y-0.5">
-          {NAV.map((item) => <li key={item.href}><NavLink item={item} pathname={pathname} /></li>)}
+          {NAV.map((item) => (
+            <li key={item.href}>
+              <NavLink item={item} pathname={pathname} collapsed={collapsed} />
+            </li>
+          ))}
         </ul>
       </nav>
 
+      {/* Bottom nav */}
       <div className="border-t border-[#d0d7de] py-3 px-2">
         <ul role="list" className="space-y-0.5">
-          {BOTTOM_NAV.map((item) => <li key={item.href}><NavLink item={item} pathname={pathname} /></li>)}
+          {BOTTOM_NAV.map((item) => (
+            <li key={item.href}>
+              <NavLink item={item} pathname={pathname} collapsed={collapsed} />
+            </li>
+          ))}
         </ul>
       </div>
     </aside>
   );
 }
 
-function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
+function NavLink({
+  item, pathname, collapsed,
+}: {
+  item:      NavItem;
+  pathname:  string;
+  collapsed: boolean;
+}) {
   const active = item.href === "/labs"
     ? pathname === "/labs"
     : pathname === item.href || pathname.startsWith(item.href + "/");
   const Icon = item.icon;
+
   return (
     <Link
       href={item.href}
       aria-current={active ? "page" : undefined}
+      title={collapsed ? item.label : undefined}
       className={cn(
-        "flex items-center gap-3 px-3 py-2 text-sm rounded-md transition-colors duration-100",
+        "flex items-center gap-3 px-2 py-2 text-sm rounded-md transition-colors duration-100",
+        collapsed ? "justify-center" : "",
         active
           ? "bg-[#ddf4ff] text-[#0969da] font-medium"
           : "text-[#656d76] hover:text-[#1f2328] hover:bg-[#f0f2f4]"
       )}
     >
-      <Icon size={15} aria-hidden="true" />
-      {item.label}
+      <Icon size={15} aria-hidden="true" className="shrink-0" />
+      {!collapsed && item.label}
     </Link>
   );
 }
