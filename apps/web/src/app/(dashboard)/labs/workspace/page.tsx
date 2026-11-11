@@ -328,7 +328,23 @@ export default function WorkspacePage() {
             fitViewOptions={{ padding: 0.4 }}
             defaultEdgeOptions={{ type: "lab", data: { active: true } }}
             proOptions={{ hideAttribution: true }}
-            style={{ background: "#1a1a2e" }}
+            colorMode="dark"
+            style={{
+              background: "#1a1a2e",
+              // Override React Flow CSS variables so the default node styles
+              // (white bg, dark border, box-shadow selection) don't bleed through
+              "--xy-node-background-color-default":    "transparent",
+              "--xy-node-border-default":              "none",
+              "--xy-node-boxshadow-hover-default":     "none",
+              "--xy-node-boxshadow-selected-default":  "none",
+              "--xy-node-border-radius-default":       "0",
+              "--xy-handle-background-color-default":  "#00b4d8",
+              "--xy-handle-border-color-default":      "#1a1a2e",
+              "--xy-controls-button-background-color-default":       "#16213e",
+              "--xy-controls-button-background-color-hover-default": "#0f3460",
+              "--xy-controls-button-border-color-default":           "#0f3460",
+              "--xy-controls-box-shadow-default":      "none",
+            } as React.CSSProperties}
           >
             <Background
               variant={BackgroundVariant.Dots}

@@ -7,7 +7,7 @@
  * labels at each endpoint — same visual language as EVE-NG.
  */
 
-import "@xyflow/react/dist/style.css";
+import "@xyflow/react/dist/base.css";
 
 import { useCallback, useEffect, useState } from "react";
 import {

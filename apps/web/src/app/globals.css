@@ -152,7 +152,23 @@ code, kbd, pre, .mono {
 
 /* ── React Flow canvas customization ────────────────────────────── */
 
-/* Strip React Flow's default white card from every node — critical */
+/* Override ALL React Flow CSS variables at the container level.
+   This beats style.css defaults regardless of load order. */
+.react-flow {
+  --xy-node-background-color-default:    transparent !important;
+  --xy-node-border-default:              none        !important;
+  --xy-node-boxshadow-hover-default:     none        !important;
+  --xy-node-boxshadow-selected-default:  none        !important;
+  --xy-node-border-radius-default:       0           !important;
+  --xy-handle-background-color-default:  #00b4d8     !important;
+  --xy-handle-border-color-default:      #1a1a2e     !important;
+  --xy-controls-button-background-color-default:       #16213e !important;
+  --xy-controls-button-background-color-hover-default: #0f3460 !important;
+  --xy-controls-button-border-color-default:           #0f3460 !important;
+  --xy-controls-box-shadow-default:      none        !important;
+}
+
+/* Strip any remaining background/border on node wrappers */
 .react-flow__node {
   background:  transparent !important;
   border:      none        !important;
@@ -160,21 +176,21 @@ code, kbd, pre, .mono {
   padding:     0           !important;
 }
 
-/* Remove blue outline React Flow adds on focus */
+/* Remove focus outline React Flow adds */
 .react-flow__node:focus,
 .react-flow__node:focus-visible {
-  outline: none !important;
+  outline:    none !important;
   box-shadow: none !important;
 }
 
-/* Handles — always visible (CML style) */
+/* Handles — always visible (CML style), scale on hover */
 .react-flow__handle {
   opacity: 1 !important;
   z-index: 10;
 }
 .react-flow__handle:hover {
   transform: scale(1.6) !important;
-  cursor: crosshair !important;
+  cursor:    crosshair  !important;
   transition: transform 0.1s;
 }
 
@@ -185,7 +201,6 @@ code, kbd, pre, .mono {
 .react-flow__controls-button {
   background:   #16213e !important;
   border-color: #0f3460 !important;
-  color:        #cdd6f4 !important;
   fill:         #cdd6f4 !important;
 }
 .react-flow__controls-button:hover {
@@ -193,7 +208,16 @@ code, kbd, pre, .mono {
   fill:       #00b4d8 !important;
 }
 
-/* Selected edge highlight */
+/* Selected edge */
 .react-flow__edge.selected path {
   stroke: #00b4d8 !important;
+}
+
+/* Strip white background from built-in node types (used in TopologyEditor) */
+.react-flow__node-default,
+.react-flow__node-input,
+.react-flow__node-output {
+  background: transparent !important;
+  border:     none        !important;
+  box-shadow: none        !important;
 }

@@ -47,23 +47,25 @@ const C = {
 
 function NodeHandles() {
   const base: React.CSSProperties = {
-    width:      10,
-    height:     10,
-    background: C.handle,
-    border:     `2px solid ${C.handleBg}`,
+    width:        10,
+    height:       10,
+    background:   C.handle,
+    border:       `2px solid ${C.handleBg}`,
     borderRadius: "50%",
-    // No opacity: they are always shown — CML shows them always.
+    pointerEvents: "all",  // must override parent pointer-events:none
+    zIndex:       10,
   };
+  const hidden: React.CSSProperties = { ...base, opacity: 0 };
   return (
     <>
-      <Handle type="source" position={Position.Top}    style={base} id="s-t" />
-      <Handle type="source" position={Position.Right}  style={base} id="s-r" />
-      <Handle type="source" position={Position.Bottom} style={base} id="s-b" />
-      <Handle type="source" position={Position.Left}   style={base} id="s-l" />
-      <Handle type="target" position={Position.Top}    style={{ ...base, opacity: 0 }} id="t-t" />
-      <Handle type="target" position={Position.Right}  style={{ ...base, opacity: 0 }} id="t-r" />
-      <Handle type="target" position={Position.Bottom} style={{ ...base, opacity: 0 }} id="t-b" />
-      <Handle type="target" position={Position.Left}   style={{ ...base, opacity: 0 }} id="t-l" />
+      <Handle type="source" position={Position.Top}    style={base}   id="s-t" />
+      <Handle type="source" position={Position.Right}  style={base}   id="s-r" />
+      <Handle type="source" position={Position.Bottom} style={base}   id="s-b" />
+      <Handle type="source" position={Position.Left}   style={base}   id="s-l" />
+      <Handle type="target" position={Position.Top}    style={hidden} id="t-t" />
+      <Handle type="target" position={Position.Right}  style={hidden} id="t-r" />
+      <Handle type="target" position={Position.Bottom} style={hidden} id="t-b" />
+      <Handle type="target" position={Position.Left}   style={hidden} id="t-l" />
     </>
   );
 }
@@ -73,11 +75,7 @@ function NodeHandles() {
 // The selection ring is painted directly in SVG.
 
 function CMLNode({
-  selected,
-  icon,
-  label,
-  sublabel,
-  sublabelColor,
+  selected, icon, label, sublabel, sublabelColor,
 }: {
   selected?:      boolean;
   icon:           React.ReactNode;
@@ -85,47 +83,27 @@ function CMLNode({
   sublabel?:      string;
   sublabelColor?: string;
 }) {
+  // React Flow's own wrapper div (.react-flow__node) handles all pointer events
+  // for drag-and-drop. Our inner div is purely visual — pointer-events: none
+  // so it doesn't interfere. Handles are rendered here but RF positions them
+  // via absolute positioning relative to the node wrapper (not our div).
   return (
-    <div
-      style={{
-        display:       "flex",
-        flexDirection: "column",
-        alignItems:    "center",
-        gap:           4,
-        // NO background, NO border — React Flow default styles must be cleared
-        // via globals.css (.react-flow__node { background: none; border: none })
-        background:    "transparent",
-        border:        "none",
-        padding:       0,
-        userSelect:    "none",
-        cursor:        "grab",
-        // Selection glow painted by the SVG itself, not a wrapper div
-        filter: selected
-          ? `drop-shadow(0 0 6px ${C.selected})`
-          : "none",
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+      background: "transparent", border: "none", padding: 0, userSelect: "none",
+      pointerEvents: "none",
+      filter: selected ? `drop-shadow(0 0 8px ${C.selected})` : "none",
+      transition: "filter 0.15s",
+    }}>
+      {/* Handles sit outside the visual content — RF positions them absolutely */}
       <NodeHandles />
       {icon}
-      <div style={{
-        fontSize:   11,
-        fontWeight: 700,
-        color:      C.label,
-        fontFamily: "ui-monospace,monospace",
-        whiteSpace: "nowrap",
-        marginTop:  2,
-        textShadow: "0 1px 3px rgba(0,0,0,0.9)",
-      }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: C.label, fontFamily: "ui-monospace,monospace",
+        whiteSpace: "nowrap", marginTop: 2, textShadow: "0 1px 3px rgba(0,0,0,0.9)" }}>
         {label}
       </div>
       {sublabel && (
-        <div style={{
-          fontSize:   9,
-          color:      sublabelColor ?? C.labelMuted,
-          fontFamily: "ui-monospace,monospace",
-          marginTop:  -2,
-          textShadow: "0 1px 2px rgba(0,0,0,0.9)",
-        }}>
+        <div style={{ fontSize: 9, color: sublabelColor ?? C.labelMuted, fontFamily: "ui-monospace,monospace",
+          marginTop: -2, textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}>
           {sublabel}
         </div>
       )}
