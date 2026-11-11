@@ -45,12 +45,12 @@ export function LabEdge({
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
 
-  // Colors — CML palette
+  // Colors — light theme
   const cableColor = selected
-    ? "#00b4d8"    // selected: CML cyan
+    ? "#0969da"   // selected: blue
     : active
-    ? "#48cae4"    // active: light cyan (Ethernet up)
-    : "#0f3460";   // inactive: dark navy
+    ? "#1a7f37"   // active: green
+    : "#9198a1";  // inactive: grey
 
   const shadowColor = "rgba(0,0,0,0.5)";
 
@@ -91,14 +91,10 @@ export function LabEdge({
         path={edgePath}
         style={{
           stroke: cableColor,
-          strokeWidth: 3,
+          strokeWidth: 2.5,
           strokeLinecap: "round",
           transition: "stroke 0.2s",
-          filter: selected
-            ? "drop-shadow(0 0 4px rgba(0,180,216,0.7))"
-            : active
-            ? "drop-shadow(0 0 2px rgba(72,202,228,0.3))"
-            : "none",
+          filter: selected ? "drop-shadow(0 0 3px rgba(9,105,218,0.5))" : "none",
         }}
       />
 
@@ -114,16 +110,12 @@ export function LabEdge({
             className="nodrag nopan"
           >
             <span style={{
-              fontSize: 9,
-              fontFamily: "ui-monospace, monospace",
-              fontWeight: 600,
-              color: selected ? "#00b4d8" : active ? "#48cae4" : "#7c7f93",
-              background: "#16213e",
-              padding: "1px 4px",
-              borderRadius: 3,
-              border: "1px solid #0f3460",
-              whiteSpace: "nowrap",
-              letterSpacing: "0.03em",
+              fontSize: 9, fontFamily: "ui-monospace, monospace", fontWeight: 600,
+              color: selected ? "#0969da" : active ? "#1a7f37" : "#656d76",
+              background: "#ffffff",
+              padding: "1px 4px", borderRadius: 3,
+              border: "1px solid #d0d7de",
+              whiteSpace: "nowrap", letterSpacing: "0.03em",
             }}>
               {labelA}
             </span>
@@ -139,16 +131,12 @@ export function LabEdge({
             className="nodrag nopan"
           >
             <span style={{
-              fontSize: 9,
-              fontFamily: "ui-monospace, monospace",
-              fontWeight: 600,
-              color: selected ? "#00b4d8" : active ? "#48cae4" : "#7c7f93",
-              background: "#16213e",
-              padding: "1px 4px",
-              borderRadius: 3,
-              border: "1px solid #0f3460",
-              whiteSpace: "nowrap",
-              letterSpacing: "0.03em",
+              fontSize: 9, fontFamily: "ui-monospace, monospace", fontWeight: 600,
+              color: selected ? "#0969da" : active ? "#1a7f37" : "#656d76",
+              background: "#ffffff",
+              padding: "1px 4px", borderRadius: 3,
+              border: "1px solid #d0d7de",
+              whiteSpace: "nowrap", letterSpacing: "0.03em",
             }}>
               {labelB}
             </span>

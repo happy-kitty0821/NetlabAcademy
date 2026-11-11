@@ -1,24 +1,18 @@
 import { Sidebar } from "./Sidebar";
-import { TopBar } from "./TopBar";
+import { TopBar }  from "./TopBar";
 import type { User } from "@/types/api";
 
 interface DashboardShellProps {
-  user: User | null;
-  title?: string;
-  onLogout?: () => void;
-  children: React.ReactNode;
-  fullscreen?: boolean;  // suppresses padding for workspace pages
+  user:        User | null;
+  title?:      string;
+  onLogout?:   () => void;
+  children:    React.ReactNode;
+  fullscreen?: boolean;
 }
 
-export function DashboardShell({
-  user,
-  title,
-  onLogout,
-  children,
-  fullscreen = false,
-}: DashboardShellProps) {
+export function DashboardShell({ user, title, onLogout, children, fullscreen = false }: DashboardShellProps) {
   return (
-    <div className="flex h-screen overflow-hidden bg-[var(--surface-base)]">
+    <div className="flex h-screen overflow-hidden bg-[#f6f8fa]">
       <Sidebar />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <TopBar user={user} title={title} onLogout={onLogout} />

@@ -2,222 +2,169 @@
 @import "@xterm/xterm/css/xterm.css";
 
 /* ──────────────────────────────────────────────────────────────────
-   NetLab Academy — Design tokens
-
-   Palette rationale:
-   - Deep navy + charcoal backgrounds give it a technical, terminal feel.
-   - Cyan/electric-blue accent is precise and purposeful (think packet
-     tracer, not a marketing site).
-   - Mono font used selectively for CLI, addresses, counters.
-   - No gradients on primary actions; flat bold colors communicate
-     confidence and function over decoration.
+   NetLab Academy — Light theme design tokens
 ────────────────────────────────────────────────────────────────── */
 
 :root {
   /* Surfaces */
-  --surface-base:    #0d1117;   /* page background */
-  --surface-raised:  #161b22;   /* cards, panels */
-  --surface-overlay: #1c2128;   /* modals, dropdowns */
-  --surface-border:  #30363d;   /* dividers, input borders */
+  --surface-base:    #f6f8fa;   /* page background — GitHub light grey */
+  --surface-raised:  #ffffff;   /* cards, panels */
+  --surface-overlay: #f0f2f4;   /* hover, dropdown bg */
+  --surface-border:  #d0d7de;   /* dividers, input borders */
 
   /* Text */
-  --text-primary:    #e6edf3;
-  --text-secondary:  #8b949e;
-  --text-muted:      #484f58;
-  --text-inverse:    #0d1117;
+  --text-primary:    #1f2328;
+  --text-secondary:  #656d76;
+  --text-muted:      #9198a1;
+  --text-inverse:    #ffffff;
 
-  /* Brand accent — electric cyan */
-  --accent-primary:  #58a6ff;   /* links, primary actions */
-  --accent-strong:   #1f6feb;   /* hover state */
-  --accent-subtle:   #1d3558;   /* accent backgrounds */
+  /* Brand accent — blue */
+  --accent-primary:  #0969da;
+  --accent-strong:   #0550ae;
+  --accent-subtle:   #ddf4ff;
 
   /* Status */
-  --status-success:  #3fb950;
-  --status-warning:  #d29922;
-  --status-error:    #f85149;
-  --status-info:     #58a6ff;
+  --status-success:  #1a7f37;
+  --status-warning:  #9a6700;
+  --status-error:    #d1242f;
+  --status-info:     #0969da;
 
-  /* CLI / terminal */
-  --terminal-bg:     #010409;
-  --terminal-text:   #7ee787;   /* green terminal output */
-  --terminal-cursor: #58a6ff;
-  --terminal-prompt: #58a6ff;
+  /* CLI / terminal — keep dark */
+  --terminal-bg:     #0d1117;
+  --terminal-text:   #3fb950;
+  --terminal-cursor: #0969da;
+  --terminal-prompt: #0969da;
 
   /* Topology canvas */
-  --canvas-bg:       #0d1117;
-  --canvas-grid:     #1c2128;
-  --canvas-node:     #161b22;
-  --canvas-link:     #30363d;
-  --canvas-active:   #58a6ff;
+  --canvas-bg:       #ffffff;
+  --canvas-grid:     #e8ecf0;
+  --canvas-node:     #ffffff;
+  --canvas-link:     #0969da;
+  --canvas-active:   #0969da;
 
-  /* Typography scale */
+  /* Typography */
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
 }
 
 /* ── Base reset ─────────────────────────────────────────────────── */
 
-*, *::before, *::after {
-  box-sizing: border-box;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 body {
   background-color: var(--surface-base);
-  color: var(--text-primary);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.6;
-  margin: 0;
-  padding: 0;
+  color:            var(--text-primary);
+  font-family:      var(--font-sans);
+  font-size:        14px;
+  line-height:      1.6;
+  margin:           0;
+  padding:          0;
 }
-
-/* ── Typography ─────────────────────────────────────────────────── */
 
 h1, h2, h3, h4, h5, h6 {
-  font-weight: 600;
+  font-weight:    600;
   letter-spacing: -0.01em;
-  color: var(--text-primary);
-  margin: 0;
+  color:          var(--text-primary);
+  margin:         0;
 }
-
 h1 { font-size: 1.75rem; line-height: 1.25; }
 h2 { font-size: 1.375rem; line-height: 1.3; }
 h3 { font-size: 1.125rem; line-height: 1.4; }
 
-a {
-  color: var(--accent-primary);
-  text-decoration: none;
-}
-a:hover {
-  text-decoration: underline;
-}
+a { color: var(--accent-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-code, kbd, pre, .mono {
-  font-family: var(--font-mono);
-  font-size: 0.875em;
-}
-
-/* ── Scrollbar ──────────────────────────────────────────────────── */
+code, kbd, pre, .mono { font-family: var(--font-mono); font-size: 0.875em; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--surface-border);
-  border-radius: 3px;
-}
+::-webkit-scrollbar-thumb { background: var(--surface-border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-/* ── Focus ring ─────────────────────────────────────────────────── */
+:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; border-radius: 4px; }
 
-:focus-visible {
-  outline: 2px solid var(--accent-primary);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
+::selection { background: var(--accent-subtle); color: var(--text-primary); }
 
-/* ── Selection ──────────────────────────────────────────────────── */
-
-::selection {
-  background: var(--accent-subtle);
-  color: var(--text-primary);
-}
-
-/* ── Auth page animations (CSS, no framer-motion needed) ──────────────────── */
+/* ── Auth page animations ────────────────────────────────────────── */
 
 @keyframes fadeInDown {
   from { opacity: 0; transform: translateY(-16px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(24px) scale(0.97); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-
 @keyframes fadeInLeft {
   from { opacity: 0; transform: translateX(-12px); }
   to   { opacity: 1; transform: translateX(0); }
 }
-
 @keyframes fadeIn {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
 
-/* ── React Flow canvas customization ────────────────────────────── */
+/* ── React Flow — workspace canvas ──────────────────────────────── */
 
-/* Override ALL React Flow CSS variables at the container level.
-   This beats style.css defaults regardless of load order. */
+/* Override all RF CSS variables for light theme */
 .react-flow {
-  --xy-node-background-color-default:    transparent !important;
-  --xy-node-border-default:              none        !important;
-  --xy-node-boxshadow-hover-default:     none        !important;
-  --xy-node-boxshadow-selected-default:  none        !important;
-  --xy-node-border-radius-default:       0           !important;
-  --xy-handle-background-color-default:  #00b4d8     !important;
-  --xy-handle-border-color-default:      #1a1a2e     !important;
-  --xy-controls-button-background-color-default:       #16213e !important;
-  --xy-controls-button-background-color-hover-default: #0f3460 !important;
-  --xy-controls-button-border-color-default:           #0f3460 !important;
-  --xy-controls-box-shadow-default:      none        !important;
+  --xy-node-background-color-default:                  transparent !important;
+  --xy-node-border-default:                            none        !important;
+  --xy-node-boxshadow-hover-default:                   none        !important;
+  --xy-node-boxshadow-selected-default:                none        !important;
+  --xy-node-border-radius-default:                     0           !important;
+  --xy-handle-background-color-default:                #0969da     !important;
+  --xy-handle-border-color-default:                    #ffffff     !important;
+  --xy-controls-button-background-color-default:       #ffffff     !important;
+  --xy-controls-button-background-color-hover-default: #f0f2f4     !important;
+  --xy-controls-button-border-color-default:           #d0d7de     !important;
+  --xy-controls-box-shadow-default:                    none        !important;
+  --xy-selection-background-color-default:             transparent !important;
+  --xy-selection-border-default:                       none        !important;
 }
 
-/* Strip any remaining background/border on node wrappers */
-.react-flow__node {
+/* No background/border/shadow on any node wrapper */
+.react-flow__node,
+.react-flow__node-default,
+.react-flow__node-input,
+.react-flow__node-output {
   background:  transparent !important;
   border:      none        !important;
   box-shadow:  none        !important;
   padding:     0           !important;
 }
 
-/* Remove focus outline React Flow adds */
 .react-flow__node:focus,
 .react-flow__node:focus-visible {
   outline:    none !important;
   box-shadow: none !important;
 }
 
-/* Handles — always visible (CML style), scale on hover */
+/* Handles */
 .react-flow__handle {
   opacity: 1 !important;
   z-index: 10;
 }
 .react-flow__handle:hover {
-  transform: scale(1.6) !important;
-  cursor:    crosshair  !important;
+  transform:  scale(1.6) !important;
+  cursor:     crosshair  !important;
   transition: transform 0.1s;
 }
 
 /* Controls */
-.react-flow__controls {
-  box-shadow: none !important;
-}
-.react-flow__controls-button {
-  background:   #16213e !important;
-  border-color: #0f3460 !important;
-  fill:         #cdd6f4 !important;
-}
-.react-flow__controls-button:hover {
-  background: #0f3460 !important;
-  fill:       #00b4d8 !important;
-}
+.react-flow__controls { box-shadow: 0 1px 4px rgba(0,0,0,0.12) !important; border: 1px solid #d0d7de !important; border-radius: 6px !important; }
+.react-flow__controls-button { background: #ffffff !important; border-color: #d0d7de !important; fill: #656d76 !important; }
+.react-flow__controls-button:hover { background: #f0f2f4 !important; fill: #0969da !important; }
+
+/* Selection marquee — hidden */
+.react-flow__selection,
+.react-flow__nodesselection-rect { display: none !important; }
 
 /* Selected edge */
-.react-flow__edge.selected path {
-  stroke: #00b4d8 !important;
-}
-
-/* Strip white background from built-in node types (used in TopologyEditor) */
-.react-flow__node-default,
-.react-flow__node-input,
-.react-flow__node-output {
-  background: transparent !important;
-  border:     none        !important;
-  box-shadow: none        !important;
-}
+.react-flow__edge.selected path { stroke: #0969da !important; }

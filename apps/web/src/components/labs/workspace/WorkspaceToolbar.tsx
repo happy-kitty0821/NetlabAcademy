@@ -1,29 +1,13 @@
 "use client";
 
-/**
- * WorkspaceToolbar — top bar of the lab workspace (CML style).
- */
-
 import { Play, Square, RotateCcw, Trash2, AlertTriangle, Network } from "lucide-react";
 import type { SimState } from "@/app/(dashboard)/labs/workspace/page";
 
-const P = {
-  bg:     "#16213e",
-  border: "#0f3460",
-  label:  "#cdd6f4",
-  muted:  "#7c7f93",
-  active: "#00b4d8",
-  green:  "#a6e3a1",
-  error:  "#e94560",
-  warn:   "#fab387",
-  hover:  "#0f3460",
-};
-
-const SIM_BADGE: Record<SimState, { label: string; color: string }> = {
-  stopped:  { label: "STOPPED",  color: P.muted  },
-  starting: { label: "STARTING", color: P.warn   },
-  running:  { label: "ACTIVE",   color: P.green  },
-  stopping: { label: "STOPPING", color: P.error  },
+const BADGE: Record<SimState, { label: string; color: string; bg: string }> = {
+  stopped:  { label: "STOPPED",  color: "#656d76", bg: "#f6f8fa"  },
+  starting: { label: "STARTING", color: "#9a6700", bg: "#fff8c5"  },
+  running:  { label: "ACTIVE",   color: "#1a7f37", bg: "#dafbe1"  },
+  stopping: { label: "STOPPING", color: "#d1242f", bg: "#ffebe9"  },
 };
 
 interface WorkspaceToolbarProps {
@@ -41,58 +25,50 @@ export function WorkspaceToolbar({
   simState, sessionId, nodeCount,
   onStart, onStop, onWipe, onClear, error,
 }: WorkspaceToolbarProps) {
-  const badge     = SIM_BADGE[simState];
+  const badge     = BADGE[simState];
   const isRunning = simState === "running";
   const isBusy    = simState === "starting" || simState === "stopping";
   const canStart  = !isRunning && !isBusy && nodeCount > 0;
   const pulse     = isRunning || isBusy;
 
   return (
-    <div
-      style={{
-        display:        "flex",
-        alignItems:     "center",
-        gap:            12,
-        padding:        "0 16px",
-        height:         44,
-        background:     P.bg,
-        borderBottom:   `1px solid ${P.border}`,
-        flexShrink:     0,
-        userSelect:     "none",
-      }}
-    >
+    <div style={{
+      display: "flex", alignItems: "center", gap: 12,
+      padding: "0 16px", height: 44,
+      background: "#ffffff", borderBottom: "1px solid #d0d7de",
+      flexShrink: 0, userSelect: "none",
+    }}>
       {/* Lab name */}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-        <Network size={14} color={P.active} />
-        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "monospace", color: P.label, letterSpacing: "-0.01em" }}>
+        <Network size={14} color="#0969da" />
+        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "ui-monospace,monospace", color: "#1f2328" }}>
           Untitled Lab
         </span>
       </div>
 
-      <div style={{ width: 1, height: 20, background: P.border }} />
+      <div style={{ width: 1, height: 20, background: "#d0d7de" }} />
 
       {/* Controls */}
       <div style={{ display: "flex", gap: 4 }}>
-        <Btn onClick={onStart} disabled={!canStart} color={P.green}
+        <Btn onClick={onStart} disabled={!canStart} color="#1a7f37" bg="#dafbe1" border="#b4f1be"
           title={nodeCount === 0 ? "Add devices first" : "Start simulation"}
           icon={<Play size={12} />} label="Start" />
-        <Btn onClick={onStop}  disabled={!isRunning} color={P.error}
-          title="Stop simulation"
-          icon={<Square size={12} />} label="Stop" />
-        <Btn onClick={onWipe}  disabled={!isRunning && !sessionId} color={P.muted}
-          title="Reset simulation"
-          icon={<RotateCcw size={12} />} label="Wipe" />
+        <Btn onClick={onStop} disabled={!isRunning} color="#d1242f" bg="#ffebe9" border="#ffd7d5"
+          title="Stop simulation" icon={<Square size={12} />} label="Stop" />
+        <Btn onClick={onWipe} disabled={!isRunning && !sessionId} color="#656d76" bg="#f6f8fa" border="#d0d7de"
+          title="Reset simulation" icon={<RotateCcw size={12} />} label="Wipe" />
       </div>
 
-      <div style={{ width: 1, height: 20, background: P.border }} />
+      <div style={{ width: 1, height: 20, background: "#d0d7de" }} />
 
-      {/* Clear */}
       <button
         onClick={onClear}
         title="Clear canvas"
-        style={ghostBtnStyle(P.muted)}
-        onMouseEnter={(e) => { Object.assign(e.currentTarget.style, ghostBtnStyle(P.error, true)); }}
-        onMouseLeave={(e) => { Object.assign(e.currentTarget.style, ghostBtnStyle(P.muted)); }}
+        style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 8px",
+          borderRadius: 5, fontSize: 11, fontFamily: "ui-monospace,monospace",
+          color: "#656d76", background: "transparent", border: "1px solid transparent", cursor: "pointer" }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "#d1242f"; e.currentTarget.style.background = "#ffebe9"; e.currentTarget.style.borderColor = "#ffd7d5"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "#656d76"; e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderColor = "transparent"; }}
       >
         <Trash2 size={11} />
         Clear
@@ -100,43 +76,32 @@ export function WorkspaceToolbar({
 
       <div style={{ flex: 1 }} />
 
-      {/* Error */}
       {error && (
-        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontFamily: "monospace", color: P.error, maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11,
+          fontFamily: "ui-monospace,monospace", color: "#d1242f",
+          maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           <AlertTriangle size={11} />
           {error}
         </div>
       )}
 
-      {/* Session ID */}
       {sessionId && (
-        <span style={{ fontSize: 10, fontFamily: "monospace", color: P.border }}>
+        <span style={{ fontSize: 10, fontFamily: "monospace", color: "#9198a1" }}>
           {sessionId.slice(0, 8)}
         </span>
       )}
 
-      {/* Status badge */}
-      <div
-        style={{
-          display:      "flex",
-          alignItems:   "center",
-          gap:          6,
-          padding:      "3px 10px",
-          borderRadius: 5,
-          fontSize:     11,
-          fontFamily:   "monospace",
-          fontWeight:   700,
-          color:        badge.color,
-          background:   `${badge.color}1a`,
-          border:       `1px solid ${badge.color}40`,
-        }}
-      >
-        <span
-          style={{
-            width: 6, height: 6, borderRadius: "50%", background: badge.color,
-            animation: pulse ? "tbPulse 1.4s ease-in-out infinite" : "none",
-          }}
-        />
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6,
+        padding: "3px 10px", borderRadius: 20, fontSize: 11,
+        fontFamily: "ui-monospace,monospace", fontWeight: 700,
+        color: badge.color, background: badge.bg,
+        border: `1px solid ${badge.color}40`,
+      }}>
+        <span style={{
+          width: 6, height: 6, borderRadius: "50%", background: badge.color,
+          animation: pulse ? "tbPulse 1.4s ease-in-out infinite" : "none",
+        }} />
         {badge.label}
       </div>
 
@@ -145,36 +110,20 @@ export function WorkspaceToolbar({
   );
 }
 
-function Btn({ onClick, disabled, color, title, icon, label }: {
-  onClick: () => void; disabled: boolean; color: string;
+function Btn({ onClick, disabled, color, bg, border, title, icon, label }: {
+  onClick: () => void; disabled: boolean; color: string; bg: string; border: string;
   title: string; icon: React.ReactNode; label: string;
 }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      style={{
-        display: "flex", alignItems: "center", gap: 5,
-        padding: "5px 10px", borderRadius: 5, fontSize: 11,
-        fontFamily: "monospace", fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer",
-        color, background: disabled ? "transparent" : `${color}18`,
-        border: `1px solid ${color}35`,
-        opacity: disabled ? 0.3 : 1, transition: "opacity 0.15s, background 0.15s",
-      }}
-    >
+    <button onClick={onClick} disabled={disabled} title={title}
+      style={{ display: "flex", alignItems: "center", gap: 5,
+        padding: "5px 10px", borderRadius: 6, fontSize: 11,
+        fontFamily: "ui-monospace,monospace", fontWeight: 600,
+        color, background: disabled ? "#f6f8fa" : bg,
+        border: `1px solid ${disabled ? "#d0d7de" : border}`,
+        opacity: disabled ? 0.5 : 1, cursor: disabled ? "not-allowed" : "pointer",
+        transition: "opacity 0.15s" }}>
       {icon}{label}
     </button>
   );
-}
-
-function ghostBtnStyle(color: string, hovered = false): React.CSSProperties {
-  return {
-    display: "flex", alignItems: "center", gap: 5,
-    padding: "5px 8px", borderRadius: 5, fontSize: 11,
-    fontFamily: "monospace", cursor: "pointer",
-    color, background: hovered ? "#0f3460" : "transparent",
-    border: `1px solid ${hovered ? "#0f3460" : "transparent"}`,
-    transition: "color 0.15s",
-  };
 }
