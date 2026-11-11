@@ -12,8 +12,11 @@
 
 import type { APIError, AuthTokens, User } from "@/types/api";
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+// Always relative in production — requests go through the Next.js proxy
+// rewrite (/api/* → http://backend/api/*).  NEXT_PUBLIC_API_URL can override
+// this for local dev if needed, but the fallback must stay relative so the
+// deployed build never hard-codes localhost.
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
 
 // ── Token storage ────────────────────────────────────────────────────────────
 

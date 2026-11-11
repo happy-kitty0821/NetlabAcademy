@@ -154,11 +154,21 @@ def run_or_die(cmd: list[str], cwd: Path | None = None, env: dict | None = None,
 
 def spawn(cmd: list[str], cwd: Path | None = None,
           env: dict | None = None) -> subprocess.Popen:
-    """Launch a long-running process in the background."""
+    """Launch a long-running process in the background.
+
+    On Windows, shell=True requires the command to be a single string so that
+    paths with spaces are quoted correctly and cmd.exe can resolve them.
+    On Unix, shell=False with a list is the safest form.
+    """
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    return subprocess.Popen(cmd, cwd=cwd, env=merged_env, shell=_shell())
+    if IS_WINDOWS:
+        # Build a properly-quoted command string for cmd.exe.
+        import shlex as _shlex
+        cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+        return subprocess.Popen(cmd_str, cwd=cwd, env=merged_env, shell=True)
+    return subprocess.Popen(cmd, cwd=cwd, env=merged_env, shell=False)
 
 
 # ── Prerequisite checks ────────────────────────────────────────────────────────
