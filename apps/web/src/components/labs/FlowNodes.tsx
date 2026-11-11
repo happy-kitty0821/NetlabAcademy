@@ -23,23 +23,27 @@ const TEXT_IP       = "#58a6ff";
 const TEXT_MUTED    = "#8b949e";
 const HANDLE_COLOR  = "#58a6ff";
 
+// Show 4 handles (top/right/bottom/left) — both source and target
+// so wires can be drawn in either direction from any side.
 function handles() {
   const s: React.CSSProperties = {
     background: HANDLE_COLOR,
-    border: "none",
-    width: 8,
-    height: 8,
+    border: "2px solid #0d1117",
+    width: 10,
+    height: 10,
+    opacity: 0,  // hidden until hovered — CSS in globals makes them visible
+    transition: "opacity 0.15s",
   };
   return (
     <>
-      <Handle type="source" position={Position.Top}    style={s} />
-      <Handle type="source" position={Position.Right}  style={s} />
-      <Handle type="source" position={Position.Bottom} style={s} />
-      <Handle type="source" position={Position.Left}   style={s} />
-      <Handle type="target" position={Position.Top}    style={s} />
-      <Handle type="target" position={Position.Right}  style={s} />
-      <Handle type="target" position={Position.Bottom} style={s} />
-      <Handle type="target" position={Position.Left}   style={s} />
+      <Handle type="source" position={Position.Top}    style={s} id="t" />
+      <Handle type="source" position={Position.Right}  style={s} id="r" />
+      <Handle type="source" position={Position.Bottom} style={s} id="b" />
+      <Handle type="source" position={Position.Left}   style={s} id="l" />
+      <Handle type="target" position={Position.Top}    style={{ ...s, opacity: 0 }} id="tt" />
+      <Handle type="target" position={Position.Right}  style={{ ...s, opacity: 0 }} id="tr" />
+      <Handle type="target" position={Position.Bottom} style={{ ...s, opacity: 0 }} id="tb" />
+      <Handle type="target" position={Position.Left}   style={{ ...s, opacity: 0 }} id="tl" />
     </>
   );
 }

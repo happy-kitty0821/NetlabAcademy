@@ -149,3 +149,45 @@ code, kbd, pre, .mono {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
+
+/* ── React Flow canvas customization ────────────────────────────── */
+
+/* Show connection handles on node hover */
+.react-flow__node:hover .react-flow__handle {
+  opacity: 1 !important;
+}
+
+/* Keep handles visible while dragging a connection */
+.react-flow__node.selected .react-flow__handle {
+  opacity: 1 !important;
+}
+
+/* Handle hover state */
+.react-flow__handle:hover {
+  opacity: 1 !important;
+  background: #58a6ff !important;
+  transform: scale(1.3);
+  transition: transform 0.1s;
+}
+
+/* Remove default React Flow selection outline — we style it ourselves */
+.react-flow__node.selected > div {
+  box-shadow: 0 0 0 2px #58a6ff, 0 4px 20px rgba(88,166,255,0.2) !important;
+}
+
+/* Controls styling */
+.react-flow__controls-button {
+  background: #161b22 !important;
+  border-color: #21262d !important;
+  color: #8b949e !important;
+  fill: #8b949e !important;
+}
+.react-flow__controls-button:hover {
+  background: #21262d !important;
+  fill: #e6edf3 !important;
+}
+
+/* Remove default edge hover glow */
+.react-flow__edge.selected path {
+  stroke: #58a6ff !important;
+}

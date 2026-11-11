@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { nodeTypes } from "./FlowNodes";
 import { edgeTypes } from "./FlowEdge";
+import { stampEdgeLabels } from "@/lib/edgeLabels";
 import {
   convertFlowToTopology,
   TopologyValidationError,
@@ -112,35 +113,6 @@ function initCounter(nodes: DeviceNode[]) {
 }
 
 function nextId() { return `n-${++_counter}`; }
-
-// ── Stamp interface labels onto edges ─────────────────────────────────────────
-// Runs the same pre-assignment pass as convertFlowToTopology but only returns
-// the enriched edges — used after any topology change to keep labels in sync.
-
-function stampEdgeLabels(
-  currentNodes: DeviceNode[],
-  currentEdges: Edge[],
-): Edge[] {
-  const nodeMap = new Map(currentNodes.map((n) => [n.id, n]));
-  const counter = new Map<string, number>();
-
-  return currentEdges.map((edge) => {
-    function getIface(nodeId: string): string {
-      const node = nodeMap.get(nodeId);
-      if (!node || node.data.model === "host") return "eth0";
-      const c = counter.get(nodeId) ?? 0;
-      counter.set(nodeId, c + 1);
-      return `Gi0/${c}`;
-    }
-    const labelA = getIface(edge.source);
-    const labelB = getIface(edge.target);
-    return {
-      ...edge,
-      type: "lab",
-      data: { ...edge.data, labelA, labelB, active: true },
-    };
-  });
-}
 
 // ── Catalog icon map ──────────────────────────────────────────────────────────
 
