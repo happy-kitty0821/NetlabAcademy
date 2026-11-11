@@ -74,6 +74,11 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = "netlab.urls"
 
+# This is a pure REST API — no HTML forms, no browser navigation.
+# Django's APPEND_SLASH causes a 500 on POST requests without trailing slashes
+# because it cannot redirect while preserving the POST body.
+APPEND_SLASH = False
+
 # ---------------------------------------------------------------------------
 # Templates
 # ---------------------------------------------------------------------------
