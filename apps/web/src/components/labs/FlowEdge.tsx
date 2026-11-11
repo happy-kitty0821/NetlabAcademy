@@ -45,12 +45,12 @@ export function LabEdge({
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
 
-  // Colors
+  // Colors — CML palette
   const cableColor = selected
-    ? "#58a6ff"
+    ? "#00b4d8"    // selected: CML cyan
     : active
-    ? "#3fb950"      // green = Ethernet up (EVE-NG default)
-    : "#484f58";     // gray  = down
+    ? "#48cae4"    // active: light cyan (Ethernet up)
+    : "#0f3460";   // inactive: dark navy
 
   const shadowColor = "rgba(0,0,0,0.5)";
 
@@ -95,9 +95,9 @@ export function LabEdge({
           strokeLinecap: "round",
           transition: "stroke 0.2s",
           filter: selected
-            ? "drop-shadow(0 0 4px rgba(88,166,255,0.6))"
+            ? "drop-shadow(0 0 4px rgba(0,180,216,0.7))"
             : active
-            ? "drop-shadow(0 0 2px rgba(63,185,80,0.25))"
+            ? "drop-shadow(0 0 2px rgba(72,202,228,0.3))"
             : "none",
         }}
       />
@@ -117,11 +117,11 @@ export function LabEdge({
               fontSize: 9,
               fontFamily: "ui-monospace, monospace",
               fontWeight: 600,
-              color: selected ? "#58a6ff" : active ? "#3fb950" : "#8b949e",
-              background: "#0d1117",
+              color: selected ? "#00b4d8" : active ? "#48cae4" : "#7c7f93",
+              background: "#16213e",
               padding: "1px 4px",
               borderRadius: 3,
-              border: `1px solid ${selected ? "#1d3558" : "#21262d"}`,
+              border: "1px solid #0f3460",
               whiteSpace: "nowrap",
               letterSpacing: "0.03em",
             }}>
@@ -142,11 +142,11 @@ export function LabEdge({
               fontSize: 9,
               fontFamily: "ui-monospace, monospace",
               fontWeight: 600,
-              color: selected ? "#58a6ff" : active ? "#3fb950" : "#8b949e",
-              background: "#0d1117",
+              color: selected ? "#00b4d8" : active ? "#48cae4" : "#7c7f93",
+              background: "#16213e",
               padding: "1px 4px",
               borderRadius: 3,
-              border: `1px solid ${selected ? "#1d3558" : "#21262d"}`,
+              border: "1px solid #0f3460",
               whiteSpace: "nowrap",
               letterSpacing: "0.03em",
             }}>

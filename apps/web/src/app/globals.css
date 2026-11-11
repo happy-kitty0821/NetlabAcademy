@@ -152,42 +152,48 @@ code, kbd, pre, .mono {
 
 /* ── React Flow canvas customization ────────────────────────────── */
 
-/* Show connection handles on node hover */
-.react-flow__node:hover .react-flow__handle {
-  opacity: 1 !important;
+/* Strip React Flow's default white card from every node — critical */
+.react-flow__node {
+  background:  transparent !important;
+  border:      none        !important;
+  box-shadow:  none        !important;
+  padding:     0           !important;
 }
 
-/* Keep handles visible while dragging a connection */
-.react-flow__node.selected .react-flow__handle {
-  opacity: 1 !important;
+/* Remove blue outline React Flow adds on focus */
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
-/* Handle hover state */
+/* Handles — always visible (CML style) */
+.react-flow__handle {
+  opacity: 1 !important;
+  z-index: 10;
+}
 .react-flow__handle:hover {
-  opacity: 1 !important;
-  background: #58a6ff !important;
-  transform: scale(1.3);
+  transform: scale(1.6) !important;
+  cursor: crosshair !important;
   transition: transform 0.1s;
 }
 
-/* Remove default React Flow selection outline — we style it ourselves */
-.react-flow__node.selected > div {
-  box-shadow: 0 0 0 2px #58a6ff, 0 4px 20px rgba(88,166,255,0.2) !important;
+/* Controls */
+.react-flow__controls {
+  box-shadow: none !important;
 }
-
-/* Controls styling */
 .react-flow__controls-button {
-  background: #161b22 !important;
-  border-color: #21262d !important;
-  color: #8b949e !important;
-  fill: #8b949e !important;
+  background:   #16213e !important;
+  border-color: #0f3460 !important;
+  color:        #cdd6f4 !important;
+  fill:         #cdd6f4 !important;
 }
 .react-flow__controls-button:hover {
-  background: #21262d !important;
-  fill: #e6edf3 !important;
+  background: #0f3460 !important;
+  fill:       #00b4d8 !important;
 }
 
-/* Remove default edge hover glow */
+/* Selected edge highlight */
 .react-flow__edge.selected path {
-  stroke: #58a6ff !important;
+  stroke: #00b4d8 !important;
 }

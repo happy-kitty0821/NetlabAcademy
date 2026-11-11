@@ -328,13 +328,13 @@ export default function WorkspacePage() {
             fitViewOptions={{ padding: 0.4 }}
             defaultEdgeOptions={{ type: "lab", data: { active: true } }}
             proOptions={{ hideAttribution: true }}
-            style={{ background: "#0d1117" }}
+            style={{ background: "#1a1a2e" }}
           >
             <Background
               variant={BackgroundVariant.Dots}
-              gap={24}
+              gap={28}
               size={1}
-              color="#1c2128"
+              color="#0f3460"
             />
             <Controls
               style={{
@@ -349,12 +349,12 @@ export default function WorkspacePage() {
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 pointer-events-none select-none">
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-                <rect x="4" y="12" width="40" height="24" rx="4" stroke="#21262d" strokeWidth="2" />
-                <circle cx="12" cy="24" r="3" fill="#21262d" />
-                <circle cx="24" cy="24" r="3" fill="#21262d" />
-                <circle cx="36" cy="24" r="3" fill="#21262d" />
+                <rect x="4" y="12" width="40" height="24" rx="4" stroke="#0f3460" strokeWidth="2" />
+                <circle cx="12" cy="24" r="3" fill="#0f3460" />
+                <circle cx="24" cy="24" r="3" fill="#0f3460" />
+                <circle cx="36" cy="24" r="3" fill="#0f3460" />
               </svg>
-              <p className="text-[#30363d] text-sm font-mono">Drag devices here to build your topology</p>
+              <p className="text-[13px] font-mono" style={{ color: "#0f3460" }}>Drag devices here to build your topology</p>
             </div>
           )}
         </div>

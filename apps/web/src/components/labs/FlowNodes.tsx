@@ -1,336 +1,307 @@
 "use client";
 
 /**
- * Custom React Flow node types — Cisco Packet Tracer logical icon style.
+ * FlowNodes — Cisco CML-style node icons for the topology canvas.
  *
- * All icons are pure inline SVG paths. No foreignObject, no CSS variables.
- * Colors are explicit hex strings so they render correctly inside React Flow.
+ * Design principles (matching CML 2.x exactly):
+ *  - No card/box wrapper. Just an SVG icon + hostname label beneath it.
+ *  - Transparent background — the dot-grid canvas shows through.
+ *  - Four connection handles (N/S/E/W) always visible as small circles.
+ *  - Selected state: cyan glow ring around the icon.
+ *  - Dragging works because there is no opaque div stealing pointer events.
+ *
+ * CML color palette:
+ *  Background:  #1a1a2e (dark navy canvas)
+ *  Icon fill:   #0f3460 / #16213e
+ *  Icon stroke: #e94560 (red-orange for routers), #00b4d8 (cyan for switches),
+ *               #48cae4 (light cyan for hosts)
+ *  Label:       #e0e0e0
+ *  Selected:    #00b4d8 ring
+ *  Handle:      #00b4d8 dot
  */
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { DeviceNode } from "@/lib/deviceTypes";
 
-// ── Palette ───────────────────────────────────────────────────────────────────
+// ── CML colour tokens ─────────────────────────────────────────────────────────
+const C = {
+  canvas:     "#1a1a2e",
+  iconFill:   "#0f3460",
+  iconDark:   "#16213e",
+  hostStroke: "#48cae4",   // hosts — light cyan
+  swStroke:   "#00b4d8",   // switches — cyan
+  rtStroke:   "#e94560",   // routers — red-orange
+  selected:   "#00b4d8",
+  label:      "#cdd6f4",
+  labelMuted: "#7c7f93",
+  handle:     "#00b4d8",
+  handleBg:   "#1a1a2e",
+  error:      "#e94560",
+  green:      "#a6e3a1",
+  screen:     "#020510",
+};
 
-const ACTIVE_STROKE = "#58a6ff";
-const IDLE_STROKE   = "#58a6ff";
-const BODY          = "#1c2128";
-const SCREEN        = "#010409";
-const MUTED         = "#484f58";
-const ERROR_COLOR   = "#f85149";
-const TEXT_MAIN     = "#e6edf3";
-const TEXT_IP       = "#58a6ff";
-const TEXT_MUTED    = "#8b949e";
-const HANDLE_COLOR  = "#58a6ff";
+// ── Handle set — always visible, positioned outside the icon ─────────────────
+// Using Position enum values and explicit pixel offsets so they sit cleanly
+// on the edge of the icon bounds regardless of icon size.
 
-// Show 4 handles (top/right/bottom/left) — both source and target
-// so wires can be drawn in either direction from any side.
-function handles() {
-  const s: React.CSSProperties = {
-    background: HANDLE_COLOR,
-    border: "2px solid #0d1117",
-    width: 10,
-    height: 10,
-    opacity: 0,  // hidden until hovered — CSS in globals makes them visible
-    transition: "opacity 0.15s",
+function NodeHandles() {
+  const base: React.CSSProperties = {
+    width:      10,
+    height:     10,
+    background: C.handle,
+    border:     `2px solid ${C.handleBg}`,
+    borderRadius: "50%",
+    // No opacity: they are always shown — CML shows them always.
   };
   return (
     <>
-      <Handle type="source" position={Position.Top}    style={s} id="t" />
-      <Handle type="source" position={Position.Right}  style={s} id="r" />
-      <Handle type="source" position={Position.Bottom} style={s} id="b" />
-      <Handle type="source" position={Position.Left}   style={s} id="l" />
-      <Handle type="target" position={Position.Top}    style={{ ...s, opacity: 0 }} id="tt" />
-      <Handle type="target" position={Position.Right}  style={{ ...s, opacity: 0 }} id="tr" />
-      <Handle type="target" position={Position.Bottom} style={{ ...s, opacity: 0 }} id="tb" />
-      <Handle type="target" position={Position.Left}   style={{ ...s, opacity: 0 }} id="tl" />
+      <Handle type="source" position={Position.Top}    style={base} id="s-t" />
+      <Handle type="source" position={Position.Right}  style={base} id="s-r" />
+      <Handle type="source" position={Position.Bottom} style={base} id="s-b" />
+      <Handle type="source" position={Position.Left}   style={base} id="s-l" />
+      <Handle type="target" position={Position.Top}    style={{ ...base, opacity: 0 }} id="t-t" />
+      <Handle type="target" position={Position.Right}  style={{ ...base, opacity: 0 }} id="t-r" />
+      <Handle type="target" position={Position.Bottom} style={{ ...base, opacity: 0 }} id="t-b" />
+      <Handle type="target" position={Position.Left}   style={{ ...base, opacity: 0 }} id="t-l" />
     </>
   );
 }
 
-// ── PC icon ───────────────────────────────────────────────────────────────────
+// ── Shared node wrapper ───────────────────────────────────────────────────────
+// No background, no border — transparent so the canvas shows through.
+// The selection ring is painted directly in SVG.
 
-function PcSvg({ stroke, hasIp }: { stroke: string; hasIp: boolean }) {
+function CMLNode({
+  selected,
+  icon,
+  label,
+  sublabel,
+  sublabelColor,
+}: {
+  selected?:      boolean;
+  icon:           React.ReactNode;
+  label:          string;
+  sublabel?:      string;
+  sublabelColor?: string;
+}) {
   return (
-    <svg width="44" height="38" viewBox="0 0 44 38" aria-hidden="true"
-      style={{ display: "block", margin: "0 auto 4px" }}>
-      <rect x="2" y="1" width="40" height="26" rx="2.5"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      <rect x="5" y="4" width="34" height="20" rx="1" fill={SCREEN} />
-      <text x="9" y="17" fill={hasIp ? "#3d5a80" : MUTED}
-        fontSize="9" fontFamily="monospace" fontWeight="bold">&gt;_</text>
-      <circle cx="36" cy="6" r="2.2"
-        fill={hasIp ? "#3fb950" : ERROR_COLOR} />
-      <rect x="18" y="27" width="8" height="4"
-        fill={BODY} stroke={stroke} strokeWidth="1.2" />
-      <rect x="11" y="31" width="22" height="4" rx="1.5"
-        fill={BODY} stroke={stroke} strokeWidth="1.2" />
+    <div
+      style={{
+        display:       "flex",
+        flexDirection: "column",
+        alignItems:    "center",
+        gap:           4,
+        // NO background, NO border — React Flow default styles must be cleared
+        // via globals.css (.react-flow__node { background: none; border: none })
+        background:    "transparent",
+        border:        "none",
+        padding:       0,
+        userSelect:    "none",
+        cursor:        "grab",
+        // Selection glow painted by the SVG itself, not a wrapper div
+        filter: selected
+          ? `drop-shadow(0 0 6px ${C.selected})`
+          : "none",
+      }}
+    >
+      <NodeHandles />
+      {icon}
+      <div style={{
+        fontSize:   11,
+        fontWeight: 700,
+        color:      C.label,
+        fontFamily: "ui-monospace,monospace",
+        whiteSpace: "nowrap",
+        marginTop:  2,
+        textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+      }}>
+        {label}
+      </div>
+      {sublabel && (
+        <div style={{
+          fontSize:   9,
+          color:      sublabelColor ?? C.labelMuted,
+          fontFamily: "ui-monospace,monospace",
+          marginTop:  -2,
+          textShadow: "0 1px 2px rgba(0,0,0,0.9)",
+        }}>
+          {sublabel}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PC / Laptop / Server icons ────────────────────────────────────────────────
+// CML uses flat geometric icons — no gradients, clean shapes.
+
+function PcIcon({ sel, hasIp }: { sel: boolean; hasIp: boolean }) {
+  const s = sel ? C.selected : C.hostStroke;
+  return (
+    <svg width="52" height="46" viewBox="0 0 52 46" aria-hidden="true">
+      {/* Monitor */}
+      <rect x="2" y="1" width="48" height="32" rx="3" fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+      <rect x="6" y="5" width="40" height="24" rx="1.5" fill={C.screen} />
+      {/* Cursor blink */}
+      <rect x="10" y="20" width="6" height="2" rx="1" fill={hasIp ? C.swStroke : C.labelMuted} opacity="0.8" />
+      {/* Status LED */}
+      <circle cx="45" cy="4" r="2.5" fill={hasIp ? C.green : C.error} />
+      {/* Stand */}
+      <rect x="22" y="33" width="8" height="5" fill={C.iconFill} stroke={s} strokeWidth="1.2" />
+      <rect x="15" y="38" width="22" height="5" rx="2" fill={C.iconFill} stroke={s} strokeWidth="1.2" />
     </svg>
   );
 }
 
-// ── Laptop icon ───────────────────────────────────────────────────────────────
-
-function LaptopSvg({ stroke, hasIp }: { stroke: string; hasIp: boolean }) {
+function LaptopIcon({ sel, hasIp }: { sel: boolean; hasIp: boolean }) {
+  const s = sel ? C.selected : C.hostStroke;
   return (
-    <svg width="44" height="36" viewBox="0 0 44 36" aria-hidden="true"
-      style={{ display: "block", margin: "0 auto 4px" }}>
+    <svg width="54" height="40" viewBox="0 0 54 40" aria-hidden="true">
       {/* Lid */}
-      <rect x="4" y="2" width="36" height="24" rx="2"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      <rect x="7" y="5" width="30" height="18" rx="1" fill={SCREEN} />
-      <text x="11" y="17" fill={hasIp ? "#3d5a80" : MUTED}
-        fontSize="8" fontFamily="monospace">&gt;_</text>
-      <circle cx="36" cy="7" r="2" fill={hasIp ? "#3fb950" : ERROR_COLOR} />
-      {/* Base */}
-      <rect x="1" y="26" width="42" height="6" rx="2"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      {/* Hinge */}
-      <rect x="16" y="24" width="12" height="4" rx="1"
-        fill={BODY} stroke={stroke} strokeWidth="1" />
+      <rect x="4" y="1" width="46" height="29" rx="3" fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+      <rect x="8" y="5" width="38" height="21" rx="1.5" fill={C.screen} />
+      <circle cx="49" cy="4" r="2.5" fill={hasIp ? C.green : C.error} />
+      {/* Keyboard base */}
+      <rect x="1" y="30" width="52" height="8" rx="2.5" fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+      <rect x="20" y="28" width="14" height="4" rx="1" fill={C.iconDark} />
     </svg>
   );
 }
 
-// ── Server icon ───────────────────────────────────────────────────────────────
-
-function ServerSvg({ stroke, hasIp }: { stroke: string; hasIp: boolean }) {
+function ServerIcon({ sel, hasIp }: { sel: boolean; hasIp: boolean }) {
+  const s = sel ? C.selected : C.hostStroke;
   return (
-    <svg width="36" height="44" viewBox="0 0 36 44" aria-hidden="true"
-      style={{ display: "block", margin: "0 auto 4px" }}>
-      {/* Rack unit 1 */}
-      <rect x="2" y="2" width="32" height="12" rx="2"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      <circle cx="8" cy="8" r="2.5" fill={hasIp ? "#3fb950" : ERROR_COLOR} />
-      <rect x="14" y="6" width="14" height="4" rx="1" fill={MUTED} opacity="0.5" />
-      {/* Rack unit 2 */}
-      <rect x="2" y="16" width="32" height="12" rx="2"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      <circle cx="8" cy="22" r="2.5" fill="#58a6ff" opacity="0.8" />
-      <rect x="14" y="20" width="14" height="4" rx="1" fill={MUTED} opacity="0.5" />
-      {/* Rack unit 3 */}
-      <rect x="2" y="30" width="32" height="12" rx="2"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      <circle cx="8" cy="36" r="2.5" fill={MUTED} />
-      <rect x="14" y="34" width="14" height="4" rx="1" fill={MUTED} opacity="0.3" />
-    </svg>
-  );
-}
-
-// ── Cisco Catalyst 2960 (L2 switch) icon ──────────────────────────────────────
-
-function Switch2960Svg({ stroke, active }: { stroke: string; active: boolean }) {
-  const portColors = ["#3fb950", "#3fb950", "#58a6ff", MUTED, MUTED, MUTED, MUTED, MUTED];
-  return (
-    <svg width="52" height="30" viewBox="0 0 52 30" aria-hidden="true"
-      style={{ display: "block", margin: "0 auto 4px" }}>
-      {/* Chassis */}
-      <rect x="1" y="4" width="50" height="22" rx="3"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      {/* Top bar */}
-      <rect x="1" y="4" width="50" height="6" rx="3"
-        fill={active ? "#1d3558" : "#161b22"} />
-      {/* Model label */}
-      <text x="4" y="10" fill={active ? ACTIVE_STROKE : "#484f58"}
-        fontSize="6" fontFamily="ui-monospace,monospace" fontWeight="bold">
-        2960
-      </text>
-      {/* Bidirectional arrow */}
-      <line x1="6" y1="18" x2="13" y2="18"
-        stroke={ACTIVE_STROKE} strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M10 15 L13 18 L10 21"
-        stroke={ACTIVE_STROKE} strokeWidth="1.5" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      <line x1="46" y1="18" x2="39" y2="18"
-        stroke={ACTIVE_STROKE} strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M42 15 L39 18 L42 21"
-        stroke={ACTIVE_STROKE} strokeWidth="1.5" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      {/* Port LEDs */}
-      {portColors.map((c, i) => (
-        <rect key={i} x={17 + i * 4} y={21} width="3" height="4" rx="0.5"
-          fill={c} />
+    <svg width="44" height="52" viewBox="0 0 44 52" aria-hidden="true">
+      {[0, 1, 2].map((i) => (
+        <g key={i}>
+          <rect x="2" y={2 + i * 17} width="40" height="14" rx="2.5"
+            fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+          <circle cx="8" cy={9 + i * 17} r="2.5"
+            fill={i === 0 ? (hasIp ? C.green : C.error) : i === 1 ? C.swStroke : C.labelMuted} />
+          <rect x="14" cy={7 + i * 17} width="20" height="4" rx="1"
+            fill={C.iconDark} opacity="0.8" />
+        </g>
       ))}
     </svg>
   );
 }
 
-// ── Cisco 2911 Router icon ────────────────────────────────────────────────────
-
-function Router2911Svg({ stroke }: { stroke: string }) {
+function SwitchIcon({ sel }: { sel: boolean }) {
+  const s = sel ? C.selected : C.swStroke;
+  const portLit = [true, true, true, false, false, false, false, false];
   return (
-    <svg width="48" height="48" viewBox="0 0 48 48" aria-hidden="true"
-      style={{ display: "block", margin: "0 auto 4px" }}>
-      {/* Outer circle */}
-      <circle cx="24" cy="24" r="21"
-        fill={BODY} stroke={stroke} strokeWidth="1.5" />
-      {/* Inner ring */}
-      <circle cx="24" cy="24" r="13"
-        fill="none" stroke={stroke} strokeWidth="0.75" opacity="0.35" />
-      {/* Up */}
-      <line x1="24" y1="6" x2="24" y2="14"
-        stroke={ACTIVE_STROKE} strokeWidth="2" strokeLinecap="round" />
-      <path d="M20 10 L24 6 L28 10"
-        stroke={ACTIVE_STROKE} strokeWidth="2" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      {/* Right */}
-      <line x1="42" y1="24" x2="34" y2="24"
-        stroke={ACTIVE_STROKE} strokeWidth="2" strokeLinecap="round" />
-      <path d="M38 20 L42 24 L38 28"
-        stroke={ACTIVE_STROKE} strokeWidth="2" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      {/* Down */}
-      <line x1="24" y1="42" x2="24" y2="34"
-        stroke={ACTIVE_STROKE} strokeWidth="2" strokeLinecap="round" />
-      <path d="M20 38 L24 42 L28 38"
-        stroke={ACTIVE_STROKE} strokeWidth="2" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      {/* Left */}
-      <line x1="6" y1="24" x2="14" y2="24"
-        stroke={ACTIVE_STROKE} strokeWidth="2" strokeLinecap="round" />
-      <path d="M10 20 L6 24 L10 28"
-        stroke={ACTIVE_STROKE} strokeWidth="2" fill="none"
-        strokeLinecap="round" strokeLinejoin="round" />
-      {/* "2911" label */}
-      <text x="24" y="27" fill={ACTIVE_STROKE}
-        fontSize="6" fontFamily="ui-monospace,monospace" fontWeight="bold"
-        textAnchor="middle">2911</text>
+    <svg width="64" height="36" viewBox="0 0 64 36" aria-hidden="true">
+      {/* Chassis */}
+      <rect x="1" y="4" width="62" height="28" rx="4" fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+      {/* Front panel band */}
+      <rect x="1" y="4" width="62" height="9" rx="4" fill={C.iconDark} />
+      {/* Model text */}
+      <text x="5" y="11.5" fill={s} fontSize="6.5" fontFamily="ui-monospace,monospace" fontWeight="bold">2960</text>
+      {/* Bidirectional arrows */}
+      <line x1="5" y1="22" x2="14" y2="22" stroke={s} strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M11 19 L14 22 L11 25" stroke={s} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <line x1="59" y1="22" x2="50" y2="22" stroke={s} strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M53 19 L50 22 L53 25" stroke={s} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      {/* Port LEDs */}
+      {portLit.map((lit, i) => (
+        <rect key={i} x={19 + i * 5} y={28} width="4" height="4" rx="0.8"
+          fill={lit ? C.green : C.labelMuted} opacity={lit ? 1 : 0.4} />
+      ))}
     </svg>
   );
 }
 
-// ── Node card wrapper ─────────────────────────────────────────────────────────
-
-function DeviceCard({
-  selected,
-  hasError,
-  children,
-}: {
-  selected?: boolean;
-  hasError?: boolean;
-  children: React.ReactNode;
-}) {
-  const border = selected
-    ? ACTIVE_STROKE
-    : hasError
-    ? ERROR_COLOR
-    : "#30363d";
-
+function RouterIcon({ sel }: { sel: boolean }) {
+  const s = sel ? C.selected : C.rtStroke;
   return (
-    <div style={{
-      background: "#161b22",
-      border: `2px solid ${border}`,
-      borderRadius: 10,
-      padding: "10px 14px",
-      minWidth: 100,
-      textAlign: "center",
-      cursor: "pointer",
-      userSelect: "none",
-      boxShadow: selected
-        ? `0 0 0 3px rgba(88,166,255,0.18), 0 4px 14px rgba(0,0,0,0.6)`
-        : "0 2px 8px rgba(0,0,0,0.4)",
-      transition: "border-color 0.15s, box-shadow 0.15s",
-    }}>
-      {children}
-    </div>
+    <svg width="52" height="52" viewBox="0 0 52 52" aria-hidden="true">
+      {/* Outer ring */}
+      <circle cx="26" cy="26" r="23" fill={C.iconFill} stroke={s} strokeWidth="1.8" />
+      {/* Inner ring */}
+      <circle cx="26" cy="26" r="14" fill="none" stroke={s} strokeWidth="0.8" opacity="0.3" />
+      {/* 4 directional arrows */}
+      {/* Up */}
+      <line x1="26" y1="7" x2="26" y2="14" stroke={s} strokeWidth="2" strokeLinecap="round" />
+      <path d="M22 11 L26 7 L30 11" stroke={s} strokeWidth="2" fill="none" strokeLinecap="round" />
+      {/* Right */}
+      <line x1="45" y1="26" x2="38" y2="26" stroke={s} strokeWidth="2" strokeLinecap="round" />
+      <path d="M41 22 L45 26 L41 30" stroke={s} strokeWidth="2" fill="none" strokeLinecap="round" />
+      {/* Down */}
+      <line x1="26" y1="45" x2="26" y2="38" stroke={s} strokeWidth="2" strokeLinecap="round" />
+      <path d="M22 41 L26 45 L30 41" stroke={s} strokeWidth="2" fill="none" strokeLinecap="round" />
+      {/* Left */}
+      <line x1="7" y1="26" x2="14" y2="26" stroke={s} strokeWidth="2" strokeLinecap="round" />
+      <path d="M11 22 L7 26 L11 30" stroke={s} strokeWidth="2" fill="none" strokeLinecap="round" />
+      {/* Model */}
+      <text x="26" y="29" fill={s} fontSize="6" fontFamily="ui-monospace,monospace"
+        fontWeight="bold" textAnchor="middle">2911</text>
+    </svg>
   );
 }
 
-// ── PC ────────────────────────────────────────────────────────────────────────
+// ── Exported node components ──────────────────────────────────────────────────
 
 export function PcNode({ data, selected }: NodeProps<DeviceNode>) {
-  const hasIp = !!(data.ip && data.ip.includes("/"));
-  const stroke = selected ? ACTIVE_STROKE : IDLE_STROKE;
-
+  const hasIp = !!(data.ip && String(data.ip).includes("/"));
   return (
-    <DeviceCard selected={selected} hasError={!hasIp}>
-      {handles()}
-      <PcSvg stroke={stroke} hasIp={hasIp} />
-      <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MAIN, fontFamily: "ui-monospace,monospace", marginBottom: 2 }}>
-        {String(data.hostname || "PC")}
-      </div>
-      <div style={{ fontSize: 10, color: hasIp ? TEXT_IP : ERROR_COLOR, fontFamily: "ui-monospace,monospace" }}>
-        {hasIp ? String(data.ip) : "no IP — dbl-click"}
-      </div>
-    </DeviceCard>
+    <CMLNode
+      selected={selected}
+      icon={<PcIcon sel={!!selected} hasIp={hasIp} />}
+      label={String(data.hostname || "PC")}
+      sublabel={hasIp ? String(data.ip) : "no IP"}
+      sublabelColor={hasIp ? C.swStroke : C.error}
+    />
   );
 }
-
-// ── Laptop ────────────────────────────────────────────────────────────────────
 
 export function LaptopNode({ data, selected }: NodeProps<DeviceNode>) {
-  const hasIp = !!(data.ip && data.ip.includes("/"));
-  const stroke = selected ? ACTIVE_STROKE : IDLE_STROKE;
-
+  const hasIp = !!(data.ip && String(data.ip).includes("/"));
   return (
-    <DeviceCard selected={selected} hasError={!hasIp}>
-      {handles()}
-      <LaptopSvg stroke={stroke} hasIp={hasIp} />
-      <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MAIN, fontFamily: "ui-monospace,monospace", marginBottom: 2 }}>
-        {String(data.hostname || "Laptop")}
-      </div>
-      <div style={{ fontSize: 10, color: hasIp ? TEXT_IP : ERROR_COLOR, fontFamily: "ui-monospace,monospace" }}>
-        {hasIp ? String(data.ip) : "no IP — dbl-click"}
-      </div>
-    </DeviceCard>
+    <CMLNode
+      selected={selected}
+      icon={<LaptopIcon sel={!!selected} hasIp={hasIp} />}
+      label={String(data.hostname || "Laptop")}
+      sublabel={hasIp ? String(data.ip) : "no IP"}
+      sublabelColor={hasIp ? C.swStroke : C.error}
+    />
   );
 }
-
-// ── Server ────────────────────────────────────────────────────────────────────
 
 export function ServerNode({ data, selected }: NodeProps<DeviceNode>) {
-  const hasIp = !!(data.ip && data.ip.includes("/"));
-  const stroke = selected ? ACTIVE_STROKE : IDLE_STROKE;
-
+  const hasIp = !!(data.ip && String(data.ip).includes("/"));
   return (
-    <DeviceCard selected={selected} hasError={!hasIp}>
-      {handles()}
-      <ServerSvg stroke={stroke} hasIp={hasIp} />
-      <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MAIN, fontFamily: "ui-monospace,monospace", marginBottom: 2 }}>
-        {String(data.hostname || "Server")}
-      </div>
-      <div style={{ fontSize: 10, color: hasIp ? TEXT_IP : ERROR_COLOR, fontFamily: "ui-monospace,monospace" }}>
-        {hasIp ? String(data.ip) : "no IP — dbl-click"}
-      </div>
-    </DeviceCard>
+    <CMLNode
+      selected={selected}
+      icon={<ServerIcon sel={!!selected} hasIp={hasIp} />}
+      label={String(data.hostname || "Server")}
+      sublabel={hasIp ? String(data.ip) : "no IP"}
+      sublabelColor={hasIp ? C.swStroke : C.error}
+    />
   );
 }
-
-// ── Catalyst 2960 Switch ──────────────────────────────────────────────────────
 
 export function Switch2960Node({ data, selected }: NodeProps<DeviceNode>) {
-  const stroke = selected ? ACTIVE_STROKE : IDLE_STROKE;
-
   return (
-    <DeviceCard selected={selected}>
-      {handles()}
-      <Switch2960Svg stroke={stroke} active={!!selected} />
-      <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MAIN, fontFamily: "ui-monospace,monospace", marginBottom: 2 }}>
-        {String(data.hostname || "SW1")}
-      </div>
-      <div style={{ fontSize: 9, color: TEXT_MUTED, fontFamily: "ui-monospace,monospace" }}>
-        Catalyst 2960
-      </div>
-    </DeviceCard>
+    <CMLNode
+      selected={selected}
+      icon={<SwitchIcon sel={!!selected} />}
+      label={String(data.hostname || "SW1")}
+      sublabel="Catalyst 2960"
+      sublabelColor={C.swStroke}
+    />
   );
 }
 
-// ── 2911 Router ───────────────────────────────────────────────────────────────
-
 export function Router2911Node({ data, selected }: NodeProps<DeviceNode>) {
-  const stroke = selected ? ACTIVE_STROKE : IDLE_STROKE;
-
   return (
-    <DeviceCard selected={selected}>
-      {handles()}
-      <Router2911Svg stroke={stroke} />
-      <div style={{ fontSize: 11, fontWeight: 700, color: TEXT_MAIN, fontFamily: "ui-monospace,monospace", marginBottom: 2 }}>
-        {String(data.hostname || "R1")}
-      </div>
-      <div style={{ fontSize: 9, color: "#f85149", fontFamily: "ui-monospace,monospace" }}>
-        2911 — coming soon
-      </div>
-    </DeviceCard>
+    <CMLNode
+      selected={selected}
+      icon={<RouterIcon sel={!!selected} />}
+      label={String(data.hostname || "R1")}
+      sublabel="ISR 2911"
+      sublabelColor={C.rtStroke}
+    />
   );
 }
 

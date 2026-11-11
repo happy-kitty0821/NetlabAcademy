@@ -1,20 +1,25 @@
 "use client";
 
 /**
- * NodeConfigPopup — modal overlay for configuring a device.
- *
- * Opens automatically when a device is dropped onto the canvas.
- * Also opens on double-click when simulation is stopped.
- *
- * Fields:
- *  - Hostname (all devices)
- *  - IP Address / CIDR (hosts only)
- *  - Gateway (hosts only, optional)
+ * NodeConfigPopup — device configuration modal (CML style).
+ * Opens automatically on drop, or on double-click when stopped.
  */
 
 import { useState, useEffect, useRef } from "react";
 import type { DeviceNode, DeviceNodeData } from "@/lib/deviceTypes";
 import { X, CheckCircle2 } from "lucide-react";
+
+const P = {
+  bg:      "#16213e",
+  border:  "#0f3460",
+  input:   "#0d1b2a",
+  label:   "#cdd6f4",
+  muted:   "#7c7f93",
+  active:  "#00b4d8",
+  error:   "#e94560",
+  green:   "#a6e3a1",
+  hover:   "#0f3460",
+};
 
 interface NodeConfigPopupProps {
   node:    DeviceNode;
@@ -22,7 +27,7 @@ interface NodeConfigPopupProps {
   onClose: () => void;
 }
 
-function validate(ip: string): string {
+function validateIp(ip: string): string {
   if (!ip) return "";
   const parts = ip.trim().split("/");
   if (parts.length !== 2) return "Use CIDR: 192.168.1.1/24";
@@ -39,24 +44,17 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
   const [ip,       setIp]       = useState(String(node.data.ip ?? ""));
   const [gateway,  setGateway]  = useState(String(node.data.gateway ?? ""));
   const [ipErr,    setIpErr]    = useState("");
-
-  const isHost    = node.data.model === "host";
+  const isHost = node.data.model === "host";
   const hostnameRef = useRef<HTMLInputElement>(null);
 
-  // Focus hostname on open
   useEffect(() => { hostnameRef.current?.focus(); }, []);
-
-  // Close on Escape
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  function handleIpChange(v: string) {
-    setIp(v);
-    setIpErr(validate(v));
-  }
+  function handleIpChange(v: string) { setIp(v); setIpErr(validateIp(v)); }
 
   function handleSave() {
     if (isHost && ip && ipErr) return;
@@ -67,45 +65,35 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
     });
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter") handleSave();
-  }
-
-  const modelLabel =
-    node.data.model === "host"   ? "PC / Host" :
-    node.data.model === "switch" ? "Switch"    :
-    node.data.model === "router" ? "Router"    : "Device";
+  const modelLabel = node.data.model === "host" ? "PC / Host" : node.data.model === "switch" ? "Switch" : "Router";
 
   return (
-    /* Backdrop */
     <div
-      className="absolute inset-0 z-50 flex items-center justify-center"
-      style={{ background: "rgba(1,4,9,0.7)" }}
+      style={{ position: "absolute", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(13,27,42,0.75)" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="rounded-xl border border-[#30363d] shadow-2xl"
-        style={{ width: 320, background: "#161b22" }}
-        onKeyDown={handleKeyDown}
+        style={{ width: 320, background: P.bg, border: `1px solid ${P.border}`, borderRadius: 10, boxShadow: "0 8px 40px rgba(0,0,0,0.6)" }}
+        onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#21262d]">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: `1px solid ${P.border}` }}>
           <div>
-            <div className="text-[13px] font-semibold text-[#e6edf3]">Configure device</div>
-            <div className="text-[10px] font-mono text-[#484f58] mt-0.5">{modelLabel}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: P.label }}>Configure device</div>
+            <div style={{ fontSize: 10, fontFamily: "monospace", color: P.muted, marginTop: 2 }}>{modelLabel}</div>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded text-[#484f58] hover:text-[#8b949e] hover:bg-[#21262d] transition-colors"
-            aria-label="Close"
+            style={{ padding: 5, borderRadius: 4, color: P.muted, background: "transparent", border: "none", cursor: "pointer" }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = P.label; e.currentTarget.style.background = P.hover; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = P.muted; e.currentTarget.style.background = "transparent"; }}
           >
             <X size={14} />
           </button>
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-3">
-          {/* Hostname */}
+        <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Hostname">
             <input
               ref={hostnameRef}
@@ -113,40 +101,28 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
               value={hostname}
               onChange={(e) => setHostname(e.target.value)}
               placeholder="SW1"
-              className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono text-[#e6edf3] outline-none focus:ring-1 focus:ring-[#58a6ff] transition-shadow"
-              style={{ background: "#0d1117", border: "1px solid #30363d" }}
+              style={inputStyle()}
             />
           </Field>
 
-          {/* IP (hosts only) */}
           {isHost && (
             <>
-              <Field
-                label="IP Address (CIDR)"
-                hint="e.g. 192.168.1.1/24"
-                error={ipErr}
-              >
+              <Field label="IP Address (CIDR)" hint={!ipErr ? "e.g. 192.168.1.1/24" : undefined} error={ipErr}>
                 <input
                   type="text"
                   value={ip}
                   onChange={(e) => handleIpChange(e.target.value)}
                   placeholder="192.168.1.1/24"
-                  className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono text-[#e6edf3] outline-none focus:ring-1 transition-shadow"
-                  style={{
-                    background:  "#0d1117",
-                    border:      `1px solid ${ipErr ? "#f85149" : "#30363d"}`,
-                  }}
+                  style={inputStyle(!!ipErr)}
                 />
               </Field>
-
-              <Field label="Default Gateway" hint="Optional — leave blank for same-subnet">
+              <Field label="Default Gateway" hint="Optional">
                 <input
                   type="text"
                   value={gateway}
                   onChange={(e) => setGateway(e.target.value)}
                   placeholder="192.168.1.254"
-                  className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono text-[#e6edf3] outline-none focus:ring-1 focus:ring-[#58a6ff] transition-shadow"
-                  style={{ background: "#0d1117", border: "1px solid #30363d" }}
+                  style={inputStyle()}
                 />
               </Field>
             </>
@@ -154,15 +130,15 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
         </div>
 
         {/* Footer */}
-        <div className="flex gap-2 px-4 pb-4">
+        <div style={{ display: "flex", gap: 8, padding: "0 16px 16px" }}>
           <button
             onClick={handleSave}
             disabled={!!(isHost && ip && ipErr)}
-            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[12px] font-semibold font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
-              background: "rgba(63,185,80,0.15)",
-              border:     "1px solid rgba(63,185,80,0.35)",
-              color:      "#3fb950",
+              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              padding: "7px 0", borderRadius: 6, fontSize: 12, fontFamily: "monospace", fontWeight: 700,
+              color: P.green, background: "rgba(166,227,161,0.1)", border: `1px solid rgba(166,227,161,0.3)`,
+              cursor: "pointer", opacity: (isHost && ip && ipErr) ? 0.4 : 1,
             }}
           >
             <CheckCircle2 size={12} />
@@ -170,8 +146,12 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded text-[12px] font-mono text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d] transition-colors"
-            style={{ border: "1px solid #30363d" }}
+            style={{
+              padding: "7px 16px", borderRadius: 6, fontSize: 12, fontFamily: "monospace",
+              color: P.muted, background: "transparent", border: `1px solid ${P.border}`, cursor: "pointer",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = P.label; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = P.muted; }}
           >
             Skip
           </button>
@@ -181,22 +161,25 @@ export function NodeConfigPopup({ node, onSave, onClose }: NodeConfigPopupProps)
   );
 }
 
-function Field({
-  label, hint, error, children,
-}: {
-  label:    string;
-  hint?:    string;
-  error?:   string;
-  children: React.ReactNode;
-}) {
+function inputStyle(hasError = false): React.CSSProperties {
+  return {
+    width: "100%", padding: "7px 10px", borderRadius: 5, fontSize: 12,
+    fontFamily: "monospace", color: "#cdd6f4", outline: "none",
+    background: "#0d1b2a",
+    border: `1px solid ${hasError ? "#e94560" : "#0f3460"}`,
+    boxSizing: "border-box",
+  };
+}
+
+function Field({ label, hint, error, children }: { label: string; hint?: string; error?: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1">
-      <label className="block text-[10px] font-semibold uppercase tracking-wider text-[#8b949e]">
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#7c7f93" }}>
         {label}
       </label>
       {children}
-      {error  && <p className="text-[10px] text-[#f85149] font-mono">{error}</p>}
-      {hint && !error && <p className="text-[10px] text-[#484f58] font-mono">{hint}</p>}
+      {error && <span style={{ fontSize: 10, color: "#e94560", fontFamily: "monospace" }}>{error}</span>}
+      {hint && !error && <span style={{ fontSize: 10, color: "#7c7f93", fontFamily: "monospace" }}>{hint}</span>}
     </div>
   );
 }
