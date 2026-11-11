@@ -1,0 +1,9 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    "Non-deterministic MAC seeds across process restarts — hash(node_id + iface_name) % (2**31) uses CPython's randomised string hashing (PYTHONHASHSEED). Same topology produces different MAC addresses on every server restart. Replace with hashlib.md5 or similar stable hash. The determinism test only calls build_topology_from_document twice in the same process and does not catch this.",
+    "New VLAN instances start with empty port_states — create_vlan → ensure_vlan → _get_or_create_instance creates a bare STPInstance with no ports. Physical interfaces registered at init time are never copied into later VLAN instances. show spanning-tree vlan 10 returns an empty interface table. test_access_port_in_different_vlan_registered only asserts inst10 is not None, not that any ports are present, so the gap passes the test suite silently.",
+    "Private STP API called from application code — _register_stp_ports and register_interface_with_stp both call self._stp._get_or_create_port(), a private method on STPManager. Promote to a public STPManager.register_port() method or a register_physical_interfaces() bulk method to avoid implicit coupling."
+  ],
+  "reviewDoc": "c:\\Users\\User\\Documents\\NetlabAcademy\\.agents\\tasks\\stp-interfaces\\review.md"
+}

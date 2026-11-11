@@ -138,6 +138,11 @@ class CLISession:
 
         Returns the output string.  Never raises — unknown input returns
         the standard Cisco invalid-input error.
+
+        Pipe filters (``| include``, ``| exclude``, ``| section``) are
+        intercepted here before dispatch and applied to the output of the
+        base command.  This means they work transparently for any command,
+        including inside ``do`` from configuration mode.
         """
         line = raw.rstrip()
         stripped = line.strip()
@@ -153,6 +158,25 @@ class CLISession:
         if stripped.endswith("?"):
             return self._inline_help(stripped)
 
+        # ── Pipe filter extraction ────────────────────────────────────────────
+        # Split on the first '|' to separate the command from its filter.
+        # The pipe character is NOT a valid command token, so any '|' means
+        # the user intends a filter modifier.
+        pipe_filter: Optional[tuple[str, str]] = None  # (filter_type, pattern)
+        if "|" in stripped:
+            cmd_part, _, filter_part = stripped.partition("|")
+            filter_part = filter_part.strip()
+            filter_tokens = filter_part.split(None, 1)
+            if filter_tokens:
+                ftype = filter_tokens[0].lower()
+                if ftype in ("include", "exclude", "section", "begin"):
+                    pattern = filter_tokens[1] if len(filter_tokens) > 1 else ""
+                    pipe_filter = (ftype, pattern)
+                    stripped = cmd_part.strip()
+                else:
+                    # Unknown filter keyword — fall through to let dispatch report error
+                    pass
+
         tokens = stripped.split()
 
         # exit/end are universal
@@ -160,7 +184,13 @@ class CLISession:
             return self._cmd_end(tokens)
 
         tree = self._tree()
-        return self._dispatch(tokens, tree)
+        output = self._dispatch(tokens, tree)
+
+        # Apply pipe filter to the output if one was specified.
+        if pipe_filter:
+            output = self._apply_pipe_filter(output, pipe_filter[0], pipe_filter[1])
+
+        return output
 
     def complete(self, partial: str) -> str:
         """
@@ -851,6 +881,58 @@ class CLISession:
 
     # ── Command implementations ───────────────────────────────────────────────
 
+    # ── Pipe filter ───────────────────────────────────────────────────────────
+
+    def _apply_pipe_filter(self, output: str, ftype: str, pattern: str) -> str:
+        """
+        Apply a Cisco-style output filter to a command's output.
+
+        Supported filters:
+          include <pattern>  — keep only lines containing pattern
+          exclude <pattern>  — remove lines containing pattern
+          section <pattern>  — keep the section header matching pattern
+                               plus all indented lines following it
+          begin   <pattern>  — keep lines from the first match onward
+
+        Pattern matching is case-insensitive (matches IOS behaviour).
+        """
+        if not output:
+            return output
+        lines = output.splitlines()
+        p = pattern.lower()
+
+        if ftype == "include":
+            return "\n".join(l for l in lines if p in l.lower())
+
+        if ftype == "exclude":
+            return "\n".join(l for l in lines if p not in l.lower())
+
+        if ftype == "begin":
+            result: list[str] = []
+            started = False
+            for l in lines:
+                if not started and p in l.lower():
+                    started = True
+                if started:
+                    result.append(l)
+            return "\n".join(result)
+
+        if ftype == "section":
+            result = []
+            in_section = False
+            for l in lines:
+                if p in l.lower() and not l.startswith(" "):
+                    in_section = True
+                    result.append(l)
+                elif in_section:
+                    if l.startswith(" ") or l.startswith("\t") or not l.strip():
+                        result.append(l)
+                    else:
+                        in_section = False
+            return "\n".join(result)
+
+        return output
+
     def _cmd_end(self, tokens: list[str]) -> str:
         cmd = tokens[0].lower() if tokens else "exit"
 
@@ -977,6 +1059,18 @@ class CLISession:
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
+
+        # Capability check — L2-only switches do not support SVIs.
+        if not device.supports_svi:
+            return (
+                "% Invalid input detected at '^' marker.\n"
+                "\n"
+                "  interface vlan\n"
+                "                ^\n"
+                "% SVI (interface vlan) is not supported on this device.\n"
+                "  Use 'ip default-gateway' for management access on a L2 switch."
+            )
+
         iface_name = f"Vlan{vlan_id}"
         if iface_name not in device.interfaces:
             # Create the SVI interface
@@ -1019,11 +1113,16 @@ class CLISession:
         """do <exec-command> — run EXEC command from config mode."""
         if len(tokens) < 2:
             return "% Incomplete command."
-        # Run in a temporary PRIV_EXEC context
+        # Reconstruct the original command string after 'do' — this preserves
+        # any pipe filters (| include, | exclude, etc.) that would be lost if
+        # we only forwarded the pre-split token list.
         saved_mode = self.mode
         saved_iface = self.current_iface
         self.mode = CLIMode.PRIV_EXEC
-        result = self._dispatch(tokens[1:], self._tree())
+        # Re-join everything after 'do' and run it through the full execute()
+        # pipeline, which handles pipe filters correctly.
+        sub_command = " ".join(tokens[1:])
+        result = self.execute(sub_command)
         self.mode = saved_mode
         self.current_iface = saved_iface
         return result
@@ -1132,6 +1231,15 @@ class CLISession:
         iface = self._get_current_iface()
         if iface is None:
             return "% No interface selected."
+        # Speed is only valid on physical ports.
+        if iface.is_svi or iface.is_loopback:
+            return (
+                "% Invalid input detected at '^' marker.\n"
+                "\n"
+                "  speed\n"
+                "       ^\n"
+                "% 'speed' is not supported on logical interfaces (SVI, Loopback)."
+            )
         val = tokens[1].lower()
         if val == "auto":
             from simulator_core.port_types import detect_port_type
@@ -1158,6 +1266,15 @@ class CLISession:
         iface = self._get_current_iface()
         if iface is None:
             return "% No interface selected."
+        # Duplex is only valid on physical ports.
+        if iface.is_svi or iface.is_loopback:
+            return (
+                "% Invalid input detected at '^' marker.\n"
+                "\n"
+                "  duplex\n"
+                "        ^\n"
+                "% 'duplex' is not supported on logical interfaces (SVI, Loopback)."
+            )
         iface.duplex = mode
         return ""
 
@@ -2597,6 +2714,11 @@ class CLISession:
             "!",
         ]
         for name, iface in device.interfaces.items():
+            # Skip SVIs on devices that don't support them (e.g. L2-only switches).
+            # They should not exist — but if one was created before the capability
+            # check was enforced, exclude it from the running-config.
+            if iface.is_svi and not device.supports_svi:
+                continue
             lines.append(f"!")
             lines.append(f"interface {name}")
             desc = getattr(iface, "_description", "")
@@ -2610,6 +2732,8 @@ class CLISession:
                 lines.append(f" switchport mode access")
                 if iface.vlan != 1:
                     lines.append(f" switchport access vlan {iface.vlan}")
+            elif hasattr(iface, "switchport_mode") and iface.switchport_mode == "trunk":
+                lines.append(f" switchport mode trunk")
             if iface.admin_state == InterfaceState.DOWN:
                 lines.append(" shutdown")
             else:

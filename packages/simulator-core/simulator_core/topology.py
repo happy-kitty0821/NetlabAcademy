@@ -205,6 +205,12 @@ class Device:
     hostname: str
     interfaces: dict[str, Interface] = field(default_factory=dict)
     config: DeviceConfig = field(default_factory=DeviceConfig)
+    # Capability flags — set by the device catalog at initialization time.
+    # A pure L2 switch (e.g. Catalyst 2960 without IP services image)
+    # does not support SVIs or L3 routing.  A router or multilayer switch
+    # enables these explicitly.
+    supports_svi: bool = False          # interface vlan N creates an SVI
+    supports_l3_routing: bool = False   # ip route, routed physical ports
 
     def add_interface(self, interface: Interface) -> None:
         """

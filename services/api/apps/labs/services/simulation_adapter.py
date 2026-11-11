@@ -209,9 +209,18 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
         hostname = node.get("hostname", node_id)
         device = Device(id=str(node_id), model=model, hostname=hostname)
 
-        # Resolve interface list: use catalog template when catalogId is known,
-        # otherwise fall back to JSON-supplied interfaces (backward compat).
+        # Set device capability flags from catalog or model defaults.
+        # Routers support SVI and L3 routing by default.
+        # Switches only support SVI when explicitly declared in the catalog.
         catalog_id = node.get("catalogId")
+        if model == DeviceModel.ROUTER:
+            device.supports_svi = True
+            device.supports_l3_routing = True
+        elif catalog_id and INTERFACE_CATALOG.get(catalog_id, {}).get("supports_svi"):
+            device.supports_svi = True
+            device.supports_l3_routing = INTERFACE_CATALOG[catalog_id].get(
+                "supports_l3_routing", False
+            )
         original_interfaces = node.get("interfaces", [])
         if catalog_id and catalog_id in INTERFACE_CATALOG:
             iface_list = _generate_interfaces_from_catalog(

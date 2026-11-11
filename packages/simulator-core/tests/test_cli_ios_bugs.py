@@ -44,6 +44,24 @@ def priv_switch_session() -> CLISession:
     return s
 
 
+def svi_capable_switch_session() -> CLISession:
+    """
+    Return a CLISession for SW1 with supports_svi=True at GLOBAL_CONFIG.
+
+    Used to test SVI-specific behaviour (switchport rejection on SVIs,
+    show ip int brief with SVIs) on a device that actually supports SVIs.
+    A pure L2 switch does not support SVIs, so these tests require a
+    device that explicitly has the capability flag set.
+    """
+    sim = build_sim(seed=42)
+    # Enable SVI capability so we can enter interface vlan N
+    sim.topology.devices["switch-1"].supports_svi = True
+    s = CLISession(device_id="switch-1", simulation=sim)
+    s.execute("enable")
+    s.execute("configure terminal")
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Bug 1 — SVI must reject switchport commands
 # ---------------------------------------------------------------------------
@@ -55,12 +73,14 @@ class TestSVISwitchportRejection:
     """
 
     def _enter_svi(self) -> CLISession:
-        s = switch_session()
+        s = svi_capable_switch_session()
         # First create the VLAN so the SVI is valid
         s.execute("vlan 10")
         s.execute("exit")
         s.execute("interface vlan 10")
-        assert s.mode == CLIMode.IFACE_CONFIG
+        assert s.mode == CLIMode.IFACE_CONFIG, (
+            f"Expected IFACE_CONFIG after 'interface vlan 10' on SVI-capable device, got {s.mode}"
+        )
         assert s.current_iface == "Vlan10"
         return s
 
@@ -397,6 +417,7 @@ class TestShowIpInterfaceBrief:
     def test_svi_appears_when_configured(self) -> None:
         """An SVI with an IP address must appear in show ip interface brief."""
         sim = build_sim(seed=42)
+        sim.topology.devices["switch-1"].supports_svi = True  # enable SVI capability
         s = CLISession(device_id="switch-1", simulation=sim)
         s.execute("enable")
         s.execute("configure terminal")
@@ -469,3 +490,321 @@ class TestInterfaceTypeClassification:
 
     def test_loopback_is_not_physical_switchport(self) -> None:
         assert self._make_iface("Loopback0").is_physical_switchport is False
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2 regression tests — username parsing, pipe filters, capability
+# enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestUsernameCommandParsing:
+    """
+    Regression tests for the username command tokenization and privilege
+    level parsing.  The bug symptom was 'aayushprivilege' (concatenated
+    name and keyword) and privilege reset to 1.
+    """
+
+    def _session(self) -> CLISession:
+        s = switch_session()
+        return s
+
+    def test_username_privilege_15_stored_correctly(self) -> None:
+        s = self._session()
+        s.execute("username admin privilege 15 secret SecurePass1")
+        device = s.simulation.topology.devices["switch-1"]
+        user = device.config.users.get("admin")
+        assert user is not None, "User 'admin' was not created"
+        assert user.username == "admin", f"Username corrupted: {user.username!r}"
+        assert user.privilege == 15, f"Privilege should be 15, got {user.privilege}"
+
+    def test_username_privilege_1_stored_correctly(self) -> None:
+        s = self._session()
+        s.execute("username viewer privilege 1 secret pass")
+        user = s.simulation.topology.devices["switch-1"].config.users.get("viewer")
+        assert user is not None
+        assert user.privilege == 1
+
+    def test_username_privilege_0_stored_correctly(self) -> None:
+        s = self._session()
+        s.execute("username guest privilege 0 secret pass")
+        user = s.simulation.topology.devices["switch-1"].config.users.get("guest")
+        assert user is not None
+        assert user.privilege == 0
+
+    def test_username_privilege_5_stored_correctly(self) -> None:
+        s = self._session()
+        s.execute("username op privilege 5 secret pass")
+        user = s.simulation.topology.devices["switch-1"].config.users.get("op")
+        assert user is not None
+        assert user.privilege == 5
+
+    def test_username_default_privilege_is_1(self) -> None:
+        s = self._session()
+        s.execute("username nopriv secret pass")
+        user = s.simulation.topology.devices["switch-1"].config.users.get("nopriv")
+        assert user is not None
+        assert user.privilege == 1
+
+    def test_username_secret_is_hashed_not_plaintext(self) -> None:
+        s = self._session()
+        s.execute("username alice privilege 15 secret MySecret99")
+        user = s.simulation.topology.devices["switch-1"].config.users.get("alice")
+        assert user is not None
+        assert "MySecret99" not in user.password_hash, (
+            "Plaintext password must not be stored in password_hash"
+        )
+        assert len(user.password_hash) >= 16, "Hash too short"
+
+    def test_username_in_running_config_has_correct_privilege(self) -> None:
+        s = switch_session()
+        s.execute("username bob privilege 15 secret BobPass1")
+        s.execute("end")
+        out = priv_switch_session.__class__  # just to confirm we can call priv session
+        s2 = svi_capable_switch_session.__class__  # just checking import
+        # Use same session at PRIV_EXEC
+        sim = build_sim(seed=42)
+        sess = CLISession(device_id="switch-1", simulation=sim)
+        sess.execute("enable")
+        sess.execute("configure terminal")
+        sess.execute("username bob privilege 15 secret BobPass1")
+        sess.execute("end")
+        rc = sess.execute("show running-config")
+        username_lines = [l for l in rc.splitlines() if "username" in l]
+        assert len(username_lines) == 1
+        line = username_lines[0]
+        assert "bob" in line
+        assert "privilege 15" in line, f"Privilege 15 missing from: {line!r}"
+        assert "BobPass1" not in line, "Plaintext secret must not appear in running-config"
+
+    def test_username_invalid_privilege_level_rejected(self) -> None:
+        s = self._session()
+        out = s.execute("username badpriv privilege 16 secret pass")
+        assert "%" in out, "Should return an error for privilege > 15"
+        user = s.simulation.topology.devices["switch-1"].config.users.get("badpriv")
+        assert user is None, "User must not be created when privilege is invalid"
+
+    def test_username_missing_secret_rejected(self) -> None:
+        s = self._session()
+        out = s.execute("username nopass privilege 15")
+        assert "%" in out or "Incomplete" in out
+
+    def test_username_config_round_trip(self) -> None:
+        """Stored privilege must be the same value that appears in running-config."""
+        sim = build_sim(seed=42)
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("username charlie privilege 7 secret Pr1v7Pass")
+        s.execute("end")
+        rc = s.execute("show running-config")
+        username_lines = [l for l in rc.splitlines() if "charlie" in l]
+        assert len(username_lines) == 1
+        assert "privilege 7" in username_lines[0], (
+            f"Expected privilege 7 in running-config, got: {username_lines[0]!r}"
+        )
+
+
+class TestPipeFilters:
+    """
+    Test | include, | exclude, | section, and | begin filters.
+    These must work both from PRIV_EXEC and from config mode via 'do'.
+    """
+
+    def _session_with_user(self) -> CLISession:
+        sim = build_sim(seed=42)
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("username alice privilege 15 secret AlicePass1")
+        s.execute("username bob privilege 1 secret BobPass2")
+        s.execute("end")
+        return s
+
+    def test_pipe_include_from_priv_exec(self) -> None:
+        s = self._session_with_user()
+        out = s.execute("show running-config | include username")
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert all("username" in l.lower() for l in lines), (
+            f"include filter should only return lines containing 'username': {out!r}"
+        )
+        assert any("alice" in l for l in lines)
+        assert any("bob" in l for l in lines)
+
+    def test_pipe_include_from_global_config_via_do(self) -> None:
+        sim = build_sim(seed=42)
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("username alice privilege 15 secret AlicePass1")
+        out = s.execute("do show running-config | include username")
+        # Must NOT return an invalid input error
+        assert "Invalid input" not in out, (
+            f"'do show running-config | include' should work from config mode: {out!r}"
+        )
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert any("alice" in l for l in lines), (
+            f"Expected 'alice' in filtered output: {out!r}"
+        )
+
+    def test_pipe_exclude_removes_matching_lines(self) -> None:
+        s = self._session_with_user()
+        out = s.execute("show running-config | exclude username")
+        assert "username" not in out.lower(), (
+            f"exclude filter should remove all 'username' lines: {out!r}"
+        )
+
+    def test_pipe_include_no_match_returns_empty(self) -> None:
+        s = self._session_with_user()
+        out = s.execute("show running-config | include zzz_no_match_zzz")
+        assert out.strip() == "", f"No matches should produce empty output, got: {out!r}"
+
+    def test_pipe_begin_starts_from_first_match(self) -> None:
+        s = self._session_with_user()
+        out = s.execute("show running-config | begin hostname")
+        lines = out.splitlines()
+        assert lines[0].startswith("hostname") or "hostname" in lines[0], (
+            f"begin filter should start from hostname line: {out!r}"
+        )
+
+    def test_pipe_do_include_hostname(self) -> None:
+        sim = build_sim(seed=42)
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        out = s.execute("do show running-config | include hostname")
+        assert "Invalid input" not in out
+        assert "hostname" in out.lower() or out.strip() == ""
+
+    def test_pipe_include_case_insensitive(self) -> None:
+        s = self._session_with_user()
+        out_lower = s.execute("show running-config | include username")
+        out_upper = s.execute("show running-config | include USERNAME")
+        # Both should return the same set of lines
+        assert out_lower == out_upper
+
+
+class TestSVICapabilityEnforcement:
+    """
+    Tests for device capability enforcement on interface vlan N (SVI).
+
+    A pure L2 switch (supports_svi=False) must reject 'interface vlan N'.
+    A device with supports_svi=True must accept it.
+    Speed/duplex commands on SVIs must be rejected.
+    """
+
+    def test_l2_switch_rejects_interface_vlan(self) -> None:
+        """L2-only switch must not allow SVI creation."""
+        sim = build_sim(seed=42)
+        assert not sim.topology.devices["switch-1"].supports_svi, (
+            "Test precondition: switch-1 must not have SVI capability"
+        )
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("vlan 10")
+        s.execute("exit")
+        out = s.execute("interface vlan 10")
+        assert "Invalid input" in out or "not supported" in out, (
+            f"L2 switch should reject 'interface vlan 10': {out!r}"
+        )
+        # Mode must NOT have changed to IFACE_CONFIG
+        assert s.mode == CLIMode.GLOBAL_CONFIG, (
+            f"Mode should remain GLOBAL_CONFIG after rejection, got {s.mode}"
+        )
+        # No Vlan10 interface must have been created
+        assert "Vlan10" not in sim.topology.devices["switch-1"].interfaces, (
+            "Vlan10 interface must not be created on L2-only switch"
+        )
+
+    def test_svi_capable_device_accepts_interface_vlan(self) -> None:
+        """Device with supports_svi=True must accept interface vlan N."""
+        sim = build_sim(seed=42)
+        sim.topology.devices["switch-1"].supports_svi = True
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("vlan 10")
+        s.execute("exit")
+        out = s.execute("interface vlan 10")
+        assert "Invalid" not in out and "not supported" not in out, (
+            f"SVI-capable device should accept 'interface vlan 10': {out!r}"
+        )
+        assert s.mode == CLIMode.IFACE_CONFIG
+        assert s.current_iface == "Vlan10"
+
+    def test_speed_command_rejected_on_svi(self) -> None:
+        """'speed auto' must be rejected on an SVI."""
+        sim = build_sim(seed=42)
+        sim.topology.devices["switch-1"].supports_svi = True
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("vlan 10")
+        s.execute("exit")
+        s.execute("interface vlan 10")
+        out = s.execute("speed auto")
+        assert "Invalid input" in out or "not supported" in out, (
+            f"'speed auto' should be rejected on SVI: {out!r}"
+        )
+
+    def test_duplex_command_rejected_on_svi(self) -> None:
+        """'duplex full' must be rejected on an SVI."""
+        sim = build_sim(seed=42)
+        sim.topology.devices["switch-1"].supports_svi = True
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("vlan 10")
+        s.execute("exit")
+        s.execute("interface vlan 10")
+        out = s.execute("duplex full")
+        assert "Invalid input" in out or "not supported" in out, (
+            f"'duplex full' should be rejected on SVI: {out!r}"
+        )
+
+    def test_speed_command_accepted_on_physical_interface(self) -> None:
+        """'speed 100' must still work on a physical interface."""
+        s = switch_session()
+        s.execute("interface Gi0/0")
+        out = s.execute("speed 100")
+        assert "Invalid input" not in out and "not supported" not in out, (
+            f"'speed 100' should be accepted on physical interface: {out!r}"
+        )
+
+    def test_svi_excluded_from_running_config_on_l2_switch(self) -> None:
+        """
+        If a Vlan interface exists on an L2 switch (from before capability
+        check was enforced), it must not appear in show running-config.
+        """
+        from simulator_core.addresses import MACAddress
+        import random as _rand
+        sim = build_sim(seed=42)
+        sw = sim.topology.devices["switch-1"]
+        # Force-add SVI directly (bypasses CLI) to test display filter
+        svi = Interface(name="Vlan10", mac=MACAddress.generate(_rand.Random(77)))
+        sw.add_interface(svi)
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        rc = s.execute("show running-config")
+        assert "Vlan10" not in rc, (
+            f"SVI must not appear in running-config of L2-only switch: {rc!r}"
+        )
+
+    def test_svi_in_running_config_on_svi_capable_device(self) -> None:
+        """SVI with IP must appear in running-config of SVI-capable device."""
+        sim = build_sim(seed=42)
+        sim.topology.devices["switch-1"].supports_svi = True
+        s = CLISession(device_id="switch-1", simulation=sim)
+        s.execute("enable")
+        s.execute("configure terminal")
+        s.execute("vlan 10")
+        s.execute("exit")
+        s.execute("interface vlan 10")
+        s.execute("ip address 192.168.10.1 255.255.255.0")
+        s.execute("no shutdown")
+        s.execute("end")
+        rc = s.execute("show running-config")
+        assert "Vlan10" in rc or "interface Vlan10" in rc, (
+            f"SVI must appear in running-config of SVI-capable device: {rc!r}"
+        )
