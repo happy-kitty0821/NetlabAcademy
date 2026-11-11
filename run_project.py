@@ -404,7 +404,7 @@ def start_servers() -> None:
 
     info("Starting Django API on http://localhost:8000 ...")
     django_proc = spawn(
-        [str(VENV_PYTHON), "manage.py", "runserver", "0.0.0.0:8000"],
+        [str(VENV_PYTHON), "manage.py", "runserver"],
         cwd=API_DIR,
         env=django_env,
     )

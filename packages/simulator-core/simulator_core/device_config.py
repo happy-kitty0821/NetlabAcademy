@@ -221,6 +221,7 @@ class DeviceConfig:
     service_timestamps_debug: bool = True
     no_ip_domain_lookup: bool = False
     ip_domain_name: str = ""
+    ip_default_gateway: str = ""    # L2 switch management default gateway
     hostname_override: str = ""    # set by 'hostname' command
 
     # ── Methods ───────────────────────────────────────────────────────────────
@@ -307,6 +308,8 @@ class DeviceConfig:
             lines.append("no ip domain-lookup")
         if self.ip_domain_name:
             lines.append(f"ip domain-name {self.ip_domain_name}")
+        if self.ip_default_gateway:
+            lines.append(f"ip default-gateway {self.ip_default_gateway}")
 
         # logging
         if not self.logging_enabled:

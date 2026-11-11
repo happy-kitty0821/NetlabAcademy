@@ -367,6 +367,8 @@ class CLISession:
                             Cmd("route", "Remove a static route",
                                 args_hint="<network> <mask> <next-hop>",
                                 handler=lambda s, t: s._cmd_no_ip_route(t)),
+                            Cmd("default-gateway", "Remove default gateway",
+                                handler=lambda s, t: s._cmd_no_ip_default_gateway(t)),
                             Cmd("domain-lookup", "Disable DNS lookups",
                                 handler=lambda s, t: s._cmd_no_ip_domain_lookup(t)),
                         ]),
@@ -393,6 +395,9 @@ class CLISession:
                     Cmd("route",   "Establish a static route",
                         args_hint="<network> <mask> <next-hop>",
                         handler=lambda s, t: s._cmd_ip_route(t)),
+                    Cmd("default-gateway", "Specify default gateway (for L2 switches)",
+                        args_hint="<ip-address>",
+                        handler=lambda s, t: s._cmd_ip_default_gateway(t)),
                     Cmd("domain-lookup", "Enable DNS lookups",
                         handler=lambda s, t: s._cmd_ip_domain_lookup(t)),
                     Cmd("domain-name", "Define the default domain name",
@@ -2214,6 +2219,26 @@ class CLISession:
         config = self._get_config()
         if config:
             config.ip_domain_name = tokens[2]
+        return ""
+
+    def _cmd_ip_default_gateway(self, tokens: list[str]) -> str:
+        """ip default-gateway <ip-address>"""
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        from ipaddress import IPv4Address
+        try:
+            IPv4Address(tokens[2])
+        except ValueError:
+            return f"% Invalid IP address: {tokens[2]!r}"
+        config = self._get_config()
+        if config:
+            config.ip_default_gateway = tokens[2]
+        return ""
+
+    def _cmd_no_ip_default_gateway(self, tokens: list[str]) -> str:
+        config = self._get_config()
+        if config:
+            config.ip_default_gateway = ""
         return ""
 
     # ── Ping ──────────────────────────────────────────────────────────────────
