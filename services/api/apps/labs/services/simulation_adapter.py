@@ -34,6 +34,115 @@ from simulator_core.types import DeviceModel, InterfaceState
 
 
 # ---------------------------------------------------------------------------
+# Interface catalog (plain Python dict — no Django ORM, no DB access)
+#
+# Maps catalogId strings to interface template specs.  When a topology node
+# carries a catalogId that matches an entry here, its interfaces are
+# generated deterministically from the template instead of using the
+# JSON-supplied interface list.  Unknown or missing catalogId falls back
+# to the JSON-supplied list (backward compatibility).
+#
+# Fields per entry:
+#   count       — number of interfaces to generate
+#   port_type   — "FastEthernet" | "GigabitEthernet" | "Ethernet"
+#   prefix      — Cisco short prefix, e.g. "Fa0/"
+#   start_index — first port number, e.g. 0
+#   speed_kbps  — interface speed
+#   stp_cost    — IEEE 802.1D short-path STP cost
+# ---------------------------------------------------------------------------
+
+_InterfaceTemplateSpec = dict[str, Any]
+
+INTERFACE_CATALOG: dict[str, _InterfaceTemplateSpec] = {
+    "cisco-2960": {
+        "count": 24,
+        "port_type": "FastEthernet",
+        "prefix": "Fa0/",
+        "start_index": 0,
+        "speed_kbps": 100_000,
+        "stp_cost": 19,
+    },
+    "cisco-2911": {
+        "count": 3,
+        "port_type": "GigabitEthernet",
+        "prefix": "Gi0/",
+        "start_index": 0,
+        "speed_kbps": 1_000_000,
+        "stp_cost": 4,
+    },
+    "cisco-pc": {
+        "count": 1,
+        "port_type": "Ethernet",
+        "prefix": "eth",
+        "start_index": 0,
+        "speed_kbps": 100_000,
+        "stp_cost": 19,
+    },
+    "cisco-laptop": {
+        "count": 1,
+        "port_type": "Ethernet",
+        "prefix": "eth",
+        "start_index": 0,
+        "speed_kbps": 100_000,
+        "stp_cost": 19,
+    },
+    "cisco-server": {
+        "count": 1,
+        "port_type": "Ethernet",
+        "prefix": "eth",
+        "start_index": 0,
+        "speed_kbps": 100_000,
+        "stp_cost": 19,
+    },
+}
+
+
+def _generate_interfaces_from_catalog(
+    node_id: str,
+    template: _InterfaceTemplateSpec,
+    original_interfaces: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Generate an interface list from a catalog template.
+
+    MAC seeds are derived deterministically from (node_id + iface_name) so
+    that the same document always produces the same topology.
+
+    IP and gateway from the first entry of the original JSON interface list
+    are preserved onto the first generated interface (Fa0/0, Gi0/0, eth0).
+    """
+    prefix = template["prefix"]
+    start = template["start_index"]
+    count = template["count"]
+    speed = template["speed_kbps"]
+    stp_cost = template["stp_cost"]
+
+    # Extract IP/gateway from the first original interface, if present.
+    first_ip: str | None = None
+    first_gw: str | None = None
+    if original_interfaces:
+        first_ip = original_interfaces[0].get("ip") or None
+        first_gw = original_interfaces[0].get("gateway") or None
+
+    result: list[dict[str, Any]] = []
+    for i in range(count):
+        iface_name = f"{prefix}{start + i}"
+        mac_seed = hash(node_id + iface_name) % (2**31)
+        entry: dict[str, Any] = {
+            "name": iface_name,
+            "mac_seed": mac_seed,
+            "speed_kbps": speed,
+            "stp_cost": stp_cost,
+        }
+        if i == 0 and first_ip:
+            entry["ip"] = first_ip
+        if i == 0 and first_gw:
+            entry["gateway"] = first_gw
+        result.append(entry)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Request / response types (dicts, not Django models — these are API payloads)
 # ---------------------------------------------------------------------------
 
@@ -94,7 +203,20 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
         hostname = node.get("hostname", node_id)
         device = Device(id=str(node_id), model=model, hostname=hostname)
 
-        for iface_data in node.get("interfaces", []):
+        # Resolve interface list: use catalog template when catalogId is known,
+        # otherwise fall back to JSON-supplied interfaces (backward compat).
+        catalog_id = node.get("catalogId")
+        original_interfaces = node.get("interfaces", [])
+        if catalog_id and catalog_id in INTERFACE_CATALOG:
+            iface_list = _generate_interfaces_from_catalog(
+                node_id=str(node_id),
+                template=INTERFACE_CATALOG[catalog_id],
+                original_interfaces=original_interfaces,
+            )
+        else:
+            iface_list = original_interfaces
+
+        for iface_data in iface_list:
             iface_name = iface_data.get("name")
             if not iface_name:
                 raise ConfigurationError(
@@ -105,6 +227,15 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
             mac = MACAddress.generate(random.Random(mac_seed))
 
             iface = Interface(name=str(iface_name), mac=mac)
+
+            # Apply speed and STP cost from catalog template when present.
+            speed_kbps = iface_data.get("speed_kbps")
+            if speed_kbps is not None:
+                iface.speed_kbps = int(speed_kbps)
+
+            stp_cost = iface_data.get("stp_cost")
+            if stp_cost is not None:
+                iface.stp_path_cost = int(stp_cost)
 
             ip_str = iface_data.get("ip")
             if ip_str:

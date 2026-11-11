@@ -12,11 +12,14 @@
  *  1. Walk every edge and pre-assign interface names to both endpoints
  *     before building either the node list or the link list.
  *     This guarantees nodes and links are always consistent.
- *  2. Hosts always use "eth0".
- *  3. Switches use "Gi0/0", "Gi0/1", … assigned in edge-traversal order
- *     PER NODE, tracked by a per-node counter.
+ *  2. Hosts use the first port from their interfaceTemplate (eth0) or
+ *     fall back to "eth0".
+ *  3. Switches/routers use port names from their interfaceTemplate,
+ *     assigned in edge-traversal order per node using a per-node counter.
+ *     If no template is known, falls back to "Gi0/<n>".
  *  4. Switches are given exactly as many interfaces as they have
- *     connected edges (minimum 2 for visual clarity).
+ *     connected edges (minimum 2 for visual clarity), all from the
+ *     template when present.
  *  5. Validation: hosts require a CIDR IP, links must reference existing nodes.
  */
 
@@ -27,6 +30,7 @@ import type {
   TopologyLink,
 } from "./simulation-api";
 import type { DeviceNode } from "./deviceTypes";
+import { DEFAULT_DEVICE_CATALOG } from "./deviceTypes";
 
 export type { DeviceNode };
 export type { DeviceNodeData } from "./deviceTypes";
@@ -49,6 +53,68 @@ export interface ConversionResult {
    * Use this to stamp labels onto React Flow edges after conversion.
    */
   ifaceMap: Map<string, string>;
+}
+
+// ── Helper: resolve interface name for a node's n-th port ─────────────────────
+
+function resolvePortName(
+  catalogId: string | undefined,
+  model: "host" | "switch" | "router",
+  portIndex: number,
+): string {
+  const entry = catalogId
+    ? DEFAULT_DEVICE_CATALOG.find((e) => e.id === catalogId)
+    : undefined;
+
+  if (entry?.interfaceTemplate) {
+    const t = entry.interfaceTemplate;
+    return `${t.prefix}${t.startIndex + portIndex}`;
+  }
+
+  // Fallback when no catalog entry / template is present.
+  if (model === "host") return "eth0";
+  return `Gi0/${portIndex}`;
+}
+
+// ── Helper: generate the full interface list for a node from its template ─────
+
+function generateInterfacesFromTemplate(
+  node: DeviceNode,
+  nodeIdx: number,
+  portCount: number,
+): Array<{ name: string; mac_seed: number; ip?: string; gateway?: string }> {
+  const { catalogId, model, ip, gateway } = node.data;
+  const entry = catalogId
+    ? DEFAULT_DEVICE_CATALOG.find((e) => e.id === catalogId)
+    : undefined;
+
+  if (entry?.interfaceTemplate) {
+    const t = entry.interfaceTemplate;
+    const count = Math.max(portCount, model === "host" ? 1 : 2);
+    return Array.from({ length: count }, (_, i) => {
+      const name = `${t.prefix}${t.startIndex + i}`;
+      const iface: { name: string; mac_seed: number; ip?: string; gateway?: string } = {
+        name,
+        mac_seed: nodeIdx * 10 + i,
+      };
+      if (i === 0 && ip) iface.ip = ip.trim();
+      if (i === 0 && gateway) iface.gateway = gateway.trim();
+      return iface;
+    });
+  }
+
+  // Fallback: generate generic names.
+  const count = Math.max(portCount, model === "host" ? 1 : 2);
+  return Array.from({ length: count }, (_, i) => {
+    const name = model === "host" ? "eth0" : `Gi0/${i}`;
+    const iface: { name: string; mac_seed: number; ip?: string; gateway?: string } = {
+      name,
+      mac_seed: nodeIdx * 10 + i,
+    };
+    if (i === 0 && ip) iface.ip = ip.trim();
+    if (i === 0 && gateway) iface.gateway = gateway.trim();
+    return iface;
+  });
 }
 
 // ── Conversion ────────────────────────────────────────────────────────────────
@@ -83,10 +149,13 @@ export function convertFlowToTopology(
 
     function assignIface(nodeId: string): string {
       const node = nodeMap.get(nodeId)!;
-      if (node.data.model === "host") return "eth0";
+      if (node.data.model === "host") {
+        // Hosts always use their first port (eth0 or template port 0).
+        return resolvePortName(node.data.catalogId, "host", 0);
+      }
       const current = switchPortCounter.get(nodeId) ?? 0;
       switchPortCounter.set(nodeId, current + 1);
-      return `Gi0/${current}`;
+      return resolvePortName(node.data.catalogId, node.data.model, current);
     }
 
     ifaceAssignment.set(`${edge.source}:${edge.id}`, assignIface(edge.source));
@@ -107,33 +176,25 @@ export function convertFlowToTopology(
         );
       }
 
+      const interfaces = generateInterfacesFromTemplate(node, idx, 1);
       return {
         id: node.id,
         model: "host" as const,
         hostname,
-        interfaces: [
-          {
-            name: "eth0",
-            mac_seed: idx * 10,
-            ip: data.ip.trim(),
-            gateway: data.gateway?.trim() || undefined,
-          },
-        ],
+        catalogId: data.catalogId,
+        interfaces,
       };
     }
 
     const portCount = switchPortCounter.get(node.id) ?? 0;
-    const totalPorts = Math.max(portCount, 2);
-    const interfaces = Array.from({ length: totalPorts }, (_, i) => ({
-      name: `Gi0/${i}`,
-      mac_seed: idx * 10 + i,
-    }));
+    const interfaces = generateInterfacesFromTemplate(node, idx, portCount);
 
     if (data.model === "router") {
       return {
         id: node.id,
         model: "router" as const,
         hostname,
+        catalogId: data.catalogId,
         interfaces,
       };
     }
@@ -142,6 +203,7 @@ export function convertFlowToTopology(
       id: node.id,
       model: "switch" as const,
       hostname,
+      catalogId: data.catalogId,
       interfaces,
     };
   });

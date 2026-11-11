@@ -22,6 +22,7 @@ class NodeSpecSerializer(serializers.Serializer):
     id = serializers.CharField(max_length=64)
     model = serializers.ChoiceField(choices=["host", "switch", "router"])
     hostname = serializers.CharField(max_length=128, required=False)
+    catalogId = serializers.CharField(max_length=64, required=False, allow_blank=True)
     interfaces = InterfaceSpecSerializer(many=True)
 
 

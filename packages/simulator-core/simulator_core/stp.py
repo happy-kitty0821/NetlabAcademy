@@ -673,9 +673,9 @@ class STPManager:
         bid = inst.bridge_id
         root_bid = inst.root_bridge_id
         mode_name = {
-            STPMode.PVST: "PVST",
-            STPMode.RAPID_PVST: "RST",
-            STPMode.MST: "MST",
+            STPMode.PVST: "pvst",
+            STPMode.RAPID_PVST: "rapid-pvst",
+            STPMode.MST: "mst",
         }.get(self._mode, "?")
 
         lines = [

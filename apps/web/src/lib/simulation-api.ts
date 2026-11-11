@@ -10,6 +10,7 @@ export interface TopologyNode {
   id: string;
   model: "host" | "switch" | "router";
   hostname?: string;
+  catalogId?: string;
   interfaces: {
     name: string;
     mac_seed?: number;

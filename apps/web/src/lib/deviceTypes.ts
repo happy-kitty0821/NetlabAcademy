@@ -12,6 +12,15 @@ import type { Node } from "@xyflow/react";
 
 // ── Device catalog entry (defined by admin) ────────────────────────────────
 
+export interface InterfaceTemplate {
+  count: number;
+  portType: 'FastEthernet' | 'GigabitEthernet' | 'Ethernet';
+  prefix: string;        // e.g. 'Fa0/'
+  startIndex: number;    // e.g. 0
+  speedMbps: number;
+  stpCost: number;
+}
+
 export interface DeviceCatalogEntry {
   /** Unique key, e.g. "cisco-pc", "cisco-2960", "cisco-2911" */
   id: string;
@@ -27,6 +36,8 @@ export interface DeviceCatalogEntry {
   simulated: boolean;
   /** Short description shown on hover */
   description: string;
+  /** Interface template for topology generation (matches backend INTERFACE_CATALOG) */
+  interfaceTemplate?: InterfaceTemplate;
 }
 
 // ── Flow node data ─────────────────────────────────────────────────────────
@@ -54,6 +65,14 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "pc",
     simulated: true,
     description: "Generic end-host PC. Supports IPv4, ARP, ICMP ping.",
+    interfaceTemplate: {
+      count: 1,
+      portType: "Ethernet",
+      prefix: "eth",
+      startIndex: 0,
+      speedMbps: 100,
+      stpCost: 19,
+    },
   },
   {
     id: "cisco-laptop",
@@ -63,6 +82,14 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "laptop",
     simulated: true,
     description: "Wireless-capable end-host. Same simulation model as PC.",
+    interfaceTemplate: {
+      count: 1,
+      portType: "Ethernet",
+      prefix: "eth",
+      startIndex: 0,
+      speedMbps: 100,
+      stpCost: 19,
+    },
   },
   {
     id: "cisco-server",
@@ -72,6 +99,14 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "server",
     simulated: true,
     description: "Server end-host. Same simulation model as PC.",
+    interfaceTemplate: {
+      count: 1,
+      portType: "Ethernet",
+      prefix: "eth",
+      startIndex: 0,
+      speedMbps: 100,
+      stpCost: 19,
+    },
   },
   {
     id: "cisco-2960",
@@ -81,6 +116,14 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "switch-l2",
     simulated: true,
     description: "Layer 2 Ethernet switch. Supports MAC learning and forwarding.",
+    interfaceTemplate: {
+      count: 24,
+      portType: "FastEthernet",
+      prefix: "Fa0/",
+      startIndex: 0,
+      speedMbps: 100,
+      stpCost: 19,
+    },
   },
   {
     id: "cisco-2911",
@@ -90,5 +133,13 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "router",
     simulated: true,
     description: "Layer 3 router. Supports static routing, ip route commands, show ip route.",
+    interfaceTemplate: {
+      count: 3,
+      portType: "GigabitEthernet",
+      prefix: "Gi0/",
+      startIndex: 0,
+      speedMbps: 1000,
+      stpCost: 4,
+    },
   },
 ];
