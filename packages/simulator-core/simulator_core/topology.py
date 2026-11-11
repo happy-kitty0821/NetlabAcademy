@@ -111,6 +111,29 @@ class Interface:
             if self.speed_kbps is None:
                 self.speed_kbps = self._port_type_detected.speed_kbps
 
+    # ── Interface type classification ─────────────────────────────────────────
+
+    @property
+    def is_svi(self) -> bool:
+        """True if this is a Switch Virtual Interface (Vlan<N>)."""
+        return self.name.lower().startswith("vlan")
+
+    @property
+    def is_loopback(self) -> bool:
+        """True if this is a loopback interface."""
+        return self.name.lower().startswith("loopback")
+
+    @property
+    def is_physical_switchport(self) -> bool:
+        """
+        True if this interface is a physical Ethernet port that supports
+        Layer 2 switchport commands (mode, trunk, access VLAN, etc.).
+
+        SVIs and loopbacks are Layer 3 logical interfaces and must NOT
+        accept switchport commands.
+        """
+        return not self.is_svi and not self.is_loopback
+
     def set_ip(self, cidr: str) -> None:
         """
         Assign an IPv4 address and prefix to this interface.

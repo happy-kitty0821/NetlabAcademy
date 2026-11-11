@@ -854,10 +854,21 @@ class CLISession:
     def _cmd_end(self, tokens: list[str]) -> str:
         cmd = tokens[0].lower() if tokens else "exit"
 
-        # `end` (and Ctrl+Z) always jumps to PRIV_EXEC regardless of depth.
+        # `end` (and Ctrl+Z) jumps to PRIV_EXEC from any *config* submode.
+        # It must NOT elevate privileges from USER_EXEC.
         if cmd == "end":
-            self.mode = CLIMode.PRIV_EXEC
-            self.current_iface = None
+            if self.mode in (
+                CLIMode.GLOBAL_CONFIG,
+                CLIMode.IFACE_CONFIG,
+                CLIMode.VLAN_CONFIG,
+                CLIMode.LINE_CONFIG,
+            ):
+                self.mode = CLIMode.PRIV_EXEC
+                self.current_iface = None
+                self.current_vlan  = None
+                self.current_line  = None
+            # In USER_EXEC or PRIV_EXEC, 'end' is a no-op (matches IOS: ignored
+            # in EXEC modes rather than raising an error).
             return ""
 
         # `exit` goes one level back.
@@ -874,7 +885,7 @@ class CLISession:
             self.mode = CLIMode.PRIV_EXEC
         elif self.mode == CLIMode.PRIV_EXEC:
             self.mode = CLIMode.USER_EXEC
-        # USER_EXEC: caller decides (close terminal)
+        # USER_EXEC exit: caller decides (close terminal); no mode change here.
         return ""
 
     def _cmd_enable(self, tokens: list[str]) -> str:
@@ -1022,6 +1033,36 @@ class CLISession:
     def _get_current_iface(self):
         device = self.simulation.topology.devices.get(self.device_id)
         return device.interfaces.get(self.current_iface) if device and self.current_iface else None
+
+    def _require_physical_switchport(self) -> Optional[str]:
+        """
+        Return an IOS-style error string if the current interface is NOT a
+        physical switchport (i.e. it is an SVI or loopback).  Return None
+        if the check passes.
+
+        Call this at the top of every switchport command handler.
+        """
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        if iface.is_svi:
+            # IOS positions the caret under the first invalid token.
+            return (
+                "% Invalid input detected at '^' marker.\n"
+                "\n"
+                "  switchport\n"
+                "            ^\n"
+                "% SVI interfaces (Vlan) do not support switchport commands."
+            )
+        if iface.is_loopback:
+            return (
+                "% Invalid input detected at '^' marker.\n"
+                "\n"
+                "  switchport\n"
+                "            ^\n"
+                "% Loopback interfaces do not support switchport commands."
+            )
+        return None
 
     def _cmd_ip_address(self, tokens: list[str]) -> str:
         # tokens: ['ip', 'address', '<ip>', '<mask>']
@@ -1254,6 +1295,9 @@ class CLISession:
     # ── Switchport commands ───────────────────────────────────────────────────
 
     def _cmd_switchport_mode_access(self, tokens: list[str]) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         iface = self._get_current_iface()
         if iface:
             iface.switchport_mode = "access"
@@ -1261,6 +1305,9 @@ class CLISession:
 
     def _cmd_switchport_mode_trunk(self, tokens: list[str]) -> str:
         """switchport mode trunk"""
+        err = self._require_physical_switchport()
+        if err:
+            return err
         switch = self._get_switch()
         iface = self._get_current_iface()
         if iface is None:
@@ -1275,12 +1322,18 @@ class CLISession:
         return ""
 
     def _cmd_switchport_mode_dynamic(self, tokens: list[str], mode: str) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         iface = self._get_current_iface()
         if iface:
             iface.switchport_mode = f"dynamic_{mode}"
         return ""
 
     def _cmd_switchport_trunk_native_vlan(self, tokens: list[str]) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         # tokens: ['switchport', 'trunk', 'native', 'vlan', '<id>']
         if len(tokens) < 5:
             return "% Incomplete command."
@@ -1298,6 +1351,9 @@ class CLISession:
         return ""
 
     def _cmd_switchport_trunk_allowed_vlan(self, tokens: list[str]) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         # tokens: ['switchport', 'trunk', 'allowed', 'vlan', '<list-or-add-remove-except>']
         if len(tokens) < 5:
             return "% Incomplete command."
@@ -1323,6 +1379,9 @@ class CLISession:
         return ""
 
     def _cmd_switchport_trunk_encap(self, tokens: list[str], encap: str) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         iface = self._get_current_iface()
         if iface:
             iface.trunk_encapsulation = encap
@@ -1330,6 +1389,9 @@ class CLISession:
 
     def _cmd_switchport_port_security(self, tokens: list[str]) -> str:
         """Basic port security (store config; enforcement not yet simulated)."""
+        err = self._require_physical_switchport()
+        if err:
+            return err
         iface = self._get_current_iface()
         if iface:
             iface._port_security_enabled = True  # type: ignore[attr-defined]
@@ -1353,6 +1415,9 @@ class CLISession:
             return None
 
     def _cmd_switchport_access_vlan(self, tokens: list[str]) -> str:
+        err = self._require_physical_switchport()
+        if err:
+            return err
         # tokens: ['switchport', 'access', 'vlan', '<id>']
         if len(tokens) < 4:
             return "% Incomplete command."
@@ -1643,7 +1708,12 @@ class CLISession:
     # ── Show interfaces trunk / status ────────────────────────────────────────
 
     def _cmd_show_interfaces_trunk(self, tokens: list[str]) -> str:
-        """show interfaces trunk — Cisco-style trunk info table."""
+        """show interfaces trunk — Cisco-style trunk info table.
+
+        Only physical Layer 2 switchports configured as trunks are shown.
+        SVIs (Vlan<N>) and loopbacks are excluded — they are Layer 3
+        logical interfaces and cannot be trunk ports.
+        """
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
@@ -1653,6 +1723,7 @@ class CLISession:
             (name, iface)
             for name, iface in device.interfaces.items()
             if iface.switchport_mode == "trunk"
+            and iface.is_physical_switchport  # exclude SVIs and loopbacks
         ]
 
         if not trunk_ifaces:
