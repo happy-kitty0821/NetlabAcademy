@@ -97,13 +97,38 @@ class TestCisco2960Catalog(SimpleTestCase):
         self.assertEqual(str(fa0_0.ip_config), "10.0.0.1/24")
 
     def test_cisco2960_mac_seeds_are_deterministic(self):
-        """Same document must produce the same MAC addresses (determinism)."""
+        """Same document must produce the same MAC addresses (determinism).
+
+        Unlike Python's built-in hash(), hashlib.md5 is not randomised by
+        PYTHONHASHSEED. We verify (a) two calls in the same process agree,
+        and (b) the seed for a known input matches the expected MD5-derived
+        value, confirming cross-process stability.
+        """
+        import hashlib
         doc = self._doc()
         topo1 = build_topology_from_document(doc)
         topo2 = build_topology_from_document(doc)
         macs1 = {n: i.mac.value for n, i in topo1.devices["sw1"].interfaces.items()}
         macs2 = {n: i.mac.value for n, i in topo2.devices["sw1"].interfaces.items()}
         self.assertEqual(macs1, macs2, "MAC addresses must be deterministic")
+
+        # Verify the seed for Fa0/0 equals the expected MD5-derived constant.
+        # If this assertion ever fails it means the hash function changed.
+        expected_seed = int(hashlib.md5(
+            ("sw1" + "Fa0/0").encode()
+        ).hexdigest(), 16) % (2 ** 31)
+        # Recompute from the actual topo to confirm the formula was applied.
+        # We cannot easily extract the seed after MAC generation, but we can
+        # confirm reproducibility by checking the two topologies agree AND
+        # that the seed formula is the MD5 one (not hash()).
+        import random as _random
+        from simulator_core.addresses import MACAddress
+        mac_from_expected_seed = MACAddress.generate(_random.Random(expected_seed))
+        self.assertEqual(
+            topo1.devices["sw1"].interfaces["Fa0/0"].mac,
+            mac_from_expected_seed,
+            "MAC seed must come from hashlib.md5 (cross-process stable), not hash()",
+        )
 
 
 class TestUnknownCatalogIdFallback(SimpleTestCase):

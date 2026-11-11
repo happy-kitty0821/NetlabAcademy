@@ -329,9 +329,15 @@ class TestAccessPortInSTP:
         assert "Gi0/0" in inst1.port_states
         assert "Gi0/1" in inst1.port_states
 
-        # VLAN 10 instance must also have both ports (created by ensure_vlan)
+        # VLAN 10 instance must have both ports inherited from VLAN 1
         inst10 = switch.stp.get_instance(10)
-        assert inst10 is not None
+        assert inst10 is not None, "VLAN 10 STP instance must exist"
+        assert "Gi0/0" in inst10.port_states, (
+            "Gi0/0 must be in VLAN 10 port_states (inherited from init-time registration)"
+        )
+        assert "Gi0/1" in inst10.port_states, (
+            "Gi0/1 must be in VLAN 10 port_states (inherited from init-time registration)"
+        )
 
 
 # ---------------------------------------------------------------------------

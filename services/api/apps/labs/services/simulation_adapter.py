@@ -14,6 +14,7 @@ No arbitrary code or shell execution is ever passed through.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import uuid
 from dataclasses import dataclass, field
@@ -127,7 +128,12 @@ def _generate_interfaces_from_catalog(
     result: list[dict[str, Any]] = []
     for i in range(count):
         iface_name = f"{prefix}{start + i}"
-        mac_seed = hash(node_id + iface_name) % (2**31)
+        # Use MD5 (truncated to 31 bits) for a stable seed across process
+        # restarts.  Python's built-in hash() is PYTHONHASHSEED-randomised
+        # and would produce different MACs on every server restart.
+        mac_seed = int(hashlib.md5(
+            (node_id + iface_name).encode()
+        ).hexdigest(), 16) % (2 ** 31)
         entry: dict[str, Any] = {
             "name": iface_name,
             "mac_seed": mac_seed,

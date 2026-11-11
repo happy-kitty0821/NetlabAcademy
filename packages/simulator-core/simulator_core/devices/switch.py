@@ -270,22 +270,22 @@ class Switch:
 
         Called once at the end of __init__ after STPManager is created.
         SVIs (Vlan*) and loopbacks are excluded from STP.
+        Uses the public STPManager.register_port() API.
         """
         port_num = 1
         for iface in self._device.interfaces.values():
             if iface.is_svi or iface.is_loopback:
                 continue
+            from simulator_core.stp import PortID
+            pid = PortID(priority=iface.stp_port_priority, number=port_num)
+            cost = iface.stp_path_cost  # None → auto-detected inside register_port
             for inst in self._stp.all_instances():
-                port = self._stp._get_or_create_port(inst, iface.name)
-                # Override path cost if explicitly set on the interface.
+                port = self._stp.register_port(inst, iface.name,
+                                               path_cost=cost, port_id=pid)
+                # Explicit stp_path_cost on the interface wins over the
+                # auto-detected value that register_port may have already set.
                 if iface.stp_path_cost is not None:
                     port.path_cost = iface.stp_path_cost
-                # Assign a stable port ID using an incrementing counter.
-                from simulator_core.stp import PortID
-                port.port_id = PortID(
-                    priority=iface.stp_port_priority,
-                    number=port_num,
-                )
             port_num += 1
 
     def register_interface_with_stp(self, iface_name: str) -> None:
@@ -294,6 +294,7 @@ class Switch:
 
         Call this after adding an interface dynamically (e.g. from CLI).
         SVIs and loopbacks are silently ignored.
+        Uses the public STPManager.register_port() API.
         """
         iface = self._device.interfaces.get(iface_name)
         if iface is None or iface.is_svi or iface.is_loopback:
@@ -306,14 +307,13 @@ class Switch:
                     existing_port_nums.add(ps.port_id.number)
         port_num = max(existing_port_nums, default=0) + 1
         from simulator_core.stp import PortID
+        pid = PortID(priority=iface.stp_port_priority, number=port_num)
         for inst in self._stp.all_instances():
-            port = self._stp._get_or_create_port(inst, iface_name)
+            port = self._stp.register_port(inst, iface_name,
+                                           path_cost=iface.stp_path_cost,
+                                           port_id=pid)
             if iface.stp_path_cost is not None:
                 port.path_cost = iface.stp_path_cost
-            port.port_id = PortID(
-                priority=iface.stp_port_priority,
-                number=port_num,
-            )
 
     # ------------------------------------------------------------------
     # Properties

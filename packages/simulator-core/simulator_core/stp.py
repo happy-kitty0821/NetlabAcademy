@@ -588,24 +588,71 @@ class STPManager:
                 root_bridge_id=bid,
             )
             self._instances[vlan_id] = inst
+            # Populate port_states from VLAN 1 (the reference instance) so
+            # that show spanning-tree vlan <N> for newly created VLANs
+            # includes all physical interfaces registered at switch init.
+            # Ports that were added after init carry their own entries in
+            # every existing instance already (via register_port).
+            ref = self._instances.get(1)
+            if ref is not None and vlan_id != 1:
+                for iface_name, ref_port in ref.port_states.items():
+                    if iface_name not in inst.port_states:
+                        self.register_port(inst, iface_name,
+                                           path_cost=ref_port.path_cost,
+                                           port_id=ref_port.port_id)
         return self._instances[vlan_id]
 
-    def _get_or_create_port(self, inst: STPInstance, iface_name: str) -> STPPortState:
+    def register_port(
+        self,
+        inst: "STPInstance",
+        iface_name: str,
+        path_cost: Optional[int] = None,
+        port_id: Optional["PortID"] = None,
+    ) -> "STPPortState":
+        """
+        Public API to register (or retrieve) a port in an STP instance.
+
+        This replaces the old private ``_get_or_create_port`` method.
+        All callers inside and outside STPManager must use this instead.
+
+        Parameters
+        ----------
+        inst:
+            The ``STPInstance`` to register the port in.
+        iface_name:
+            Interface name, e.g. ``"Fa0/0"``.
+        path_cost:
+            Explicit path cost.  If ``None``, auto-detected from port type.
+        port_id:
+            Explicit ``PortID``.  If ``None``, the next sequential number
+            within ``inst`` is used.
+        """
         if iface_name not in inst.port_states:
             port_num = len(inst.port_states) + 1
-            # Auto-detect path cost from port type
-            from simulator_core.port_types import detect_port_type
-            port_type = detect_port_type(iface_name)
-            cost = port_type.stp_cost_short
+            # Auto-detect path cost from port type when not supplied.
+            if path_cost is None:
+                from simulator_core.port_types import detect_port_type
+                port_type = detect_port_type(iface_name)
+                path_cost = port_type.stp_cost_short
+            if port_id is None:
+                port_id = PortID(priority=128, number=port_num)
             inst.port_states[iface_name] = STPPortState(
                 interface_name=iface_name,
                 vlan_id=inst.vlan_id,
-                port_id=PortID(priority=128, number=port_num),
+                port_id=port_id,
                 state=PortState.FORWARDING,
                 role=PortRole.DESIGNATED,
-                path_cost=cost,
+                path_cost=path_cost,
             )
         return inst.port_states[iface_name]
+
+    # Keep the private name as a thin alias so existing internal call sites
+    # (set_port_priority, set_port_cost, set_portfast, etc.) still work
+    # without churn.  New external callers must use register_port().
+    def _get_or_create_port(
+        self, inst: "STPInstance", iface_name: str
+    ) -> "STPPortState":
+        return self.register_port(inst, iface_name)
 
     # ------------------------------------------------------------------
     # Show output helpers
