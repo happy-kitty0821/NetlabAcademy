@@ -33,6 +33,7 @@ import {
   addEdge,
   useNodesState,
   useEdgesState,
+  SelectionMode,
   type Connection,
   type Edge,
   type Node,
@@ -329,6 +330,9 @@ export default function WorkspacePage() {
             defaultEdgeOptions={{ type: "lab", data: { active: true } }}
             proOptions={{ hideAttribution: true }}
             colorMode="dark"
+            selectionOnDrag={false}
+            panOnDrag={[1, 2]}
+            selectionMode={SelectionMode.Partial}
             style={{
               background: "#1a1a2e",
               // Override React Flow CSS variables so the default node styles

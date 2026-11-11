@@ -52,20 +52,17 @@ function NodeHandles() {
     background:   C.handle,
     border:       `2px solid ${C.handleBg}`,
     borderRadius: "50%",
-    pointerEvents: "all",  // must override parent pointer-events:none
-    zIndex:       10,
   };
-  const hidden: React.CSSProperties = { ...base, opacity: 0 };
   return (
     <>
-      <Handle type="source" position={Position.Top}    style={base}   id="s-t" />
-      <Handle type="source" position={Position.Right}  style={base}   id="s-r" />
-      <Handle type="source" position={Position.Bottom} style={base}   id="s-b" />
-      <Handle type="source" position={Position.Left}   style={base}   id="s-l" />
-      <Handle type="target" position={Position.Top}    style={hidden} id="t-t" />
-      <Handle type="target" position={Position.Right}  style={hidden} id="t-r" />
-      <Handle type="target" position={Position.Bottom} style={hidden} id="t-b" />
-      <Handle type="target" position={Position.Left}   style={hidden} id="t-l" />
+      <Handle type="source" position={Position.Top}    style={base}                    id="s-t" />
+      <Handle type="source" position={Position.Right}  style={base}                    id="s-r" />
+      <Handle type="source" position={Position.Bottom} style={base}                    id="s-b" />
+      <Handle type="source" position={Position.Left}   style={base}                    id="s-l" />
+      <Handle type="target" position={Position.Top}    style={{ ...base, opacity: 0 }} id="t-t" />
+      <Handle type="target" position={Position.Right}  style={{ ...base, opacity: 0 }} id="t-r" />
+      <Handle type="target" position={Position.Bottom} style={{ ...base, opacity: 0 }} id="t-b" />
+      <Handle type="target" position={Position.Left}   style={{ ...base, opacity: 0 }} id="t-l" />
     </>
   );
 }
@@ -83,27 +80,31 @@ function CMLNode({
   sublabel?:      string;
   sublabelColor?: string;
 }) {
-  // React Flow's own wrapper div (.react-flow__node) handles all pointer events
-  // for drag-and-drop. Our inner div is purely visual — pointer-events: none
-  // so it doesn't interfere. Handles are rendered here but RF positions them
-  // via absolute positioning relative to the node wrapper (not our div).
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-      background: "transparent", border: "none", padding: 0, userSelect: "none",
-      pointerEvents: "none",
-      filter: selected ? `drop-shadow(0 0 8px ${C.selected})` : "none",
-      transition: "filter 0.15s",
+    <div style={{
+      display:        "flex",
+      flexDirection:  "column",
+      alignItems:     "center",
+      gap:            4,
+      background:     "transparent",
+      border:         "none",
+      padding:        0,
+      userSelect:     "none",
+      cursor:         "default",
+      filter:         selected ? `drop-shadow(0 0 8px ${C.selected})` : "none",
+      transition:     "filter 0.15s",
     }}>
-      {/* Handles sit outside the visual content — RF positions them absolutely */}
       <NodeHandles />
       {icon}
-      <div style={{ fontSize: 11, fontWeight: 700, color: C.label, fontFamily: "ui-monospace,monospace",
-        whiteSpace: "nowrap", marginTop: 2, textShadow: "0 1px 3px rgba(0,0,0,0.9)" }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: C.label,
+        fontFamily: "ui-monospace,monospace", whiteSpace: "nowrap",
+        marginTop: 2, textShadow: "0 1px 3px rgba(0,0,0,0.9)" }}>
         {label}
       </div>
       {sublabel && (
-        <div style={{ fontSize: 9, color: sublabelColor ?? C.labelMuted, fontFamily: "ui-monospace,monospace",
-          marginTop: -2, textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}>
+        <div style={{ fontSize: 9, color: sublabelColor ?? C.labelMuted,
+          fontFamily: "ui-monospace,monospace", marginTop: -2,
+          textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}>
           {sublabel}
         </div>
       )}
