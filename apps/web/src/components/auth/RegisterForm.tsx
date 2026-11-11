@@ -2,17 +2,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/lib/auth-context";
 import type { APIError } from "@/types/api";
 import { ArrowRight } from "lucide-react";
-
-const item = {
-  hidden: { opacity: 0, x: -12 },
-  show:   { opacity: 1, x: 0 },
-};
 
 export function RegisterForm() {
   const router = useRouter();
@@ -61,26 +55,17 @@ export function RegisterForm() {
   }
 
   return (
-    <motion.form
-      onSubmit={handleSubmit}
-      noValidate
-      className="flex flex-col gap-3.5"
-      variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06 } } }}
-      initial="hidden"
-      animate="show"
-    >
+    <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-3.5">
       {globalError && (
-        <motion.div
+        <div
           role="alert"
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
           className="rounded-lg px-3 py-2.5 text-sm bg-[rgba(248,81,73,0.1)] border border-[#f85149] text-[#f85149]"
         >
           {globalError}
-        </motion.div>
+        </div>
       )}
 
-      <motion.div variants={item} className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3" style={{ animation: "fadeInLeft 0.3s ease-out" }}>
         <Input
           label="First name"
           id="first_name"
@@ -101,9 +86,9 @@ export function RegisterForm() {
           error={fieldErrors.last_name}
           required
         />
-      </motion.div>
+      </div>
 
-      <motion.div variants={item}>
+      <div style={{ animation: "fadeInLeft 0.35s ease-out" }}>
         <Input
           label="Email"
           id="email"
@@ -115,9 +100,9 @@ export function RegisterForm() {
           placeholder="you@example.com"
           required
         />
-      </motion.div>
+      </div>
 
-      <motion.div variants={item}>
+      <div style={{ animation: "fadeInLeft 0.4s ease-out" }}>
         <Input
           label="Password"
           id="password"
@@ -129,9 +114,9 @@ export function RegisterForm() {
           hint="Minimum 8 characters."
           required
         />
-      </motion.div>
+      </div>
 
-      <motion.div variants={item}>
+      <div style={{ animation: "fadeInLeft 0.45s ease-out" }}>
         <Input
           label="Confirm password"
           id="password_confirm"
@@ -142,9 +127,9 @@ export function RegisterForm() {
           error={fieldErrors.password_confirm}
           required
         />
-      </motion.div>
+      </div>
 
-      <motion.div variants={item}>
+      <div style={{ animation: "fadeInLeft 0.5s ease-out" }}>
         <Button type="submit" loading={loading} className="w-full mt-1 group">
           Create account
           <ArrowRight
@@ -153,7 +138,7 @@ export function RegisterForm() {
             aria-hidden="true"
           />
         </Button>
-      </motion.div>
-    </motion.form>
+      </div>
+    </form>
   );
 }

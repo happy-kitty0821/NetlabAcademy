@@ -3,17 +3,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { motion } from "framer-motion";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/lib/auth-context";
 import type { APIError } from "@/types/api";
 import { Lock, Mail, ArrowRight } from "lucide-react";
-
-const item = {
-  hidden: { opacity: 0, x: -12 },
-  show:   { opacity: 1, x: 0 },
-};
 
 export function LoginForm() {
   const router = useRouter();
@@ -39,26 +33,17 @@ export function LoginForm() {
   }
 
   return (
-    <motion.form
-      onSubmit={handleSubmit}
-      noValidate
-      className="flex flex-col gap-4"
-      variants={{ hidden: {}, show: { transition: { staggerChildren: 0.07 } } }}
-      initial="hidden"
-      animate="show"
-    >
+    <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
       {error && (
-        <motion.div
+        <div
           role="alert"
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
           className="rounded-lg px-3 py-2.5 text-sm bg-[rgba(248,81,73,0.1)] border border-[#f85149] text-[#f85149]"
         >
           {error}
-        </motion.div>
+        </div>
       )}
 
-      <motion.div variants={item} className="relative">
+      <div className="relative" style={{ animation: "fadeInLeft 0.3s ease-out" }}>
         <Mail
           size={15}
           className="absolute left-3 top-1/2 -translate-y-1/2 text-[#484f58] pointer-events-none z-10"
@@ -75,9 +60,9 @@ export function LoginForm() {
           required
           className="pl-9"
         />
-      </motion.div>
+      </div>
 
-      <motion.div variants={item} className="flex flex-col gap-1 relative">
+      <div className="flex flex-col gap-1 relative" style={{ animation: "fadeInLeft 0.4s ease-out" }}>
         <Lock
           size={15}
           className="absolute left-3 top-[2.1rem] text-[#484f58] pointer-events-none z-10"
@@ -102,9 +87,9 @@ export function LoginForm() {
             Forgot password?
           </Link>
         </div>
-      </motion.div>
+      </div>
 
-      <motion.div variants={item}>
+      <div style={{ animation: "fadeInLeft 0.5s ease-out" }}>
         <Button type="submit" loading={loading} className="w-full mt-1 group">
           Sign in
           <ArrowRight
@@ -113,7 +98,7 @@ export function LoginForm() {
             aria-hidden="true"
           />
         </Button>
-      </motion.div>
-    </motion.form>
+      </div>
+    </form>
   );
 }

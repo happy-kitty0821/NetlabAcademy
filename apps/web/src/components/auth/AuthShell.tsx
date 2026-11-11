@@ -10,7 +10,6 @@
 
 import { useEffect, useRef } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
 import { Network } from "lucide-react";
 
 // ── Animated network canvas background ───────────────────────────────────────
@@ -136,14 +135,13 @@ export function AuthShell({ title, subtitle, children, footer }: AuthShellProps)
       />
 
       {/* Logo */}
-      <motion.div
-        initial={{ opacity: 0, y: -16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, ease: "easeOut" }}
+      <div
+        className="mb-8"
+        style={{ animation: "fadeInDown 0.5s ease-out" }}
       >
         <Link
           href="/"
-          className="flex items-center gap-2.5 mb-8 font-semibold text-[#e6edf3] no-underline"
+          className="flex items-center gap-2.5 font-semibold text-[#e6edf3] no-underline"
         >
           <div
             className="w-9 h-9 rounded-xl flex items-center justify-center"
@@ -159,13 +157,10 @@ export function AuthShell({ title, subtitle, children, footer }: AuthShellProps)
             NetLab<span className="text-[#58a6ff]">Academy</span>
           </span>
         </Link>
-      </motion.div>
+      </div>
 
       {/* Card */}
-      <motion.div
-        initial={{ opacity: 0, y: 24, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+      <div
         className="w-full max-w-sm relative z-10"
         style={{
           background: "rgba(22,27,34,0.85)",
@@ -174,6 +169,7 @@ export function AuthShell({ title, subtitle, children, footer }: AuthShellProps)
           borderRadius: "14px",
           padding: "28px",
           boxShadow: "0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px rgba(88,166,255,0.06)",
+          animation: "fadeInUp 0.45s ease-out",
         }}
       >
         {/* Accent bar top */}
@@ -195,18 +191,13 @@ export function AuthShell({ title, subtitle, children, footer }: AuthShellProps)
         </div>
 
         {children}
-      </motion.div>
+      </div>
 
       {/* Footer */}
       {footer && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3, duration: 0.4 }}
-          className="mt-5 text-sm text-[#8b949e] relative z-10"
-        >
+        <div className="mt-5 text-sm text-[#8b949e] relative z-10">
           {footer}
-        </motion.div>
+        </div>
       )}
     </div>
   );
