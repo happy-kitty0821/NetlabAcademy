@@ -27,6 +27,8 @@ from simulator_core.events import (
     FrameTransmit,
     SimulationEvent,
     TraceLimitReached,
+    BPDUHelloEvent,
+    ForwardDelayEvent,
     DROP_LINK_DOWN,
     DROP_INTERFACE_ADMIN_DOWN,
 )
@@ -95,6 +97,10 @@ class Simulation:
         self._hosts: dict[str, "Host"] = {}
         self._switches: dict[str, "Switch"] = {}
         self._routers: dict[str, "Router"] = {}
+        # Generation counter per switch for BPDUHelloEvent cancellation.
+        # Incrementing a switch's generation invalidates all previously
+        # scheduled BPDUHelloEvents for that switch (stale-event guard).
+        self._hello_generation: dict[str, int] = {}
         # Guard flag: _trigger_stp is a no-op until _init_devices finishes
         # building all Switch objects and running the initial STP election.
         self._stp_initialized: bool = False
@@ -181,6 +187,9 @@ class Simulation:
         self._hosts.clear()
         self._switches.clear()
         self._routers.clear()
+        # Increment all existing generations so queued BPDUHelloEvents become stale.
+        for dev_id in list(self._hello_generation):
+            self._hello_generation[dev_id] += 1
         self._stp_initialized = False
         self._init_devices()
 
@@ -296,6 +305,25 @@ class Simulation:
         self._topology.remove_link(link_id)
         self._trigger_stp()
 
+    def start_hello_timers(self, start_tick: int = 0) -> None:
+        """
+        Start (or restart) the periodic BPDU hello chain for all switches.
+
+        Call this after Simulation init (or after reset + init) to begin
+        periodic BPDU transmission.  Increments each switch's hello
+        generation to invalidate any previously-scheduled chains, then
+        schedules the first BPDUHelloEvent at start_tick + hello_time.
+
+        This method is intentionally NOT called automatically from
+        _init_devices() to avoid flooding the event queue in unit tests
+        that use sim.run() without expecting background BPDU traffic.
+        """
+        for dev_id in sorted(self._switches):
+            # Bump generation to cancel any old chain
+            gen = self._hello_generation.get(dev_id, 0) + 1
+            self._hello_generation[dev_id] = gen
+            self._schedule_next_hello(dev_id, start_tick=start_tick)
+
     def send_bpdus(self, tick: int = 0) -> None:
         """
         Send BPDUs from all eligible switch ports through the frame pipeline.
@@ -309,6 +337,11 @@ class Simulation:
         BPDUs use dst_mac=01:80:c2:00:00:00 (STP multicast) and are carried
         as EthernetFrame.bpdu_payload.  They bypass normal MAC learning and
         STP forwarding checks on receipt.
+
+        Phase 3: calling send_bpdus() does NOT cancel the periodic hello
+        chain.  It is a one-shot explicit call used for tests and
+        initialisation.  The periodic chain runs independently via
+        BPDUHelloEvent.
         """
         import uuid as _uuid
         from simulator_core.frames import EthernetFrame, STP_MULTICAST_MAC
@@ -330,6 +363,9 @@ class Simulation:
                         PortRole.DESIGNATED, PortRole.ROOT, PortRole.EDGE
                     ):
                         continue
+                    # Phase 6: BPDUFilter suppresses BPDU transmission
+                    if port_state.bpdufilter:
+                        continue
                     # Must be physically connected
                     peer = self._topology.neighbours(dev_id, port_name)
                     if peer is None:
@@ -338,6 +374,11 @@ class Simulation:
                     iface = device.interfaces.get(port_name)
                     if iface is None or iface.admin_state == InterfaceState.DOWN:
                         continue
+                    # Phase 4: set message_age based on best_bpdu
+                    if port_state.best_bpdu is not None:
+                        message_age = port_state.best_bpdu.message_age + 1
+                    else:
+                        message_age = 0  # we are root for this VLAN
                     # Build BPDU
                     bpdu = BPDU(
                         version=2 if sw.stp.mode.value == "rapid-pvst" else 0,
@@ -345,7 +386,7 @@ class Simulation:
                         root_path_cost=inst.root_path_cost,
                         bridge_id=inst.bridge_id,
                         port_id=port_state.port_id,
-                        message_age=0,
+                        message_age=message_age,
                         max_age=inst.timers.max_age,
                         hello_time=inst.timers.hello_time,
                         forward_delay=inst.timers.forward_delay,
@@ -404,6 +445,10 @@ class Simulation:
         self.run_stp()
         # Allow _trigger_stp to run from this point on.
         self._stp_initialized = True
+        # NOTE: Periodic BPDU hello chains are NOT started automatically.
+        # Call start_hello_timers() explicitly after Simulation init to enable
+        # periodic BPDU transmission.  This avoids flooding the event queue
+        # during unit tests that use sim.run() without expecting BPDU traffic.
 
     def _record(self, event: SimulationEvent) -> None:
         """Append the event to the trace, enforcing the trace size cap."""
@@ -425,6 +470,10 @@ class Simulation:
             self._deliver_frame(event)
         elif isinstance(event, FrameArrival):
             self._handle_frame_arrival(event)
+        elif isinstance(event, BPDUHelloEvent):
+            self._handle_bpdu_hello(event)
+        elif isinstance(event, ForwardDelayEvent):
+            self._handle_forward_delay(event)
         # Other event types (ARP*, ICMP*, MACTable*, drops) are purely
         # observational records — they do not trigger further dispatch.
 
@@ -556,3 +605,228 @@ class Simulation:
         # Record drop events directly rather than scheduling them through the
         # queue — they are consequences of the current event, not future work.
         self._record(drop)
+
+    # ------------------------------------------------------------------
+    # BPDU hello timer helpers (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _schedule_next_hello(self, device_id: str, start_tick: int) -> None:
+        """
+        Schedule the next BPDUHelloEvent for a switch.
+
+        Reads the hello_time from the first STP instance on the switch
+        (hello_time is uniform across instances).  Uses the switch's
+        current generation so any previously-queued events for older
+        generations will be silently ignored when processed.
+
+        The chain stops when the next fire tick would exceed
+        max_ticks - PROPAGATION_DELAY (so that any BPDUs generated by
+        this hello can still be delivered within the simulation window).
+        """
+        sw = self._switches.get(device_id)
+        if sw is None:
+            return
+        # Determine hello_time (in ticks = seconds for this model)
+        hello_ticks = 2  # default
+        for inst in sw.stp.all_instances():
+            hello_ticks = inst.timers.hello_time
+            break
+        fire_at = start_tick + hello_ticks
+        # Stop chain before BPDUs generated here would exceed max_ticks
+        if fire_at + PROPAGATION_DELAY > self._max_ticks:
+            return
+        # Assign/read generation for this switch
+        gen = self._hello_generation.get(device_id, 0)
+        self._hello_generation[device_id] = gen
+        try:
+            self.schedule(BPDUHelloEvent(
+                time=fire_at,
+                seq=self.next_seq(),
+                device_id=device_id,
+                generation=gen,
+            ))
+        except Exception:
+            pass  # tick exceeds max_ticks — stop the chain silently
+
+    def _handle_bpdu_hello(self, event: BPDUHelloEvent) -> None:
+        """
+        Handle a BPDUHelloEvent: validate generation, send BPDUs, reschedule.
+
+        If the event's generation is stale (< current generation for this
+        switch), it is ignored — the old chain has been superseded by a
+        newer one started after a reset or topology change.
+        """
+        dev_id = event.device_id
+        current_gen = self._hello_generation.get(dev_id, 0)
+        if event.generation != current_gen:
+            # Stale event from an old hello chain — discard it.
+            return
+        # Send BPDUs for this switch at the current tick.
+        self._send_bpdus_for_switch(dev_id, tick=self._clock)
+        # Schedule the next hello
+        self._schedule_next_hello(dev_id, start_tick=self._clock)
+
+    def _send_bpdus_for_switch(self, device_id: str, tick: int) -> None:
+        """
+        Send BPDUs from one switch at the given tick.
+
+        This is the per-switch variant called by the hello timer.  Identical
+        logic to send_bpdus() but scoped to a single switch.  Also performs
+        per-port max-age expiry check (Phase 4).
+        """
+        import uuid as _uuid
+        from simulator_core.frames import EthernetFrame, STP_MULTICAST_MAC
+        from simulator_core.stp import BPDU, PortRole
+        from simulator_core.addresses import MACAddress
+        from simulator_core.types import InterfaceState
+
+        sw = self._switches.get(device_id)
+        if sw is None:
+            return
+        device = self._topology.devices.get(device_id)
+        if device is None:
+            return
+
+        for inst in sw.stp.all_instances():
+            if inst.bridge_id is None:
+                continue
+
+            # Phase 4: check max-age expiry on all ports before sending
+            self._check_max_age_expiry(sw, inst, tick)
+
+            for port_name, port_state in inst.port_states.items():
+                if port_state.role not in (
+                    PortRole.DESIGNATED, PortRole.ROOT, PortRole.EDGE
+                ):
+                    continue
+                # Phase 6: BPDUFilter suppresses BPDU transmission
+                if port_state.bpdufilter:
+                    continue
+                peer = self._topology.neighbours(device_id, port_name)
+                if peer is None:
+                    continue
+                iface = device.interfaces.get(port_name)
+                if iface is None or iface.admin_state == InterfaceState.DOWN:
+                    continue
+
+                # Phase 4: set message_age based on best_bpdu
+                if port_state.best_bpdu is not None:
+                    message_age = port_state.best_bpdu.message_age + 1
+                else:
+                    message_age = 0  # we are root for this VLAN
+
+                bpdu = BPDU(
+                    version=2 if sw.stp.mode.value == "rapid-pvst" else 0,
+                    root_bridge_id=inst.root_bridge_id,
+                    root_path_cost=inst.root_path_cost,
+                    bridge_id=inst.bridge_id,
+                    port_id=port_state.port_id,
+                    message_age=message_age,
+                    max_age=inst.timers.max_age,
+                    hello_time=inst.timers.hello_time,
+                    forward_delay=inst.timers.forward_delay,
+                )
+                src_mac = iface.mac
+                dst_mac = MACAddress(STP_MULTICAST_MAC)
+                frame = EthernetFrame(
+                    src_mac=src_mac,
+                    dst_mac=dst_mac,
+                    ethertype=EthernetFrame.ETHERTYPE_BPDU,
+                    frame_id=str(_uuid.uuid4()),
+                    bpdu_payload=bpdu,
+                )
+                port_state.bpdu_tx += 1
+                try:
+                    self.schedule(FrameTransmit(
+                        time=tick,
+                        seq=self.next_seq(),
+                        device_id=device_id,
+                        interface_name=port_name,
+                        frame=frame,
+                    ))
+                except Exception:
+                    pass
+
+    def _check_max_age_expiry(self, sw: "Switch", inst: "object", tick: int) -> None:
+        """
+        Phase 4: expire best_bpdu on ports that have not received a BPDU
+        refresh within max_age ticks.  Triggers local recalculation when
+        a port's best_bpdu expires.
+        """
+        from simulator_core.stp import STPInstance
+        assert isinstance(inst, STPInstance)
+        max_age_ticks = inst.timers.max_age
+        changed = False
+        for port_name, ps in inst.port_states.items():
+            if ps.best_bpdu is None:
+                continue
+            if ps.last_bpdu_tick < 0:
+                # Never received a BPDU — do not expire
+                continue
+            age = tick - ps.last_bpdu_tick
+            if age > max_age_ticks:
+                # BPDU too old — clear it and trigger recalculation
+                ps.best_bpdu = None
+                changed = True
+        if changed:
+            new_learning = sw.stp.recalculate_from_bpdus(inst)
+            # Phase 5: schedule ForwardDelayEvents for ports entering LEARNING
+            for lport in new_learning:
+                self.schedule_forward_delay(
+                    device_id=sw.device_id,
+                    interface_name=lport,
+                    vlan_id=inst.vlan_id,
+                    at_tick=self._clock + inst.timers.forward_delay,
+                )
+
+    # ------------------------------------------------------------------
+    # Forward-delay timer helper (Phase 5)
+    # ------------------------------------------------------------------
+
+    def schedule_forward_delay(
+        self,
+        device_id: str,
+        interface_name: str,
+        vlan_id: int,
+        at_tick: int,
+    ) -> None:
+        """
+        Schedule a ForwardDelayEvent for a port transitioning LEARNING→FORWARDING.
+
+        Called by recalculate_from_bpdus or _recalculate_instance_with_peers
+        when a port enters LEARNING state.
+        """
+        gen = self._hello_generation.get(device_id, 0)
+        try:
+            self.schedule(ForwardDelayEvent(
+                time=at_tick,
+                seq=self.next_seq(),
+                device_id=device_id,
+                interface_name=interface_name,
+                vlan_id=vlan_id,
+                generation=gen,
+            ))
+        except Exception:
+            pass  # tick exceeds max_ticks
+
+    def _handle_forward_delay(self, event: ForwardDelayEvent) -> None:
+        """
+        Phase 5: transition port from LEARNING → FORWARDING.
+
+        Only transitions the port if it is still in LEARNING state at fire
+        time (a topology change may have already moved it).
+        """
+        from simulator_core.stp import PortState
+
+        sw = self._switches.get(event.device_id)
+        if sw is None:
+            return
+        inst = sw.stp.get_instance(event.vlan_id)
+        if inst is None:
+            return
+        ps = inst.port_states.get(event.interface_name)
+        if ps is None:
+            return
+        # Only advance if still in LEARNING
+        if ps.state == PortState.LEARNING:
+            ps.state = PortState.FORWARDING

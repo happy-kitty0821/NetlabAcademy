@@ -228,6 +228,57 @@ class RouteRemoved(SimulationEvent):
 
 
 # ---------------------------------------------------------------------------
+# STP hello timer event (Phase 3)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BPDUHelloEvent(SimulationEvent):
+    """
+    Periodic BPDU transmission trigger for a single switch.
+
+    Processed by the simulation dispatcher to call send_bpdus() for the
+    named switch and immediately reschedule the next BPDUHelloEvent.
+
+    Fields
+    ------
+    device_id:
+        The switch that should transmit BPDUs on this tick.
+    generation:
+        Monotonically increasing counter per switch.  When a reset() or
+        topology change increments the switch's generation, any queued
+        BPDUHelloEvent with an older generation is silently dropped,
+        ensuring at most one active hello chain per switch.
+    """
+    device_id: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class ForwardDelayEvent(SimulationEvent):
+    """
+    Transition a port from LEARNING → FORWARDING after forward_delay ticks.
+
+    Fields
+    ------
+    device_id:
+        The switch owning the port.
+    interface_name:
+        The port being transitioned.
+    vlan_id:
+        The VLAN STP instance the port belongs to.
+    generation:
+        The simulation hello generation at event-creation time.  If the
+        switch's generation has changed by the time this event fires, the
+        port's state may have already been updated — the handler re-checks
+        that the port is still in LEARNING before transitioning.
+    """
+    device_id: str
+    interface_name: str
+    vlan_id: int
+    generation: int
+
+
+# ---------------------------------------------------------------------------
 # Convenience registry (used by serialisation)
 # ---------------------------------------------------------------------------
 
@@ -245,5 +296,7 @@ EVENT_REGISTRY: dict[str, type[SimulationEvent]] = {
         ICMPEchoRequestSent,
         ICMPEchoReplySent,
         TraceLimitReached,
+        BPDUHelloEvent,
+        ForwardDelayEvent,
     ]
 }

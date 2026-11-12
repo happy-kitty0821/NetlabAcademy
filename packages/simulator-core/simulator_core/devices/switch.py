@@ -558,33 +558,68 @@ class Switch:
     # ------------------------------------------------------------------
 
     def _process_bpdu(self, ingress_iface: str, frame: EthernetFrame) -> None:
-        """Process a received BPDU frame on the given ingress interface."""
-        from simulator_core.stp import PortRole, PortState
+        """
+        Process a received BPDU frame on the given ingress interface.
+
+        Architecture (Phase 2): BPDU-driven election is fully local.
+        We do NOT call _trigger_stp() / _recalculate_instance_with_peers()
+        here.  Root election emerges purely from BPDU priority-vector
+        comparison and local recalculation from stored best-BPDUs.
+
+        Priority vector (STP §8.4.5):
+          (root_bridge_id, root_path_cost, sender_bridge_id, sender_port_id)
+        Lower is better.
+        """
+        from simulator_core.stp import PortRole, PortState, BridgeID
         bpdu = frame.bpdu_payload
         if bpdu is None or bpdu.root_bridge_id is None or bpdu.bridge_id is None:
             return
 
         # Determine which VLAN instance this BPDU belongs to.
-        # For PVST+, use the sys_id_ext of the bridge_id as the VLAN.
         vlan_id = bpdu.root_bridge_id.sys_id_ext or 1
         inst = self._stp.get_instance(vlan_id)
         if inst is None:
             return
 
-        # Increment rx counter
+        # Increment rx counter; apply BPDUFilter / BPDUGuard.
         port_state = inst.port_states.get(ingress_iface)
-        if port_state is not None:
-            port_state.bpdu_rx += 1
+        if port_state is None:
+            return
 
-        # Update best BPDU seen on this port
-        current_best = port_state.best_bpdu if port_state is not None else None
+        # --- BPDUFilter: ignore received BPDUs on filtered ports ---
+        if port_state.bpdufilter:
+            return
+
+        # --- BPDUGuard: err-disable PortFast ports on BPDU receipt ---
+        if port_state.bpduguard and port_state.portfast:
+            port_state.state = PortState.ERR_DISABLED
+            port_state.role  = PortRole.DISABLED
+            return
+
+        port_state.bpdu_rx += 1
+        # Record receipt tick for max-age expiry tracking.
+        if self._sim is not None:
+            port_state.last_bpdu_tick = self._sim.clock
+
+        # --- Priority-vector comparison ---
+        # Build the incoming vector: (root_bid, root_path_cost, sender_bid, sender_port_id)
+        # We store the best BPDU (lowest vector) seen on each port.
+        current_best = port_state.best_bpdu
         received_better = False
 
         if current_best is None:
-            received_better = True
+            # No best_bpdu stored yet.  Only accept if this BPDU's root is
+            # at least as good as the root we already know (from run_stp or
+            # a previous BPDU).  This prevents an inferior first BPDU from
+            # overwriting a known-good root derived from centralized election.
+            if (inst.root_bridge_id is not None and
+                    bpdu.root_bridge_id > inst.root_bridge_id):
+                # Inferior first BPDU — ignore (keep centralized state)
+                pass
+            else:
+                received_better = True
         else:
-            # Compare: lower root_bridge_id wins; tie-break on root_path_cost;
-            # tie-break on sender bridge_id; tie-break on port_id.
+            # Compare root_bridge_id first
             if bpdu.root_bridge_id < current_best.root_bridge_id:
                 received_better = True
             elif bpdu.root_bridge_id == current_best.root_bridge_id:
@@ -593,19 +628,36 @@ class Switch:
                 elif bpdu.root_path_cost == current_best.root_path_cost:
                     if bpdu.bridge_id < current_best.bridge_id:
                         received_better = True
+                    elif bpdu.bridge_id == current_best.bridge_id:
+                        # Tie-break on sender port_id
+                        if (bpdu.port_id is not None and
+                                current_best.port_id is not None and
+                                bpdu.port_id < current_best.port_id):
+                            received_better = True
 
-        if received_better and port_state is not None:
+        if received_better:
             port_state.best_bpdu = bpdu
-            # Update the instance root info from the BPDU content
-            # (not from direct peer STPManager read)
-            if inst.bridge_id is not None and bpdu.root_bridge_id < inst.bridge_id:
-                # The BPDU advertises a better root than we currently know
-                inst.root_bridge_id = bpdu.root_bridge_id
-                inst.root_path_cost = bpdu.root_path_cost + port_state.path_cost
-                inst.root_port_name = ingress_iface
-                # Recalculate all port roles based on updated root info
-                if self._sim is not None:
-                    self._sim._trigger_stp()
+            # Local recalculation from stored BPDUs — no peer inspection.
+            new_learning = self._stp.recalculate_from_bpdus(inst)
+            # Phase 5: schedule ForwardDelayEvents for ports entering LEARNING
+            if self._sim is not None and new_learning:
+                forward_delay = inst.timers.forward_delay
+                for lport in new_learning:
+                    self._sim.schedule_forward_delay(
+                        device_id=self.device_id,
+                        interface_name=lport,
+                        vlan_id=vlan_id,
+                        at_tick=self._sim.clock + forward_delay,
+                    )
+
+        # --- RootGuard: prevent a guarded port from becoming root port ---
+        if port_state.guard == "root" and inst.bridge_id is not None:
+            # If the BPDU advertises a root better than our own bridge_id,
+            # set the port ROOT_INCONSISTENT (treated as DISCARDING).
+            if bpdu.root_bridge_id < inst.bridge_id:
+                port_state.state = PortState.ROOT_INCONSISTENT
+                # Clear best_bpdu so this port is never elected root port.
+                port_state.best_bpdu = None
 
     # ------------------------------------------------------------------
     # FrameArrival handler
@@ -640,8 +692,11 @@ class Switch:
 
         # STP check: drop frames if port is not forwarding for this VLAN
         if not self._stp.is_port_forwarding(ingress_iface, vlan):
-            # Port is blocking — drop (except we let BPDUs through in real STP,
-            # but our simplified model doesn't generate real BPDUs)
+            # Port is in LEARNING state: allow MAC learning but block forwarding.
+            # Port is DISCARDING/BLOCKING: drop without learning.
+            if self._stp.is_port_learning_or_forwarding(ingress_iface, vlan):
+                # LEARNING state: learn the source MAC but do NOT forward
+                self._learn(arrive_time, frame.src_mac.value, ingress_iface, vlan)
             return
 
         # Learn source MAC (only in forwarding state, already checked above)
@@ -658,7 +713,8 @@ class Switch:
                 # Verify destination port is in the same VLAN
                 if dest_iface and self._port_carries_vlan(known_port, vlan):
                     self._forward(arrive_time, frame, known_port,
-                                  frame.src_mac.value, dst_mac)
+                                  frame.src_mac.value, dst_mac,
+                                  frame_vlan=vlan)
             elif known_port == ingress_iface:
                 pass  # Same-port drop
             else:
@@ -698,18 +754,23 @@ class Switch:
             ))
 
     def _forward(self, time: int, frame: EthernetFrame,
-                 egress_iface: str, src_mac: str, dst_mac: str) -> None:
+                 egress_iface: str, src_mac: str, dst_mac: str,
+                 frame_vlan: Optional[int] = None) -> None:
         # BPDUs bypass the STP egress forwarding check.
         if frame.bpdu_payload is None:
             # Check STP state for the egress port before forwarding user frames.
+            # Use the actual frame VLAN (not the egress port's native VLAN) so
+            # that a trunk DISCARDING for VLAN 10 correctly blocks VLAN 10
+            # traffic even when the native VLAN is VLAN 1 (audit finding §5.4).
             iface = self._device.interfaces.get(egress_iface)
             if iface is not None:
-                vlan = (
-                    iface.vlan
-                    if iface.switchport_mode == "access"
-                    else iface.trunk_native_vlan
-                )
-                if not self._stp.is_port_forwarding(egress_iface, vlan):
+                if frame_vlan is not None:
+                    stp_vlan = frame_vlan
+                elif iface.switchport_mode == "access":
+                    stp_vlan = iface.vlan
+                else:
+                    stp_vlan = iface.trunk_native_vlan
+                if not self._stp.is_port_forwarding(egress_iface, stp_vlan):
                     return  # Drop — egress port is STP discarding/blocking
         # Resolve EtherChannel if needed
         physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac)
@@ -747,4 +808,5 @@ class Switch:
             if not self._stp.is_port_forwarding(iface_name, vlan):
                 continue
             self._forward(time, frame, iface_name,
-                          frame.src_mac.value, frame.dst_mac.value)
+                          frame.src_mac.value, frame.dst_mac.value,
+                          frame_vlan=vlan)

@@ -61,6 +61,10 @@ class PortState(Enum):
     # RSTP collapsed state
     DISCARDING  = "discarding"
 
+    # Guard / security states (Phase 6)
+    ERR_DISABLED      = "err-disabled"      # BPDUGuard tripped
+    ROOT_INCONSISTENT = "root-inconsistent" # RootGuard tripped
+
 
 class PortRole(Enum):
     """RSTP port role."""
@@ -186,6 +190,9 @@ class STPPortState:
     # Best BPDU received on this port (used for role calculation)
     best_bpdu: Optional[BPDU] = None
 
+    # Tick at which the last BPDU was received (for max-age expiry, Phase 4)
+    last_bpdu_tick: int = -1
+
     # BPDU counters
     bpdu_tx: int = 0
     bpdu_rx: int = 0
@@ -201,7 +208,8 @@ class STPPortState:
     @property
     def is_blocking(self) -> bool:
         return self.state in (PortState.BLOCKING, PortState.DISCARDING,
-                              PortState.DISABLED)
+                              PortState.DISABLED, PortState.ERR_DISABLED,
+                              PortState.ROOT_INCONSISTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +452,145 @@ class STPManager:
         for vlan_id in list(self._instances.keys()):
             inst = self._instances[vlan_id]
             self._recalculate_instance_with_peers(inst, topology, all_switches)
+
+    def recalculate_from_bpdus(self, inst: "STPInstance") -> list[str]:
+        """
+        Local-only recalculation using stored best-BPDUs on each port.
+
+        This is the BPDU-driven election path (Phase 2).  It does NOT read
+        any peer STPManager object — it uses only:
+          - Our own bridge_id
+          - port.best_bpdu stored on each port
+
+        Algorithm:
+        1. Find the port whose best_bpdu has the lowest priority vector
+           (root_bid, root_path_cost + local_cost, sender_bid, sender_port_id).
+           That port becomes the Root Port.
+        2. Update inst.root_bridge_id / root_path_cost / root_port_name.
+        3. Assign DESIGNATED to remaining ports with no competing best_bpdu or
+           where our cost is ≤ peer's advertised cost.
+        4. Assign ALTERNATE to remaining ports.
+        5. Never assigns roles that require reading peer STPManager objects.
+
+        Phase 5: ports that transition from DISCARDING/BLOCKING to ROOT or
+        DESIGNATED are set to LEARNING first (not FORWARDING), unless they
+        are PortFast/EDGE.  Returns the list of interface names that entered
+        LEARNING so the caller can schedule ForwardDelayEvents.
+        """
+        if inst.bridge_id is None:
+            return []
+
+        own_bid = inst.bridge_id
+
+        # Snapshot current states to detect transitions (Phase 5)
+        prev_states = {pname: ps.state for pname, ps in inst.port_states.items()}
+
+        # Collect candidate (port_name, root_bid, total_cost, sender_bid, sender_port_id)
+        # for each port that has a best_bpdu with a root better than ourselves.
+        candidates: list[tuple] = []
+        for pname, ps in inst.port_states.items():
+            if ps.best_bpdu is None:
+                continue
+            bpdu = ps.best_bpdu
+            if bpdu.root_bridge_id is None:
+                continue
+            # Only consider BPDUs that advertise a root better than us
+            if bpdu.root_bridge_id >= own_bid:
+                continue
+            total_cost = bpdu.root_path_cost + ps.path_cost
+            sender_port_id = bpdu.port_id.value if bpdu.port_id else 0xFFFF
+            # Priority vector for root-port election
+            candidates.append((
+                bpdu.root_bridge_id,
+                total_cost,
+                bpdu.bridge_id,
+                sender_port_id,
+                pname,
+            ))
+
+        new_learning_ports: list[str] = []
+
+        if not candidates:
+            # No better root found in BPDUs — we are (or remain) root
+            inst.root_bridge_id = own_bid
+            inst.root_path_cost = 0
+            inst.root_port_name = None
+            for pname, ps in inst.port_states.items():
+                if ps.portfast:
+                    ps.role  = PortRole.EDGE
+                    ps.state = PortState.FORWARDING
+                elif ps.state not in (PortState.ERR_DISABLED,
+                                      PortState.ROOT_INCONSISTENT):
+                    ps.role  = PortRole.DESIGNATED
+                    # Phase 5: LEARNING transition for ports coming out of block
+                    old = prev_states.get(pname, PortState.FORWARDING)
+                    if old in (PortState.DISCARDING, PortState.BLOCKING,
+                               PortState.DISABLED):
+                        ps.state = PortState.LEARNING
+                        new_learning_ports.append(pname)
+                    else:
+                        ps.state = PortState.FORWARDING
+            return new_learning_ports
+
+        # Elect root port: sort by priority vector (all elements comparable)
+        candidates.sort()
+        best = candidates[0]
+        root_bid, root_cost, _sender_bid, _sender_pid, root_port_name = best
+
+        inst.root_bridge_id = root_bid
+        inst.root_path_cost = root_cost
+        inst.root_port_name = root_port_name
+
+        # Assign roles
+        for pname, ps in inst.port_states.items():
+            if ps.state in (PortState.ERR_DISABLED, PortState.ROOT_INCONSISTENT):
+                continue
+            if ps.portfast:
+                ps.role  = PortRole.EDGE
+                ps.state = PortState.FORWARDING
+            elif pname == root_port_name:
+                ps.role  = PortRole.ROOT
+                old = prev_states.get(pname, PortState.FORWARDING)
+                if old in (PortState.DISCARDING, PortState.BLOCKING,
+                           PortState.DISABLED):
+                    # Phase 5: new root port enters LEARNING
+                    ps.state = PortState.LEARNING
+                    new_learning_ports.append(pname)
+                else:
+                    ps.state = PortState.FORWARDING
+            elif ps.best_bpdu is not None:
+                # Another port with a best_bpdu: compare our advertised cost
+                # to the sender's root_path_cost.
+                peer_bpdu = ps.best_bpdu
+                our_cost = root_cost  # our total cost to root
+                peer_cost = peer_bpdu.root_path_cost
+                if our_cost <= peer_cost:
+                    ps.role  = PortRole.DESIGNATED
+                    old = prev_states.get(pname, PortState.FORWARDING)
+                    if old in (PortState.DISCARDING, PortState.BLOCKING,
+                               PortState.DISABLED):
+                        ps.state = PortState.LEARNING
+                        new_learning_ports.append(pname)
+                    else:
+                        ps.state = PortState.FORWARDING
+                else:
+                    ps.role  = PortRole.ALTERNATE
+                    if self._mode == STPMode.RAPID_PVST:
+                        ps.state = PortState.DISCARDING
+                    else:
+                        ps.state = PortState.BLOCKING
+            else:
+                # No best_bpdu — no competing switch on this segment
+                ps.role  = PortRole.DESIGNATED
+                old = prev_states.get(pname, PortState.FORWARDING)
+                if old in (PortState.DISCARDING, PortState.BLOCKING,
+                           PortState.DISABLED):
+                    ps.state = PortState.LEARNING
+                    new_learning_ports.append(pname)
+                else:
+                    ps.state = PortState.FORWARDING
+
+        return new_learning_ports
 
     def _recalculate_instance(self, inst: STPInstance) -> None:
         """Local recalculation (no peer info) — treats self as root."""
@@ -801,12 +948,14 @@ class STPManager:
                 PortRole.EDGE:       "Desg",
             }.get(port.role, "????")
             state_abbr = {
-                PortState.FORWARDING: "FWD",
-                PortState.LEARNING:   "LRN",
-                PortState.LISTENING:  "LIS",
-                PortState.BLOCKING:   "BLK",
-                PortState.DISCARDING: "DSC",
-                PortState.DISABLED:   "DIS",
+                PortState.FORWARDING:        "FWD",
+                PortState.LEARNING:          "LRN",
+                PortState.LISTENING:         "LIS",
+                PortState.BLOCKING:          "BLK",
+                PortState.DISCARDING:        "DSC",
+                PortState.DISABLED:          "DIS",
+                PortState.ERR_DISABLED:      "ERR",
+                PortState.ROOT_INCONSISTENT: "RIN",
             }.get(port.state, "???")
             pid = f"{port.port_id.priority}.{port.port_id.number}" if port.port_id else "128.1"
             type_flags = "P2p" + (" Edge" if port.portfast else "")
