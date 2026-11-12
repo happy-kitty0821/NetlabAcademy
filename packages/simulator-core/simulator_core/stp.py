@@ -519,6 +519,9 @@ class STPManager:
             best_cost = 999999
             best_port = None
             for port_name, port_state in inst.port_states.items():
+                # Skip administratively down interfaces — they cannot be root ports.
+                if self._is_port_admin_down(port_name, topology):
+                    continue
                 # Look for a connected switch peer
                 peer_id = self._find_connected_switch(port_name, topology)
                 if peer_id and peer_id in all_switches:
@@ -573,6 +576,17 @@ class STPManager:
                                 port_state.state = PortState.DISCARDING
                             else:
                                 port_state.state = PortState.BLOCKING
+
+    def _is_port_admin_down(self, port_name: str, topology) -> bool:
+        """Return True if this port's interface is administratively down."""
+        device = topology.devices.get(self._device_id)
+        if device is None:
+            return False
+        iface = device.interfaces.get(port_name)
+        if iface is None:
+            return False
+        from simulator_core.types import InterfaceState
+        return iface.admin_state == InterfaceState.DOWN
 
     def _find_connected_switch(self, port_name: str, topology) -> Optional[str]:
         """Return the device_id of the switch connected via port_name, or None."""
