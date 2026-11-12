@@ -205,6 +205,41 @@ class Simulation:
         except KeyError:
             raise KeyError(f"No router device with id {device_id!r}.")
 
+    def run_stp(self) -> None:
+        """
+        Run STP/PVST+ root election and port-role calculation across all
+        switches in the topology.
+
+        Call this after the topology is fully connected (all links added)
+        or after any change that affects the spanning tree:
+         - Bridge priority change
+         - Port cost change
+         - Link added or removed
+         - Interface shut down or brought up
+         - VLAN membership change
+
+        The election uses the topology's actual Link objects to discover
+        peer switches — no direct cross-object references or hardcoded roots.
+
+        Each STPManager.recalculate() call receives:
+         - the topology (for link discovery via topology.neighbours())
+         - the full dict of peer STPManagers (for Bridge ID comparison)
+
+        Convergence is approximated by running two passes so that root-path
+        costs propagate correctly through multi-hop topologies:
+        Pass 1 — every switch elects a root and computes initial port roles.
+        Pass 2 — costs that depend on peer root_path_cost are now stable;
+                  alternate/designated decisions are finalised.
+        """
+        if not self._switches:
+            return
+        # Build the peer map: device_id → STPManager
+        all_stps = {dev_id: sw.stp for dev_id, sw in self._switches.items()}
+        # Two passes for multi-hop cost propagation
+        for _ in range(2):
+            for sw in self._switches.values():
+                sw.stp.recalculate(self._topology, all_stps)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -226,6 +261,10 @@ class Simulation:
                 self._routers[device.id] = Router(device=device, simulation=self)
                 # Build initial connected routes from interface IPs
                 self._routers[device.id].update_connected_routes()
+
+        # Run initial STP election now that all switches are instantiated
+        # and the topology links are known.
+        self.run_stp()
 
     def _record(self, event: SimulationEvent) -> None:
         """Append the event to the trace, enforcing the trace size cap."""
