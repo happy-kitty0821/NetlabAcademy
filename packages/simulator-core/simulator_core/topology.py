@@ -344,6 +344,10 @@ class Topology:
             )
         self.links.append(link)
 
+    def remove_link(self, link_id: str) -> None:
+        """Remove a link by ID. No-op if not found."""
+        self.links = [lnk for lnk in self.links if lnk.id != link_id]
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------

@@ -349,6 +349,7 @@ class Switch:
         if vlan_id not in self._vlans:
             self._vlans[vlan_id] = name or f"VLAN{vlan_id:04d}"
             self._stp.ensure_vlan(vlan_id)
+            self._notify_stp_change()
 
     def name_vlan(self, vlan_id: int, name: str) -> None:
         if vlan_id not in self._vlans:
@@ -364,6 +365,7 @@ class Switch:
         for iface in self._device.interfaces.values():
             if iface.vlan == vlan_id:
                 iface.vlan = 1
+        self._notify_stp_change()
 
     def set_port_vlan(self, iface_name: str, vlan_id: int) -> None:
         if vlan_id not in self._vlans:
@@ -372,6 +374,7 @@ class Switch:
         if iface is None:
             raise ValueError(f"Interface {iface_name!r} not found")
         iface.vlan = vlan_id
+        self._notify_stp_change()
 
     def get_port_vlan(self, iface_name: str) -> int:
         iface = self._device.interfaces.get(iface_name)
@@ -399,12 +402,14 @@ class Switch:
         iface.switchport_mode = "trunk"
         if iface.trunk_allowed_vlans is None:
             iface.trunk_allowed_vlans = None   # None = all
+        self._notify_stp_change()
 
     def set_access_mode(self, iface_name: str) -> None:
         iface = self._device.interfaces.get(iface_name)
         if iface is None:
             raise ValueError(f"Interface {iface_name!r} not found")
         iface.switchport_mode = "access"
+        self._notify_stp_change()
 
     def set_trunk_native_vlan(self, iface_name: str, vlan_id: int) -> None:
         if vlan_id not in self._vlans:
@@ -442,6 +447,7 @@ class Switch:
         elif mode == "except":
             all_vlans = list(self._vlans.keys())
             iface.trunk_allowed_vlans = [v for v in all_vlans if v not in (vlans or [])]
+        self._notify_stp_change()
 
     def _is_vlan_allowed_on_trunk(self, iface_name: str, vlan_id: int) -> bool:
         iface = self._device.interfaces.get(iface_name)
@@ -504,6 +510,104 @@ class Switch:
         return [iface_name]
 
     # ------------------------------------------------------------------
+    # Interface admin state
+    # ------------------------------------------------------------------
+
+    def shutdown_interface(self, iface_name: str) -> None:
+        """Administratively shut down an interface and trigger STP."""
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        iface.admin_state = InterfaceState.DOWN
+        self._notify_stp_change()
+
+    def no_shutdown_interface(self, iface_name: str) -> None:
+        """Bring an administratively down interface back up and trigger STP."""
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            raise ValueError(f"Interface {iface_name!r} not found")
+        iface.admin_state = InterfaceState.UP
+        self._notify_stp_change()
+
+    def _notify_stp_change(self) -> None:
+        """Notify the simulation that STP must be recalculated."""
+        if self._sim is not None:
+            self._sim._trigger_stp()
+
+    # ------------------------------------------------------------------
+    # STP configuration wrappers (delegate + notify)
+    # ------------------------------------------------------------------
+
+    def set_stp_bridge_priority(self, vlan_id: int, priority: int) -> None:
+        """Set bridge priority for the given VLAN and trigger STP."""
+        self._stp.set_bridge_priority(vlan_id, priority)
+        self._notify_stp_change()
+
+    def set_stp_port_cost(self, iface_name: str, vlan_id: int, cost: int) -> None:
+        """Set port path cost for the given interface/VLAN and trigger STP."""
+        self._stp.set_port_cost(iface_name, vlan_id, cost)
+        self._notify_stp_change()
+
+    def set_stp_port_priority(self, iface_name: str, vlan_id: int, priority: int) -> None:
+        """Set port priority for the given interface/VLAN and trigger STP."""
+        self._stp.set_port_priority(iface_name, vlan_id, priority)
+        self._notify_stp_change()
+
+    # ------------------------------------------------------------------
+    # BPDU processing
+    # ------------------------------------------------------------------
+
+    def _process_bpdu(self, ingress_iface: str, frame: EthernetFrame) -> None:
+        """Process a received BPDU frame on the given ingress interface."""
+        from simulator_core.stp import PortRole, PortState
+        bpdu = frame.bpdu_payload
+        if bpdu is None or bpdu.root_bridge_id is None or bpdu.bridge_id is None:
+            return
+
+        # Determine which VLAN instance this BPDU belongs to.
+        # For PVST+, use the sys_id_ext of the bridge_id as the VLAN.
+        vlan_id = bpdu.root_bridge_id.sys_id_ext or 1
+        inst = self._stp.get_instance(vlan_id)
+        if inst is None:
+            return
+
+        # Increment rx counter
+        port_state = inst.port_states.get(ingress_iface)
+        if port_state is not None:
+            port_state.bpdu_rx += 1
+
+        # Update best BPDU seen on this port
+        current_best = port_state.best_bpdu if port_state is not None else None
+        received_better = False
+
+        if current_best is None:
+            received_better = True
+        else:
+            # Compare: lower root_bridge_id wins; tie-break on root_path_cost;
+            # tie-break on sender bridge_id; tie-break on port_id.
+            if bpdu.root_bridge_id < current_best.root_bridge_id:
+                received_better = True
+            elif bpdu.root_bridge_id == current_best.root_bridge_id:
+                if bpdu.root_path_cost < current_best.root_path_cost:
+                    received_better = True
+                elif bpdu.root_path_cost == current_best.root_path_cost:
+                    if bpdu.bridge_id < current_best.bridge_id:
+                        received_better = True
+
+        if received_better and port_state is not None:
+            port_state.best_bpdu = bpdu
+            # Update the instance root info from the BPDU content
+            # (not from direct peer STPManager read)
+            if inst.bridge_id is not None and bpdu.root_bridge_id < inst.bridge_id:
+                # The BPDU advertises a better root than we currently know
+                inst.root_bridge_id = bpdu.root_bridge_id
+                inst.root_path_cost = bpdu.root_path_cost + port_state.path_cost
+                inst.root_port_name = ingress_iface
+                # Recalculate all port roles based on updated root info
+                if self._sim is not None:
+                    self._sim._trigger_stp()
+
+    # ------------------------------------------------------------------
     # FrameArrival handler
     # ------------------------------------------------------------------
 
@@ -515,6 +619,12 @@ class Switch:
         iface = self._device.interfaces.get(ingress_iface)
         if iface is None:
             return
+
+        # Detect and process BPDUs before normal forwarding.
+        # BPDUs bypass STP port state checks and MAC learning.
+        if frame.bpdu_payload is not None:
+            self._process_bpdu(ingress_iface, frame)
+            return  # BPDUs are not forwarded as user frames
 
         # Resolve VLAN from port mode
         if iface.switchport_mode == "trunk":
@@ -589,6 +699,18 @@ class Switch:
 
     def _forward(self, time: int, frame: EthernetFrame,
                  egress_iface: str, src_mac: str, dst_mac: str) -> None:
+        # BPDUs bypass the STP egress forwarding check.
+        if frame.bpdu_payload is None:
+            # Check STP state for the egress port before forwarding user frames.
+            iface = self._device.interfaces.get(egress_iface)
+            if iface is not None:
+                vlan = (
+                    iface.vlan
+                    if iface.switchport_mode == "access"
+                    else iface.trunk_native_vlan
+                )
+                if not self._stp.is_port_forwarding(egress_iface, vlan):
+                    return  # Drop — egress port is STP discarding/blocking
         # Resolve EtherChannel if needed
         physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac)
         for port in physical_ports:

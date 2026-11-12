@@ -14,9 +14,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import IPv4Address
-from typing import Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from simulator_core.addresses import MACAddress
+
+if TYPE_CHECKING:
+    from simulator_core.stp import BPDU
+
+
+# ---------------------------------------------------------------------------
+# STP multicast MAC and ethertype sentinel
+# ---------------------------------------------------------------------------
+
+#: IEEE 802.1D STP multicast destination MAC address.
+STP_MULTICAST_MAC: str = "01:80:c2:00:00:00"
 
 
 # ---------------------------------------------------------------------------
@@ -147,19 +158,28 @@ class EthernetFrame:
     dst_mac:
         Destination MAC address (unicast, multicast, or broadcast).
     ethertype:
-        EtherType field: 0x0800 = IPv4, 0x0806 = ARP.
-    payload:
-        The encapsulated payload.
+        EtherType field: 0x0800 = IPv4, 0x0806 = ARP, 0x0027 = BPDU sentinel.
     frame_id:
         A UUID string assigned at creation time.  Not part of the wire format;
         used to correlate events in the trace.
+    payload:
+        The encapsulated IP/ARP payload.  ``None`` for BPDU frames which
+        carry their data in ``bpdu_payload``.
+    bpdu_payload:
+        BPDU carried by this frame.  Set only for STP BPDU frames; ``None``
+        for all other frame types.
     """
 
+    # Required fields (no defaults) must come before optional fields.
     src_mac: MACAddress
     dst_mac: MACAddress
-    ethertype: int          # 0x0800 = IPv4, 0x0806 = ARP
-    payload: EthernetPayload
+    ethertype: int          # 0x0800 = IPv4, 0x0806 = ARP, 0x0027 = BPDU
     frame_id: str           # UUID assigned by caller
+    payload: Optional[EthernetPayload] = None
+    bpdu_payload: Optional["BPDU"] = None
 
     ETHERTYPE_IPV4: int = 0x0800
     ETHERTYPE_ARP: int = 0x0806
+    #: LLC-based STP BPDU sentinel ethertype (not a real EtherType II value;
+    #: used as a unique discriminator within the simulator).
+    ETHERTYPE_BPDU: int = 0x0027

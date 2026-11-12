@@ -186,6 +186,10 @@ class STPPortState:
     # Best BPDU received on this port (used for role calculation)
     best_bpdu: Optional[BPDU] = None
 
+    # BPDU counters
+    bpdu_tx: int = 0
+    bpdu_rx: int = 0
+
     @property
     def is_forwarding(self) -> bool:
         return self.state == PortState.FORWARDING
@@ -394,6 +398,24 @@ class STPManager:
 
     def is_port_forwarding(self, iface_name: str, vlan_id: int = 1) -> bool:
         return self.get_port_state(iface_name, vlan_id) == PortState.FORWARDING
+
+    def is_port_learning_or_forwarding(self, iface_name: str, vlan_id: int = 1) -> bool:
+        """
+        True if the port is in LEARNING or FORWARDING state.
+
+        MAC learning is allowed in both states per IEEE 802.1D.  In the
+        current educational model ports transition directly to FORWARDING
+        (timer-driven LEARNING state is not simulated), so this is equivalent
+        to is_port_forwarding for now.  The method is provided as a public API
+        for callers that need to be explicit about learning behaviour.
+
+        # In RSTP/Rapid-PVST the data plane gate is FORWARDING; LEARNING state
+        # (timer-driven transitions) is deferred — ports go directly to
+        # FORWARDING in the current educational model.
+        """
+        return self.get_port_state(iface_name, vlan_id) in (
+            PortState.LEARNING, PortState.FORWARDING
+        )
 
     def get_instance(self, vlan_id: int) -> Optional[STPInstance]:
         return self._instances.get(vlan_id)

@@ -95,6 +95,9 @@ class Simulation:
         self._hosts: dict[str, "Host"] = {}
         self._switches: dict[str, "Switch"] = {}
         self._routers: dict[str, "Router"] = {}
+        # Guard flag: _trigger_stp is a no-op until _init_devices finishes
+        # building all Switch objects and running the initial STP election.
+        self._stp_initialized: bool = False
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -178,6 +181,7 @@ class Simulation:
         self._hosts.clear()
         self._switches.clear()
         self._routers.clear()
+        self._stp_initialized = False
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -225,20 +229,150 @@ class Simulation:
          - the topology (for link discovery via topology.neighbours())
          - the full dict of peer STPManagers (for Bridge ID comparison)
 
-        Convergence is approximated by running two passes so that root-path
-        costs propagate correctly through multi-hop topologies:
-        Pass 1 — every switch elects a root and computes initial port roles.
-        Pass 2 — costs that depend on peer root_path_cost are now stable;
-                  alternate/designated decisions are finalised.
+        Convergence: iterates until two consecutive snapshots are equal or
+        until MAX_ITER (32) iterations, whichever comes first.  32 iterations
+        is more than sufficient for realistic educational topologies.
         """
         if not self._switches:
             return
-        # Build the peer map: device_id → STPManager
         all_stps = {dev_id: sw.stp for dev_id, sw in self._switches.items()}
-        # Two passes for multi-hop cost propagation
-        for _ in range(2):
-            for sw in self._switches.values():
-                sw.stp.recalculate(self._topology, all_stps)
+        MAX_ITER = 32
+        for _iteration in range(MAX_ITER):
+            before = self._stp_snapshot()
+            # Sorted iteration order for determinism
+            for dev_id in sorted(self._switches):
+                self._switches[dev_id].stp.recalculate(self._topology, all_stps)
+            after = self._stp_snapshot()
+            if after == before:
+                break  # stable state reached
+
+    def _stp_snapshot(self) -> dict:
+        """Snapshot relevant STP state for convergence detection."""
+        snap: dict = {}
+        for dev_id, sw in sorted(self._switches.items()):
+            snap[dev_id] = {}
+            for vlan_id, inst in sw.stp._instances.items():
+                ports = {
+                    pname: (ps.role, ps.state)
+                    for pname, ps in inst.port_states.items()
+                }
+                snap[dev_id][vlan_id] = (
+                    inst.root_bridge_id,
+                    inst.root_path_cost,
+                    inst.root_port_name,
+                    ports,
+                )
+        return snap
+
+    def _trigger_stp(self) -> None:
+        """
+        Trigger STP recalculation if the simulation has finished initialising.
+
+        This guard prevents spurious recalculations while _init_devices is
+        still building the switch map (before all switches are created).
+        """
+        if self._stp_initialized:
+            self.run_stp()
+
+    def add_link(self, link: "object") -> None:
+        """
+        Add a link to the working topology and trigger STP recalculation.
+
+        Callers should use this method (rather than topology.add_link directly)
+        after Simulation init so that STP converges automatically.
+        """
+        from simulator_core.topology import Link as _Link
+        assert isinstance(link, _Link)
+        self._topology.add_link(link)
+        self._trigger_stp()
+
+    def remove_link(self, link_id: str) -> None:
+        """
+        Remove a link from the working topology by ID and trigger STP recalculation.
+
+        Callers should use this method (rather than topology.remove_link directly)
+        after Simulation init so that STP converges automatically.
+        """
+        self._topology.remove_link(link_id)
+        self._trigger_stp()
+
+    def send_bpdus(self, tick: int = 0) -> None:
+        """
+        Send BPDUs from all eligible switch ports through the frame pipeline.
+
+        For each switch, for each STP instance (VLAN), for each port that is
+        FORWARDING or the root port or a designated port, build a BPDU and
+        schedule a FrameTransmit event.  Only ports that are physically
+        connected (topology.neighbours returns non-None) and administratively
+        UP transmit.
+
+        BPDUs use dst_mac=01:80:c2:00:00:00 (STP multicast) and are carried
+        as EthernetFrame.bpdu_payload.  They bypass normal MAC learning and
+        STP forwarding checks on receipt.
+        """
+        import uuid as _uuid
+        from simulator_core.frames import EthernetFrame, STP_MULTICAST_MAC
+        from simulator_core.stp import BPDU, PortRole
+        from simulator_core.addresses import MACAddress
+        from simulator_core.types import InterfaceState
+
+        for dev_id in sorted(self._switches):
+            sw = self._switches[dev_id]
+            device = self._topology.devices.get(dev_id)
+            if device is None:
+                continue
+            for inst in sw.stp.all_instances():
+                if inst.bridge_id is None:
+                    continue
+                for port_name, port_state in inst.port_states.items():
+                    # Only send from ports with an eligible role
+                    if port_state.role not in (
+                        PortRole.DESIGNATED, PortRole.ROOT, PortRole.EDGE
+                    ):
+                        continue
+                    # Must be physically connected
+                    peer = self._topology.neighbours(dev_id, port_name)
+                    if peer is None:
+                        continue
+                    # Egress interface must be UP
+                    iface = device.interfaces.get(port_name)
+                    if iface is None or iface.admin_state == InterfaceState.DOWN:
+                        continue
+                    # Build BPDU
+                    bpdu = BPDU(
+                        version=2 if sw.stp.mode.value == "rapid-pvst" else 0,
+                        root_bridge_id=inst.root_bridge_id,
+                        root_path_cost=inst.root_path_cost,
+                        bridge_id=inst.bridge_id,
+                        port_id=port_state.port_id,
+                        message_age=0,
+                        max_age=inst.timers.max_age,
+                        hello_time=inst.timers.hello_time,
+                        forward_delay=inst.timers.forward_delay,
+                    )
+                    # Build EthernetFrame wrapping the BPDU
+                    src_mac = iface.mac
+                    dst_mac = MACAddress(STP_MULTICAST_MAC)
+                    frame = EthernetFrame(
+                        src_mac=src_mac,
+                        dst_mac=dst_mac,
+                        ethertype=EthernetFrame.ETHERTYPE_BPDU,
+                        frame_id=str(_uuid.uuid4()),
+                        bpdu_payload=bpdu,
+                    )
+                    # Increment tx counter
+                    port_state.bpdu_tx += 1
+                    # Schedule FrameTransmit
+                    try:
+                        self.schedule(FrameTransmit(
+                            time=tick,
+                            seq=self.next_seq(),
+                            device_id=dev_id,
+                            interface_name=port_name,
+                            frame=frame,
+                        ))
+                    except Exception:
+                        pass  # skip if tick exceeds max_ticks
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -251,6 +385,9 @@ class Simulation:
         from simulator_core.devices.switch import Switch
         from simulator_core.devices.router import Router
         from simulator_core.types import DeviceModel
+
+        # Guard against _trigger_stp calls while switches are being created.
+        self._stp_initialized = False
 
         for device in self._topology.devices.values():
             if device.model == DeviceModel.HOST:
@@ -265,6 +402,8 @@ class Simulation:
         # Run initial STP election now that all switches are instantiated
         # and the topology links are known.
         self.run_stp()
+        # Allow _trigger_stp to run from this point on.
+        self._stp_initialized = True
 
     def _record(self, event: SimulationEvent) -> None:
         """Append the event to the trace, enforcing the trace size cap."""
