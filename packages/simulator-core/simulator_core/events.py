@@ -278,6 +278,25 @@ class ForwardDelayEvent(SimulationEvent):
     generation: int
 
 
+@dataclass(frozen=True)
+class CDPHelloEvent(SimulationEvent):
+    """
+    Periodic CDP advertisement trigger for a single device.
+
+    Fields
+    ------
+    device_id:
+        The device that should transmit CDP frames on this tick.
+    generation:
+        Monotonically increasing counter per device.  When a reset() increments
+        the device's generation, any queued CDPHelloEvent with an older
+        generation is silently dropped, ensuring at most one active CDP chain
+        per device.
+    """
+    device_id: str
+    generation: int
+
+
 # ---------------------------------------------------------------------------
 # Convenience registry (used by serialisation)
 # ---------------------------------------------------------------------------
@@ -298,5 +317,6 @@ EVENT_REGISTRY: dict[str, type[SimulationEvent]] = {
         TraceLimitReached,
         BPDUHelloEvent,
         ForwardDelayEvent,
+        CDPHelloEvent,
     ]
 }

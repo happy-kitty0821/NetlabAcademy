@@ -32,6 +32,7 @@ from simulator_core.frames import EthernetFrame
 from simulator_core.stp import STPManager, STPMode, PortState
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
+from simulator_core.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -259,6 +260,15 @@ class Switch:
 
         # Register all physical interfaces with STP instances.
         self._register_stp_ports()
+
+        # CDP manager
+        hostname = device.hostname if hasattr(device, "hostname") else device.id
+        self.cdp_manager = CDPManager(
+            device_id=device.id,
+            hostname=hostname,
+            capabilities="Switch",
+            platform="Cisco Catalyst 2960",
+        )
 
     # ------------------------------------------------------------------
     # STP port registration
@@ -675,6 +685,16 @@ class Switch:
         iface = self._device.interfaces.get(ingress_iface)
         if iface is None:
             return
+
+        # CDP frames bypass all forwarding, MAC learning, and STP checks.
+        # They are never forwarded — consumed locally only.
+        if frame.cdp_payload is not None:
+            self.cdp_manager.update_neighbor(
+                local_interface=ingress_iface,
+                entry=frame.cdp_payload,
+                current_tick=arrive_time,
+            )
+            return  # never forward CDP
 
         # Detect and process BPDUs before normal forwarding.
         # BPDUs bypass STP port state checks and MAC learning.

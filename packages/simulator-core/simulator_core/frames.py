@@ -20,6 +20,7 @@ from simulator_core.addresses import MACAddress
 
 if TYPE_CHECKING:
     from simulator_core.stp import BPDU
+    from simulator_core.cdp import CDPEntry
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,16 @@ if TYPE_CHECKING:
 
 #: IEEE 802.1D STP multicast destination MAC address.
 STP_MULTICAST_MAC: str = "01:80:c2:00:00:00"
+
+# ---------------------------------------------------------------------------
+# CDP multicast MAC and ethertype
+# ---------------------------------------------------------------------------
+
+#: Cisco CDP/VTP/DTP multicast destination MAC address.
+CDP_MULTICAST_MAC: str = "01:00:0c:cc:cc:cc"
+
+#: CDP ethertype (Cisco proprietary SNAP value used as discriminator).
+ETHERTYPE_CDP: int = 0x2000
 
 
 # ---------------------------------------------------------------------------
@@ -173,13 +184,16 @@ class EthernetFrame:
     # Required fields (no defaults) must come before optional fields.
     src_mac: MACAddress
     dst_mac: MACAddress
-    ethertype: int          # 0x0800 = IPv4, 0x0806 = ARP, 0x0027 = BPDU
+    ethertype: int          # 0x0800 = IPv4, 0x0806 = ARP, 0x0027 = BPDU, 0x2000 = CDP
     frame_id: str           # UUID assigned by caller
     payload: Optional[EthernetPayload] = None
     bpdu_payload: Optional["BPDU"] = None
+    cdp_payload: Optional["CDPEntry"] = None
 
     ETHERTYPE_IPV4: int = 0x0800
     ETHERTYPE_ARP: int = 0x0806
     #: LLC-based STP BPDU sentinel ethertype (not a real EtherType II value;
     #: used as a unique discriminator within the simulator).
     ETHERTYPE_BPDU: int = 0x0027
+    #: CDP ethertype (Cisco proprietary SNAP value used as discriminator).
+    ETHERTYPE_CDP: int = 0x2000

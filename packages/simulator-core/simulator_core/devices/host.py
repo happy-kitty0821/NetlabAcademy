@@ -44,6 +44,7 @@ from simulator_core.frames import (
 )
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
+from simulator_core.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -105,6 +106,15 @@ class Host:
         # Pending echo requests awaiting reply:
         # (sequence, identifier) → (send_tick, ping_result)
         self._pending_echo: dict[tuple[int, int], tuple[int, PingResult]] = {}
+
+        # CDP manager
+        hostname = device.hostname if hasattr(device, "hostname") else device.id
+        self.cdp_manager = CDPManager(
+            device_id=device.id,
+            hostname=hostname,
+            capabilities="Host",
+            platform="Generic Host",
+        )
 
     # ------------------------------------------------------------------
     # Properties
@@ -227,6 +237,14 @@ class Host:
     def handle_frame_arrival(self, event: FrameArrival) -> None:
         """Dispatch an incoming frame to the correct protocol handler."""
         frame = event.frame
+        # CDP frames are consumed locally — never forwarded.
+        if frame.cdp_payload is not None:
+            self.cdp_manager.update_neighbor(
+                local_interface=event.interface_name,
+                entry=frame.cdp_payload,
+                current_tick=event.time,
+            )
+            return
         if frame.ethertype == EthernetFrame.ETHERTYPE_ARP:
             assert isinstance(frame.payload, ARPMessage)
             self._handle_arp(event, frame.payload)

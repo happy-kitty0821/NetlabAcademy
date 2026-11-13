@@ -39,6 +39,7 @@ from simulator_core.frames import (
 from simulator_core.routing import RoutingTable, RouteSource
 from simulator_core.topology import Device
 from simulator_core.types import InterfaceState
+from simulator_core.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -64,6 +65,15 @@ class Router:
         # Pending packets awaiting ARP resolution:
         # dst_ip → list of (packet, ingress_interface)
         self._pending_arp: dict[IPv4Address, list[tuple[IPv4Packet, str]]] = {}
+
+        # CDP manager
+        hostname = device.hostname if hasattr(device, "hostname") else device.id
+        self.cdp_manager = CDPManager(
+            device_id=device.id,
+            hostname=hostname,
+            capabilities="Router",
+            platform="Cisco ISR 2911",
+        )
 
     # ------------------------------------------------------------------
     # Properties
@@ -109,6 +119,15 @@ class Router:
     def handle_frame_arrival(self, event: FrameArrival) -> None:
         """Process a frame arriving at the router."""
         frame = event.frame
+
+        # CDP frames are consumed locally — never forwarded.
+        if frame.cdp_payload is not None:
+            self.cdp_manager.update_neighbor(
+                local_interface=event.interface_name,
+                entry=frame.cdp_payload,
+                current_tick=event.time,
+            )
+            return
 
         if frame.ethertype == EthernetFrame.ETHERTYPE_ARP:
             # Router participates in ARP for its own interfaces

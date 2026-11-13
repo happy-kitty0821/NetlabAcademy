@@ -29,6 +29,7 @@ from simulator_core.events import (
     TraceLimitReached,
     BPDUHelloEvent,
     ForwardDelayEvent,
+    CDPHelloEvent,
     DROP_LINK_DOWN,
     DROP_INTERFACE_ADMIN_DOWN,
 )
@@ -101,6 +102,9 @@ class Simulation:
         # Incrementing a switch's generation invalidates all previously
         # scheduled BPDUHelloEvents for that switch (stale-event guard).
         self._hello_generation: dict[str, int] = {}
+        # Generation counter per device for CDPHelloEvent cancellation.
+        # Mirrors the BPDU generation guard pattern.
+        self._cdp_generation: dict[str, int] = {}
         # Guard flag: _trigger_stp is a no-op until _init_devices finishes
         # building all Switch objects and running the initial STP election.
         self._stp_initialized: bool = False
@@ -190,6 +194,9 @@ class Simulation:
         # Increment all existing generations so queued BPDUHelloEvents become stale.
         for dev_id in list(self._hello_generation):
             self._hello_generation[dev_id] += 1
+        # Increment CDP generations so queued CDPHelloEvents become stale.
+        for dev_id in list(self._cdp_generation):
+            self._cdp_generation[dev_id] += 1
         self._stp_initialized = False
         self._init_devices()
 
@@ -445,10 +452,11 @@ class Simulation:
         self.run_stp()
         # Allow _trigger_stp to run from this point on.
         self._stp_initialized = True
-        # NOTE: Periodic BPDU hello chains are NOT started automatically.
-        # Call start_hello_timers() explicitly after Simulation init to enable
-        # periodic BPDU transmission.  This avoids flooding the event queue
-        # during unit tests that use sim.run() without expecting BPDU traffic.
+        # NOTE: Periodic BPDU hello chains and CDP hello chains are NOT started
+        # automatically.  Call start_hello_timers() / start_cdp_timers()
+        # explicitly after Simulation init to enable periodic transmission.
+        # This avoids flooding the event queue during unit tests that use
+        # sim.run() without expecting background protocol traffic.
 
     def _record(self, event: SimulationEvent) -> None:
         """Append the event to the trace, enforcing the trace size cap."""
@@ -474,6 +482,8 @@ class Simulation:
             self._handle_bpdu_hello(event)
         elif isinstance(event, ForwardDelayEvent):
             self._handle_forward_delay(event)
+        elif isinstance(event, CDPHelloEvent):
+            self._handle_cdp_hello(event)
         # Other event types (ARP*, ICMP*, MACTable*, drops) are purely
         # observational records — they do not trigger further dispatch.
 
@@ -846,3 +856,189 @@ class Simulation:
         # Only advance if still in LEARNING
         if ps.state == PortState.LEARNING:
             ps.state = PortState.FORWARDING
+
+    # ------------------------------------------------------------------
+    # CDP timer helpers
+    # ------------------------------------------------------------------
+
+    def start_cdp_timers(self, start_tick: int = 0) -> None:
+        """
+        Start (or restart) the periodic CDP hello chain for all devices.
+
+        Increments each device's CDP generation to invalidate any previously
+        scheduled chains, then schedules the first CDPHelloEvent.
+
+        Called automatically from _init_devices() after STP initialisation.
+        """
+        all_devices = (
+            list(self._switches.keys())
+            + list(self._routers.keys())
+            + list(self._hosts.keys())
+        )
+        for dev_id in sorted(all_devices):
+            gen = self._cdp_generation.get(dev_id, 0) + 1
+            self._cdp_generation[dev_id] = gen
+            self._schedule_next_cdp(dev_id, start_tick=start_tick)
+
+    def _schedule_next_cdp(
+        self,
+        device_id: str,
+        start_tick: int,
+        gen: Optional[int] = None,
+    ) -> None:
+        """
+        Schedule the next CDPHelloEvent for a device.
+
+        Parameters
+        ----------
+        device_id:
+            The device whose CDP chain is being scheduled.
+        start_tick:
+            The current logical tick from which the hello interval is added.
+        gen:
+            The generation that owns the current chain.  If None, reads from
+            the dict (used when starting a fresh chain).
+        """
+        cdp_manager = self._get_cdp_manager(device_id)
+        if cdp_manager is None or not cdp_manager.is_enabled:
+            return
+        hello_ticks = cdp_manager.hello_interval
+        fire_at = start_tick + hello_ticks
+        # Stop chain if it would exceed max_ticks
+        if fire_at + PROPAGATION_DELAY > self._max_ticks:
+            return
+        if gen is None:
+            gen = self._cdp_generation.get(device_id, 0)
+        try:
+            self.schedule(CDPHelloEvent(
+                time=fire_at,
+                seq=self.next_seq(),
+                device_id=device_id,
+                generation=gen,
+            ))
+        except Exception:
+            pass  # tick exceeds max_ticks — stop the chain silently
+
+    def _handle_cdp_hello(self, event: CDPHelloEvent) -> None:
+        """
+        Handle a CDPHelloEvent: validate generation, send CDP frames, reschedule.
+
+        If the event's generation is stale (< current generation for this
+        device), it is ignored — the old chain has been superseded by a newer
+        one started after a reset or topology change.
+        """
+        dev_id = event.device_id
+        current_gen = self._cdp_generation.get(dev_id, 0)
+        if event.generation != current_gen:
+            # Stale event from an old CDP chain — discard it.
+            return
+        self._send_cdp_for_device(dev_id, tick=self._clock)
+        self._check_cdp_expiry(dev_id, tick=self._clock)
+        # Reschedule — pass the validated generation so the chain never
+        # accidentally reads a bumped generation and spawns a duplicate chain.
+        self._schedule_next_cdp(dev_id, start_tick=self._clock, gen=event.generation)
+
+    def _send_cdp_for_device(self, device_id: str, tick: int) -> None:
+        """
+        Send CDP frames from one device at the given tick.
+
+        Iterates UP physical interfaces that have a connected link, builds a
+        CDPEntry, wraps it in an EthernetFrame, and schedules a FrameTransmit.
+        SVIs and loopbacks are skipped.
+        """
+        import uuid as _uuid
+        from simulator_core.frames import EthernetFrame, CDP_MULTICAST_MAC, ETHERTYPE_CDP
+        from simulator_core.cdp import CDPEntry
+        from simulator_core.addresses import MACAddress
+        from simulator_core.types import DeviceModel, InterfaceState
+
+        cdp_manager = self._get_cdp_manager(device_id)
+        if cdp_manager is None or not cdp_manager.is_enabled:
+            return
+
+        device = self._topology.devices.get(device_id)
+        if device is None:
+            return
+
+        # Collect all configured IP addresses on this device
+        ip_addresses: list[str] = []
+        for iface in device.interfaces.values():
+            if iface.ip_config is not None:
+                ip_addresses.append(str(iface.ip_config.address))
+
+        # Determine capabilities and platform from device model
+        if device.model == DeviceModel.SWITCH:
+            capabilities = "Switch"
+            platform = "Cisco Catalyst 2960"
+        elif device.model == DeviceModel.ROUTER:
+            capabilities = "Router"
+            platform = "Cisco ISR 2911"
+        else:
+            capabilities = "Host"
+            platform = "Generic Host"
+
+        for iface_name, iface in device.interfaces.items():
+            # Skip logical interfaces
+            if iface.is_svi or iface.is_loopback:
+                continue
+            # Skip admin-down interfaces
+            if iface.admin_state == InterfaceState.DOWN:
+                continue
+            # Skip unconnected interfaces
+            peer = self._topology.neighbours(device_id, iface_name)
+            if peer is None:
+                continue
+
+            entry = CDPEntry(
+                device_id=cdp_manager.hostname,
+                local_interface=iface_name,
+                holdtime=cdp_manager.holdtime,
+                capabilities=capabilities,
+                platform=platform,
+                software_version="NetLab Academy Simulator 1.0",
+                ip_addresses=tuple(ip_addresses),
+                native_vlan=getattr(iface, "trunk_native_vlan", 1) or 1,
+                duplex="full",
+                vtp_domain="",
+                advertisement_version=2,
+            )
+
+            src_mac = iface.mac
+            dst_mac = MACAddress(CDP_MULTICAST_MAC)
+            frame = EthernetFrame(
+                src_mac=src_mac,
+                dst_mac=dst_mac,
+                ethertype=ETHERTYPE_CDP,
+                frame_id=str(_uuid.uuid4()),
+                cdp_payload=entry,
+            )
+            try:
+                self.schedule(FrameTransmit(
+                    time=tick,
+                    seq=self.next_seq(),
+                    device_id=device_id,
+                    interface_name=iface_name,
+                    frame=frame,
+                ))
+            except Exception:
+                pass  # tick exceeds max_ticks
+
+    def _check_cdp_expiry(self, device_id: str, tick: int) -> None:
+        """Expire stale CDP neighbor entries on all devices."""
+        for mgr_dict in [self._switches, self._routers, self._hosts]:
+            for dev in mgr_dict.values():
+                if hasattr(dev, "cdp_manager"):
+                    dev.cdp_manager.expire_neighbors(tick)
+
+    def _get_cdp_manager(self, device_id: str):
+        """Return the CDPManager for any device type, or None."""
+        sw = self._switches.get(device_id)
+        if sw is not None:
+            return getattr(sw, "cdp_manager", None)
+        rtr = self._routers.get(device_id)
+        if rtr is not None:
+            return getattr(rtr, "cdp_manager", None)
+        host = self._hosts.get(device_id)
+        if host is not None:
+            return getattr(host, "cdp_manager", None)
+        return None

@@ -25,7 +25,10 @@ from simulator_core.events import (
     ARPCacheUpdated,
     ARPReplySent,
     ARPRequestSent,
+    BPDUHelloEvent,
+    CDPHelloEvent,
     EVENT_REGISTRY,
+    ForwardDelayEvent,
     FrameArrival,
     FrameDropped,
     FrameTransmit,
@@ -123,6 +126,14 @@ def _frame_to_dict(frame: EthernetFrame) -> dict[str, Any]:
     if frame.ethertype == EthernetFrame.ETHERTYPE_ARP:
         payload_dict = _arp_to_dict(frame.payload)  # type: ignore[arg-type]
         payload_type = "arp"
+    elif frame.cdp_payload is not None:
+        # CDP frames carry no IP/ARP payload
+        payload_dict = {}
+        payload_type = "cdp"
+    elif frame.bpdu_payload is not None:
+        # BPDU frames carry no IP/ARP payload
+        payload_dict = {}
+        payload_type = "bpdu"
     else:
         payload_dict = _ipv4_packet_to_dict(frame.payload)  # type: ignore[arg-type]
         payload_type = "ipv4"
@@ -139,15 +150,31 @@ def _frame_to_dict(frame: EthernetFrame) -> dict[str, Any]:
 def _frame_from_dict(d: dict[str, Any]) -> EthernetFrame:
     if d["payload_type"] == "arp":
         payload = _arp_from_dict(d["payload"])
+        return EthernetFrame(
+            src_mac=_mac_from_str(d["src_mac"]),
+            dst_mac=_mac_from_str(d["dst_mac"]),
+            ethertype=d["ethertype"],
+            payload=payload,
+            frame_id=d["frame_id"],
+        )
+    elif d["payload_type"] in ("cdp", "bpdu"):
+        # CDP and BPDU frames have no serialisable payload in this implementation;
+        # reconstruct as a bare frame (payload=None) for trace round-trip purposes.
+        return EthernetFrame(
+            src_mac=_mac_from_str(d["src_mac"]),
+            dst_mac=_mac_from_str(d["dst_mac"]),
+            ethertype=d["ethertype"],
+            frame_id=d["frame_id"],
+        )
     else:
         payload = _ipv4_packet_from_dict(d["payload"])
-    return EthernetFrame(
-        src_mac=_mac_from_str(d["src_mac"]),
-        dst_mac=_mac_from_str(d["dst_mac"]),
-        ethertype=d["ethertype"],
-        payload=payload,
-        frame_id=d["frame_id"],
-    )
+        return EthernetFrame(
+            src_mac=_mac_from_str(d["src_mac"]),
+            dst_mac=_mac_from_str(d["dst_mac"]),
+            ethertype=d["ethertype"],
+            payload=payload,
+            frame_id=d["frame_id"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +265,13 @@ def _trace_limit_reached_to_dict(e: TraceLimitReached) -> dict[str, Any]:
     return d
 
 
+def _cdp_hello_event_to_dict(e: CDPHelloEvent) -> dict[str, Any]:
+    d = _base_dict(e, "CDPHelloEvent")
+    d["device_id"] = e.device_id
+    d["generation"] = e.generation
+    return d
+
+
 # Dispatch map: class → serialiser function.
 _SERIALISERS: dict[type, Any] = {
     FrameTransmit: _frame_transmit_to_dict,
@@ -250,6 +284,7 @@ _SERIALISERS: dict[type, Any] = {
     ICMPEchoRequestSent: _icmp_echo_request_sent_to_dict,
     ICMPEchoReplySent: _icmp_echo_reply_sent_to_dict,
     TraceLimitReached: _trace_limit_reached_to_dict,
+    CDPHelloEvent: _cdp_hello_event_to_dict,
 }
 
 
@@ -345,6 +380,14 @@ def _trace_limit_reached_from_dict(d: dict[str, Any]) -> TraceLimitReached:
     )
 
 
+def _cdp_hello_event_from_dict(d: dict[str, Any]) -> CDPHelloEvent:
+    return CDPHelloEvent(
+        time=d["time"], seq=d["seq"],
+        device_id=d["device_id"],
+        generation=d["generation"],
+    )
+
+
 _DESERIALISERS: dict[str, Any] = {
     "FrameTransmit": _frame_transmit_from_dict,
     "FrameArrival": _frame_arrival_from_dict,
@@ -356,6 +399,7 @@ _DESERIALISERS: dict[str, Any] = {
     "ICMPEchoRequestSent": _icmp_echo_request_sent_from_dict,
     "ICMPEchoReplySent": _icmp_echo_reply_sent_from_dict,
     "TraceLimitReached": _trace_limit_reached_from_dict,
+    "CDPHelloEvent": _cdp_hello_event_from_dict,
 }
 
 
