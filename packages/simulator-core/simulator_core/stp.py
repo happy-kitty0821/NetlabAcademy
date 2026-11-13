@@ -411,11 +411,12 @@ class STPManager:
         """
         True if the port is in LEARNING or FORWARDING state.
 
-        MAC learning is allowed in both states per IEEE 802.1D.  In the
-        current educational model ports transition directly to FORWARDING
-        (timer-driven LEARNING state is not simulated), so this is equivalent
-        to is_port_forwarding for now.  The method is provided as a public API
-        for callers that need to be explicit about learning behaviour.
+        MAC learning is allowed in both LEARNING and FORWARDING states per
+        IEEE 802.1D.  In the BPDU-driven simulation path (Phase 5), ports
+        enter LEARNING before transitioning to FORWARDING after the configured
+        forward_delay.  PortFast/EDGE ports skip LEARNING and go directly to
+        FORWARDING.  This method returns True for both states so that MAC
+        learning is correctly permitted during the LEARNING interval.
 
         # In RSTP/Rapid-PVST the data plane gate is FORWARDING; LEARNING state
         # (timer-driven transitions) is deferred — ports go directly to

@@ -636,6 +636,19 @@ class Switch:
                             received_better = True
 
         if received_better:
+            # --- RootGuard: check BEFORE accepting the BPDU ---
+            # If the ingress port carries a RootGuard and the BPDU advertises
+            # a root better than our own Bridge ID, reject the BPDU entirely —
+            # do NOT store it, do NOT recalculate.  Set the port to
+            # ROOT_INCONSISTENT so it stays DISCARDING until the offending
+            # BPDUs age out.
+            if port_state.guard == "root" and inst.bridge_id is not None:
+                if bpdu.root_bridge_id < inst.bridge_id:
+                    port_state.state = PortState.ROOT_INCONSISTENT
+                    # Ensure any stale best_bpdu from a previous cycle is cleared.
+                    port_state.best_bpdu = None
+                    return   # do not store or recalculate
+
             port_state.best_bpdu = bpdu
             # Local recalculation from stored BPDUs — no peer inspection.
             new_learning = self._stp.recalculate_from_bpdus(inst)
@@ -649,15 +662,6 @@ class Switch:
                         vlan_id=vlan_id,
                         at_tick=self._sim.clock + forward_delay,
                     )
-
-        # --- RootGuard: prevent a guarded port from becoming root port ---
-        if port_state.guard == "root" and inst.bridge_id is not None:
-            # If the BPDU advertises a root better than our own bridge_id,
-            # set the port ROOT_INCONSISTENT (treated as DISCARDING).
-            if bpdu.root_bridge_id < inst.bridge_id:
-                port_state.state = PortState.ROOT_INCONSISTENT
-                # Clear best_bpdu so this port is never elected root port.
-                port_state.best_bpdu = None
 
     # ------------------------------------------------------------------
     # FrameArrival handler
