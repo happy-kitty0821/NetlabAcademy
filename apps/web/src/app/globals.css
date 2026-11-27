@@ -110,6 +110,38 @@ code, kbd, pre, .mono { font-family: var(--font-mono); font-size: 0.875em; }
   to   { opacity: 1; }
 }
 
+/* Auth pages: one short entrance, staggered via --auth-delay, and a single
+   slow "packet" moving along the illustration's links. */
+/* Never starts fully transparent: if a browser defers or skips the
+   animation (background tab, throttled renderer), the content is still
+   readable. (An earlier opacity-0 entrance left the login page blank.) */
+@keyframes authRise {
+  from { opacity: 0.4; transform: translateY(8px); }
+  to   { opacity: 1;   transform: translateY(0); }
+}
+.auth-rise {
+  animation: authRise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--auth-delay, 0ms);
+}
+@keyframes authPacket {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -1000; }
+}
+.auth-packet {
+  stroke-dasharray: 6 994;
+  animation: authPacket 7s linear infinite;
+}
+@keyframes authAlert {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.auth-alert { animation: authAlert 0.2s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-rise, .auth-alert { animation: none; }
+  .auth-packet { animation: none; stroke-dasharray: none; opacity: 0; }
+}
+
 /* ── React Flow — workspace canvas ──────────────────────────────── */
 
 /* Override all RF CSS variables for light theme */

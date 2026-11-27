@@ -1,115 +1,15 @@
-"use client";
-
 /**
- * AuthShell — animated login/register wrapper.
+ * AuthShell — layout for the sign-in and registration pages.
  *
- * Background: animated network topology with floating nodes and
- * connecting lines that pulse — evoking the product's core concept.
- * Card animates in with a smooth fade+slide on mount.
+ * Light theme matching the app. Two columns on large screens: the form on
+ * the left, a quiet network-topology illustration on the right (hidden on
+ * small screens). Motion is limited to a short staggered entrance and one
+ * slow packet along the illustration's links; both are disabled when the
+ * user prefers reduced motion (see .auth-* rules in globals.css).
  */
 
-import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { Network } from "lucide-react";
-
-// ── Animated network canvas background ───────────────────────────────────────
-
-interface Node {
-  x: number; y: number;
-  vx: number; vy: number;
-  r: number;
-}
-
-function NetworkCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rafRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    // Create nodes
-    const COUNT = 28;
-    const nodes: Node[] = [];
-    const resize = () => {
-      canvas.width  = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    resize();
-    window.addEventListener("resize", resize);
-
-    for (let i = 0; i < COUNT; i++) {
-      nodes.push({
-        x: Math.random() * canvas.width,
-        y: Math.random() * canvas.height,
-        vx: (Math.random() - 0.5) * 0.4,
-        vy: (Math.random() - 0.5) * 0.4,
-        r: Math.random() * 2.5 + 1.5,
-      });
-    }
-
-    const LINK_DIST = 160;
-
-    function draw() {
-      if (!ctx || !canvas) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // Update positions
-      for (const n of nodes) {
-        n.x += n.vx;
-        n.y += n.vy;
-        if (n.x < 0 || n.x > canvas.width)  n.vx *= -1;
-        if (n.y < 0 || n.y > canvas.height) n.vy *= -1;
-      }
-
-      // Draw links
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const dx = nodes[i].x - nodes[j].x;
-          const dy = nodes[i].y - nodes[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < LINK_DIST) {
-            const alpha = (1 - dist / LINK_DIST) * 0.25;
-            ctx.beginPath();
-            ctx.strokeStyle = `rgba(88,166,255,${alpha})`;
-            ctx.lineWidth = 1;
-            ctx.moveTo(nodes[i].x, nodes[i].y);
-            ctx.lineTo(nodes[j].x, nodes[j].y);
-            ctx.stroke();
-          }
-        }
-      }
-
-      // Draw nodes
-      for (const n of nodes) {
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(88,166,255,0.5)";
-        ctx.fill();
-      }
-
-      rafRef.current = requestAnimationFrame(draw);
-    }
-
-    draw();
-    return () => {
-      window.removeEventListener("resize", resize);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="fixed inset-0 pointer-events-none"
-      aria-hidden="true"
-    />
-  );
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
 
 interface AuthShellProps {
   title: string;
@@ -118,87 +18,114 @@ interface AuthShellProps {
   footer?: React.ReactNode;
 }
 
+const rise = (ms: number) => ({ "--auth-delay": `${ms}ms` }) as React.CSSProperties;
+
 export function AuthShell({ title, subtitle, children, footer }: AuthShellProps) {
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-[#0a0d14] px-4 py-12 overflow-hidden">
-      {/* Animated network background */}
-      <NetworkCanvas />
-
-      {/* Radial glow behind card */}
-      <div
-        className="fixed inset-0 pointer-events-none"
-        aria-hidden="true"
-        style={{
-          background:
-            "radial-gradient(ellipse 60% 50% at 50% 50%, rgba(29,53,88,0.35) 0%, transparent 70%)",
-        }}
-      />
-
-      {/* Logo */}
-      <div
-        className="mb-8"
-        style={{ animation: "fadeInDown 0.5s ease-out" }}
-      >
+    <div className="min-h-screen grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] bg-[var(--surface-raised)]">
+      {/* ── Form column ─────────────────────────────────────────────── */}
+      <main className="flex flex-col px-6 py-8 sm:px-12">
         <Link
           href="/"
-          className="flex items-center gap-2.5 font-semibold text-[#e6edf3] no-underline"
+          className="auth-rise inline-flex items-center gap-2 self-start text-sm font-semibold text-[var(--text-primary)] no-underline"
+          style={rise(0)}
         >
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center"
-            style={{
-              background: "rgba(29,53,88,0.9)",
-              border: "1px solid #58a6ff",
-              boxShadow: "0 0 12px rgba(88,166,255,0.3)",
-            }}
-          >
-            <Network size={17} className="text-[#58a6ff]" aria-hidden="true" />
-          </div>
-          <span className="text-base">
-            NetLab<span className="text-[#58a6ff]">Academy</span>
+          <span className="w-7 h-7 rounded-md flex items-center justify-center bg-[var(--accent-primary)]">
+            <Network size={14} className="text-white" aria-hidden="true" />
           </span>
+          NetLab<span className="text-[var(--accent-primary)] -ml-1.5">Academy</span>
         </Link>
-      </div>
 
-      {/* Card */}
-      <div
-        className="w-full max-w-sm relative z-10"
-        style={{
-          background: "rgba(22,27,34,0.85)",
-          backdropFilter: "blur(16px)",
-          border: "1px solid rgba(48,54,61,0.8)",
-          borderRadius: "14px",
-          padding: "28px",
-          boxShadow: "0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px rgba(88,166,255,0.06)",
-          animation: "fadeInUp 0.45s ease-out",
-        }}
+        <div className="flex-1 flex items-center">
+          <div className="w-full max-w-[360px] mx-auto py-10">
+            <div className="auth-rise mb-7" style={rise(60)}>
+              <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)]">
+                {title}
+              </h1>
+              {subtitle && (
+                <p className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]">{subtitle}</p>
+              )}
+            </div>
+
+            <div className="auth-rise" style={rise(120)}>
+              {children}
+            </div>
+
+            {footer && (
+              <p className="auth-rise mt-6 text-sm text-[var(--text-secondary)]" style={rise(200)}>
+                {footer}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <p className="text-xs text-[var(--text-muted)]">
+          Independent educational platform. Not affiliated with Cisco Systems.
+        </p>
+      </main>
+
+      {/* ── Illustration column (large screens only) ────────────────── */}
+      <aside
+        aria-hidden="true"
+        className="hidden lg:flex flex-col justify-center gap-10 px-14 bg-[var(--surface-base)] border-l border-[var(--surface-border)]"
       >
-        {/* Accent bar top */}
-        <div
-          className="absolute top-0 left-8 right-8 h-px"
-          style={{
-            background:
-              "linear-gradient(90deg, transparent, rgba(88,166,255,0.6), transparent)",
-          }}
-        />
-
-        <div className="mb-6">
-          <h1 className="text-[1.1rem] font-semibold text-[#e6edf3] leading-tight">
-            {title}
-          </h1>
-          {subtitle && (
-            <p className="mt-1.5 text-sm text-[#8b949e]">{subtitle}</p>
-          )}
-        </div>
-
-        {children}
-      </div>
-
-      {/* Footer */}
-      {footer && (
-        <div className="mt-5 text-sm text-[#8b949e] relative z-10">
-          {footer}
-        </div>
-      )}
+        <TopologyIllustration />
+        <ul className="auth-rise space-y-4 max-w-md" style={rise(260)}>
+          {[
+            ["Build topologies", "Drag switches, routers and PCs onto a canvas and cable them up."],
+            ["Configure with a Cisco-style CLI", "VLANs, trunks, static routes and router-on-a-stick."],
+            ["Trace every packet", "Step through ARP, ICMP and switching decisions one event at a time."],
+          ].map(([heading, text]) => (
+            <li key={heading} className="flex gap-3">
+              <span className="mt-[7px] w-1.5 h-1.5 shrink-0 bg-[var(--accent-primary)]" />
+              <div>
+                <p className="text-sm font-medium text-[var(--text-primary)]">{heading}</p>
+                <p className="text-sm text-[var(--text-secondary)]">{text}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </aside>
     </div>
+  );
+}
+
+/** Two PCs, two switches and a router, with one packet looping slowly. */
+function TopologyIllustration() {
+  // Single path through all links so one dash can travel the whole topology.
+  const route = "M70 70 H190 V150 H310 V230 H430 V310 H550";
+  const device = (x: number, y: number, label: string, kind: "pc" | "switch" | "router") => (
+    <g transform={`translate(${x - 30} ${y - 18})`}>
+      <rect width="60" height="36" rx="6" fill="#ffffff" stroke="#d0d7de" />
+      {kind === "pc" && <rect x="20" y="9" width="20" height="13" rx="1.5" fill="none" stroke="#656d76" />}
+      {kind === "switch" && (
+        <g stroke="#0969da" strokeWidth="1.5">
+          <path d="M18 14 H42 M18 22 H42" />
+          <path d="M38 11 L42 14 L38 17 M22 19 L18 22 L22 25" fill="none" />
+        </g>
+      )}
+      {kind === "router" && <circle cx="30" cy="16" r="7" fill="none" stroke="#1a7f37" strokeWidth="1.5" />}
+      <text x="30" y="31" textAnchor="middle" fontSize="7" fill="#656d76" fontFamily="ui-monospace,monospace">{label}</text>
+    </g>
+  );
+
+  return (
+    <svg viewBox="0 0 620 380" className="auth-rise w-full max-w-xl" style={rise(180)}>
+      <defs>
+        <pattern id="auth-grid" width="20" height="20" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="1" fill="#d8dee4" />
+        </pattern>
+      </defs>
+      <rect width="620" height="380" fill="url(#auth-grid)" />
+      <path d={route} fill="none" stroke="#c5ced8" strokeWidth="1.5" />
+      <path d={route} fill="none" stroke="#0969da" strokeWidth="3" strokeLinecap="round" className="auth-packet" />
+      {device(70, 70, "PC-A", "pc")}
+      {device(190, 150, "SW1", "switch")}
+      {device(310, 150, "R1", "router")}
+      {device(430, 310, "SW2", "switch")}
+      {device(550, 310, "PC-B", "pc")}
+      <text x="70" y="108" textAnchor="middle" fontSize="9" fill="#9198a1" fontFamily="ui-monospace,monospace">192.168.10.10</text>
+      <text x="550" y="348" textAnchor="middle" fontSize="9" fill="#9198a1" fontFamily="ui-monospace,monospace">192.168.20.10</text>
+    </svg>
   );
 }
