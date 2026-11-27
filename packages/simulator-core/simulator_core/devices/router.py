@@ -9,6 +9,7 @@ Responsibilities:
 - ARP resolution for next-hop on egress interface.
 - ICMP time-exceeded when TTL hits 0.
 - ICMP destination unreachable when no route exists.
+- Router-originated ping (CLI ``ping`` on a router).
 - CLI: ip route, show ip route.
 
 No host I/O, no sockets, no subprocess.
@@ -43,6 +44,20 @@ from simulator_core.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
+    from simulator_core.devices.host import PingResult
+
+
+# ICMP identifier for router-originated echoes (distinct from hosts' 0xACAD).
+_ROUTER_ICMP_IDENTIFIER: int = 0x1051
+
+# Ticks between successive router-originated echo requests (matches Host).
+_RTT_SPACING: int = 6
+
+# Reason recorded for the echo IOS discards while it resolves the next hop.
+DROP_ARP_PENDING = "ARP resolution pending (first echo dropped, as on IOS)"
+
+# Reason recorded when a router-originated ping has no matching route.
+DROP_ROUTER_NO_ROUTE = "no route to destination in the routing table"
 
 
 class Router:
@@ -65,6 +80,15 @@ class Router:
         # Pending packets awaiting ARP resolution:
         # dst_ip → list of (packet, ingress_interface)
         self._pending_arp: dict[IPv4Address, list[tuple[IPv4Packet, str]]] = {}
+
+        # Router-originated pings awaiting ARP for their next hop:
+        # next_hop_ip → list of (sequence, result, dst_ip, src_ip, egress_iface)
+        self._pending_ping_arp: dict[
+            IPv4Address,
+            list[tuple[int, "PingResult", IPv4Address, IPv4Address, str]],
+        ] = {}
+        # Echo requests in flight: (sequence, identifier) → (send_tick, result)
+        self._pending_echo: dict[tuple[int, int], tuple[int, "PingResult"]] = {}
 
         # CDP manager
         hostname = device.hostname if hasattr(device, "hostname") else device.id
@@ -98,7 +122,12 @@ class Router:
     def update_connected_routes(self) -> None:
         """
         Rebuild connected routes from all interfaces that have an IP address
-        and are in the UP state.
+        and are in the UP state, then re-resolve static routes against them.
+
+        Must be called whenever an interface's address or admin state
+        changes (the CLI does this after ``ip address``, ``no ip address``,
+        ``shutdown`` and ``no shutdown``), otherwise the routing table goes
+        stale.
         """
         # Remove all existing connected routes
         self._routing_table._routes = [
@@ -106,11 +135,22 @@ class Router:
             if r.source != RouteSource.CONNECTED
         ]
 
-        from simulator_core.types import InterfaceState
         for name, iface in self._device.interfaces.items():
             if iface.ip_config and iface.admin_state == InterfaceState.UP:
                 net = iface.ip_config.network
                 self._routing_table.add_connected_route(net, name)
+
+        self._routing_table.resolve_static_routes()
+
+        # Cached next-hop mappings for subnets that are no longer connected
+        # would let traffic leave through a dead interface; drop them.
+        self._arp_cache = {
+            ip: mac for ip, mac in self._arp_cache.items()
+            if any(
+                r.source == RouteSource.CONNECTED and ip in r.network
+                for r in self._routing_table.routes
+            )
+        }
 
     # ------------------------------------------------------------------
     # FrameArrival handler
@@ -129,6 +169,11 @@ class Router:
             )
             return
 
+        # Subinterfaces (router-on-a-stick) are not modelled, so a physical
+        # router interface only accepts untagged frames.
+        if frame.vlan_tag is not None:
+            return
+
         if frame.ethertype == EthernetFrame.ETHERTYPE_ARP:
             # Router participates in ARP for its own interfaces
             from simulator_core.frames import ARPMessage
@@ -137,6 +182,13 @@ class Router:
 
         elif frame.ethertype == EthernetFrame.ETHERTYPE_IPV4:
             assert isinstance(frame.payload, IPv4Packet)
+            # A router only routes frames addressed to its own interface MAC.
+            # Unicast frames a switch flooded towards it (unknown destination)
+            # belong to another station and must not be routed a second time.
+            iface = self._device.interfaces.get(event.interface_name)
+            if (iface is not None and not frame.dst_mac.is_broadcast
+                    and frame.dst_mac != iface.mac):
+                return
             self._handle_ipv4(event, frame.payload)
 
     # ------------------------------------------------------------------
@@ -163,6 +215,7 @@ class Router:
         elif arp.operation == ARPMessage.ARP_REPLY:
             # Unblock pending packets
             self._unblock_pending(arp.sender_ip, arp.sender_mac)
+            self._unblock_pending_pings(arp.sender_ip, arp.sender_mac)
 
     def _send_arp_reply(self, event: FrameArrival, request: ARPMessage, iface) -> None:
         own_mac = iface.mac
@@ -260,6 +313,8 @@ class Router:
                     assert isinstance(pkt.payload, ICMPMessage)
                     if pkt.payload.type == ICMPMessage.ECHO_REQUEST:
                         self._send_icmp_echo_reply(event, pkt)
+                    elif pkt.payload.type == ICMPMessage.ECHO_REPLY:
+                        self._complete_echo(event.time, pkt.payload)
                 return
 
         # Decrement TTL
@@ -386,4 +441,144 @@ class Router:
             device_id=self.device_id,
             interface_name=event.interface_name,
             frame=frame,
+        ))
+
+    # ------------------------------------------------------------------
+    # Router-originated ping
+    # ------------------------------------------------------------------
+
+    def ping(self, dst_ip: str, count: int = 5) -> "PingResult":
+        """
+        Send *count* ICMP echo requests from this router to *dst_ip*.
+
+        The source address is the egress interface's address, chosen by a
+        routing-table lookup, as on IOS.  When the next hop is not yet in the
+        ARP cache the first echo is discarded while ARP resolves, producing
+        the familiar ``.!!!!`` of a router's first ping.
+
+        Returns a PingResult that fills in as the simulation runs; call
+        ``simulation.run()`` afterwards.
+        """
+        from simulator_core.devices.host import EchoResult, PingResult
+
+        dst = IPv4Address(dst_ip)
+        result = PingResult(target_ip=dst_ip, count=count, sent=count, received=0)
+
+        # Each ping is a self-contained run: echoes from an earlier ping that
+        # never resolved or never got a reply have timed out and must not be
+        # sent (or matched) now.
+        self._pending_ping_arp.clear()
+        self._pending_echo.clear()
+
+        def fail_all(reason: str) -> "PingResult":
+            for seq in range(count):
+                result.results.append(EchoResult(
+                    sequence=seq, success=False, rtt_ticks=None, drop_reason=reason,
+                ))
+            return result
+
+        # Pinging one of our own up interfaces is answered locally.
+        for iface in self._device.interfaces.values():
+            if (iface.ip_config and iface.ip_config.address == dst
+                    and iface.admin_state == InterfaceState.UP):
+                for seq in range(count):
+                    result.results.append(EchoResult(
+                        sequence=seq, success=True, rtt_ticks=0, drop_reason=None,
+                    ))
+                result.received = count
+                return result
+
+        route = self._routing_table.lookup(dst)
+        if route is None:
+            return fail_all(DROP_ROUTER_NO_ROUTE)
+        egress = self._device.interfaces.get(route.outgoing_interface)
+        if (egress is None or egress.ip_config is None
+                or egress.admin_state == InterfaceState.DOWN):
+            return fail_all("egress interface down")
+
+        next_hop = route.next_hop if route.next_hop is not None else dst
+        src_ip = egress.ip_config.address
+
+        if next_hop in self._arp_cache:
+            mac = self._arp_cache[next_hop]
+            for seq in range(count):
+                self._schedule_router_echo(
+                    dst, src_ip, mac, egress.name, seq, result,
+                    self._sim.clock + 1 + seq * _RTT_SPACING,
+                )
+            return result
+
+        # ARP miss: IOS drops the echo that triggered resolution.
+        result.results.append(EchoResult(
+            sequence=0, success=False, rtt_ticks=None, drop_reason=DROP_ARP_PENDING,
+        ))
+        pending = self._pending_ping_arp.setdefault(next_hop, [])
+        for seq in range(1, count):
+            pending.append((seq, result, dst, src_ip, egress.name))
+        self._send_arp_request(next_hop, egress.name)
+        return result
+
+    def _unblock_pending_pings(self, ip: IPv4Address, mac: MACAddress) -> None:
+        """ARP reply for a ping's next hop — send the waiting echoes."""
+        pending = self._pending_ping_arp.pop(ip, [])
+        for k, (seq, result, dst, src_ip, iface_name) in enumerate(pending):
+            self._schedule_router_echo(
+                dst, src_ip, mac, iface_name, seq, result,
+                self._sim.clock + 1 + k * _RTT_SPACING,
+            )
+
+    def _schedule_router_echo(
+        self,
+        dst: IPv4Address,
+        src_ip: IPv4Address,
+        dst_mac: MACAddress,
+        iface_name: str,
+        sequence: int,
+        result: "PingResult",
+        t: int,
+    ) -> None:
+        iface = self._device.interfaces.get(iface_name)
+        if iface is None:
+            return
+        icmp = ICMPMessage(
+            type=ICMPMessage.ECHO_REQUEST,
+            code=0,
+            sequence=sequence,
+            identifier=_ROUTER_ICMP_IDENTIFIER,
+        )
+        pkt = IPv4Packet(
+            src=src_ip, dst=dst,
+            protocol=IPv4Packet.PROTOCOL_ICMP,
+            ttl=255,
+            payload=icmp,
+        )
+        frame = EthernetFrame(
+            src_mac=iface.mac,
+            dst_mac=dst_mac,
+            ethertype=EthernetFrame.ETHERTYPE_IPV4,
+            payload=pkt,
+            frame_id=str(uuid.uuid4()),
+        )
+        self._sim.schedule(FrameTransmit(
+            time=t, seq=self._sim.next_seq(),
+            device_id=self.device_id,
+            interface_name=iface_name,
+            frame=frame,
+        ))
+        self._pending_echo[(sequence, _ROUTER_ICMP_IDENTIFIER)] = (t, result)
+
+    def _complete_echo(self, arrive_time: int, icmp: ICMPMessage) -> None:
+        """Record an echo reply for a router-originated ping."""
+        from simulator_core.devices.host import EchoResult
+
+        entry = self._pending_echo.pop((icmp.sequence, icmp.identifier), None)
+        if entry is None:
+            return  # not ours — ignore
+        send_tick, result = entry
+        result.received += 1
+        result.results.append(EchoResult(
+            sequence=icmp.sequence,
+            success=True,
+            rtt_ticks=arrive_time - send_tick,
+            drop_reason=None,
         ))

@@ -59,12 +59,17 @@ class Cmd:
     *children* — sub-commands at the next level.
     *handler*  — callable(tokens, session) → str when this is a leaf.
     *args_hint*— shown after this node in ? output (e.g. "<ip-address>").
+    *fallback* — when True and the next token matches no child, the
+                 handler runs with the full token list instead of an
+                 "invalid input" error (used where the argument is an
+                 abbreviated interface name the handler resolves itself).
     """
     keyword: str
     help_str: str = ""
     children: list["Cmd"] = field(default_factory=list)
     handler: Optional[Callable[["CLISession", list[str]], str]] = None
     args_hint: str = ""
+    fallback: bool = False
 
     def child(self, keyword: str) -> Optional["Cmd"]:
         """Return the child with the given keyword, or None."""
@@ -116,6 +121,8 @@ class CLISession:
     current_iface: Optional[str] = None
     current_vlan: Optional[int] = None
     current_line: Optional[str] = None  # e.g. "console 0", "vty 0 4"
+    # Interfaces selected by 'interface range'; empty for a single interface.
+    current_range: list[str] = field(default_factory=list)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -184,13 +191,64 @@ class CLISession:
             return self._cmd_end(tokens)
 
         tree = self._tree()
-        output = self._dispatch(tokens, tree)
+        if self.mode == CLIMode.IFACE_CONFIG and len(self.current_range) > 1:
+            output = self._dispatch_on_range(tokens, tree)
+        else:
+            output = self._dispatch(tokens, tree)
+
+        # IOS: a command that is not valid in a sub-mode (interface, VLAN,
+        # line) but is a valid global-configuration command runs in global
+        # configuration, and the session leaves the sub-mode.  So
+        # "interface g0/1" or "ip route ..." typed at (config-if)# work
+        # instead of being rejected — a rejection would leave the following
+        # commands applied to the previous interface.  An invalid-input
+        # result has no side effects, so retrying in global mode is safe.
+        if (self.mode in (CLIMode.IFACE_CONFIG, CLIMode.VLAN_CONFIG, CLIMode.LINE_CONFIG)
+                and output.startswith("% Invalid input")):
+            saved = (self.mode, self.current_iface, self.current_vlan,
+                     self.current_line, self.current_range)
+            self.mode = CLIMode.GLOBAL_CONFIG
+            self.current_iface = None
+            self.current_vlan = None
+            self.current_line = None
+            self.current_range = []
+            global_output = self._dispatch(tokens, self._global_tree())
+            if global_output.startswith("%"):
+                # Not a usable global command either: stay in the sub-mode.
+                (self.mode, self.current_iface, self.current_vlan,
+                 self.current_line, self.current_range) = saved
+                if not global_output.startswith("% Invalid input"):
+                    output = global_output  # e.g. a bad argument to a global command
+            else:
+                output = global_output
+
+        if self.mode != CLIMode.IFACE_CONFIG:
+            self.current_range = []
 
         # Apply pipe filter to the output if one was specified.
         if pipe_filter:
             output = self._apply_pipe_filter(output, pipe_filter[0], pipe_filter[1])
 
         return output
+
+    def _dispatch_on_range(self, tokens: list[str], tree: list[Cmd]) -> str:
+        """
+        Run an interface-configuration command on every interface selected
+        by ``interface range`` (IOS applies the command to each member).
+        Identical per-interface messages are reported once.
+        """
+        outputs: list[str] = []
+        members = list(self.current_range)
+        for name in members:
+            self.current_iface = name
+            out = self._dispatch(tokens, tree)
+            if out and out not in outputs:
+                outputs.append(out)
+            if self.mode != CLIMode.IFACE_CONFIG:
+                break  # the command left interface mode
+        if self.mode == CLIMode.IFACE_CONFIG:
+            self.current_iface = members[0]
+        return "\n".join(outputs)
 
     def complete(self, partial: str) -> str:
         """
@@ -712,7 +770,8 @@ class CLISession:
                             for name in self._iface_names()
                         ],
                         # Also handle abbreviated name via the parent handler
-                        handler=lambda s, t: s._show_ip_iface_dispatch(t)),
+                        handler=lambda s, t: s._show_ip_iface_dispatch(t),
+                        fallback=True),
                     Cmd("route",     "IP routing table",
                         handler=lambda s, t: s._cmd_show_ip_route(t)),
                     Cmd("arp",       "IP ARP table",
@@ -805,7 +864,8 @@ class CLISession:
                         handler=lambda s, t, n=name: s._cmd_show_interface(t, n))
                     for name in self._iface_names()
                 ],
-                handler=lambda s, t: s._show_interfaces_dispatch(t)),
+                handler=lambda s, t: s._show_interfaces_dispatch(t),
+                fallback=True),
         ]
 
     def _iface_names(self) -> list[str]:
@@ -824,12 +884,15 @@ class CLISession:
         """
         node_list = tree
         matched_path: list[str] = []
+        parent_fallback: Optional[Cmd] = None
 
         for depth, tok in enumerate(tokens):
             keywords = [c.keyword for c in node_list]
             matches = _match(tok.lower(), keywords)
 
             if len(matches) == 0:
+                if depth > 0 and parent_fallback is not None:
+                    return parent_fallback.handler(self, tokens)
                 if depth == 0:
                     return _invalid(tok)
                 # Unknown sub-command after a valid prefix
@@ -856,6 +919,7 @@ class CLISession:
                     return cmd_node.handler(self, tokens)
                 # There are more tokens — try children first.
                 node_list = cmd_node.children
+                parent_fallback = cmd_node if cmd_node.fallback else None
                 continue
 
             # Node has only children (no handler).
@@ -868,6 +932,7 @@ class CLISession:
                 return f"% Incomplete command."
 
             node_list = cmd_node.children
+            parent_fallback = None
 
         # Fell off the end of tokens mid-tree
         return "% Incomplete command."
@@ -1032,59 +1097,66 @@ class CLISession:
     def _cmd_enter_iface(self, tokens: list[str]) -> str:
         if len(tokens) < 2:
             return "% Incomplete command."
+        # Compact virtual-interface forms: "vlan1" → "vlan 1", "lo0" → "lo 0"
+        compact = re.match(r"^([A-Za-z]+)(\d+)$", tokens[1])
+        if compact and (
+            "vlan".startswith(compact.group(1).lower())
+            or "loopback".startswith(compact.group(1).lower())
+        ):
+            tokens = [tokens[0], compact.group(1), compact.group(2)] + tokens[2:]
         sub = tokens[1].lower()
 
         # Dispatch sub-types handled inline so the tree stays simple
         if sub == "range":
             return self._cmd_enter_iface_range(tokens)
-        if sub == "vlan":
+        if "vlan".startswith(sub):
             return self._cmd_enter_svi(tokens)
-        if sub in ("loopback", "lo"):
+        if "loopback".startswith(sub):
             return self._cmd_enter_loopback(tokens)
 
+        tokens = _join_iface_tokens(tokens, 1)
         iface_name = tokens[1]
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
         iface_names = list(device.interfaces.keys())
 
-        # Match with Cisco abbreviation support
+        # Match with Cisco abbreviation support (type-aware, exact number)
         matches = _match_iface(iface_name, iface_names)
         if not matches:
+            parsed = _split_iface_name(iface_name)
+            if parsed and "." in parsed[1]:
+                return (
+                    f"% Invalid interface name: {iface_name!r}\n"
+                    "  Subinterfaces (router-on-a-stick) are not supported "
+                    "by this simulator yet."
+                )
             return f"% Invalid interface name: {iface_name!r}"
         if len(matches) > 1:
-            exact = [n for n in matches if n.lower() == iface_name.lower()]
-            if exact:
-                matches = exact
-            else:
-                return (
-                    f"% Ambiguous interface: {iface_name!r}\n"
-                    f"  Matches: {', '.join(matches)}"
-                )
+            return (
+                f"% Ambiguous interface: {iface_name!r}\n"
+                f"  Matches: {', '.join(matches)}"
+            )
         self.mode = CLIMode.IFACE_CONFIG
         self.current_iface = matches[0]
+        self.current_range = []
         return ""
 
     def _cmd_enter_iface_range(self, tokens: list[str]) -> str:
-        # tokens: ['interface', 'range', '<iface1>', '-', '<iface2>']
-        # For now, enter the first interface in the range
-        if len(tokens) < 4:
-            return "% Incomplete command.\nUsage: interface range <iface1> - <iface2>"
+        # tokens: ['interface', 'range', <spec...>]
+        # e.g. "fa0/1 - 5", "fa0/1-5", "f0/1 - 2 , f0/5"
+        if len(tokens) < 3:
+            return "% Incomplete command.\nUsage: interface range <iface1> - <last-port>"
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
-        iface_names = list(device.interfaces.keys())
-        first_name = tokens[2]
-        matches = _match_iface(first_name, iface_names)
-        if not matches:
-            return f"% Invalid interface name: {first_name!r}"
-        # Enter the first interface; the range concept applies config to all
-        # but for the PoC we enter the first one and note the range
+        spec = " ".join(tokens[2:])
+        members, err = _expand_iface_range(spec, list(device.interfaces.keys()))
+        if err:
+            return err
         self.mode = CLIMode.IFACE_CONFIG
-        self.current_iface = matches[0]
-        # Store the range for potential future use
-        if len(tokens) > 4 and tokens[3] == "-":
-            device._iface_range = tokens[2:]  # type: ignore[attr-defined]
+        self.current_iface = members[0]
+        self.current_range = members
         return ""
 
     def _cmd_enter_svi(self, tokens: list[str]) -> str:
@@ -1172,6 +1244,18 @@ class CLISession:
         device = self.simulation.topology.devices.get(self.device_id)
         return device.interfaces.get(self.current_iface) if device and self.current_iface else None
 
+    def _refresh_l3(self) -> None:
+        """
+        Rebuild the router's connected routes (and re-resolve its static
+        routes) after an interface address or admin-state change.
+
+        Without this, addresses configured from the CLI never reach the
+        routing table, which is only built once at simulation start.
+        """
+        router = self._get_router()
+        if router is not None:
+            router.update_connected_routes()
+
     def _require_physical_switchport(self) -> Optional[str]:
         """
         Return an IOS-style error string if the current interface is NOT a
@@ -1226,12 +1310,14 @@ class CLISession:
                 iface.set_ip(cidr)
             except Exception as exc:
                 return f"% {exc}"
+        self._refresh_l3()
         return ""
 
     def _cmd_no_ip_address(self, tokens: list[str]) -> str:
         iface = self._get_current_iface()
         if iface:
             iface.ip_config = None
+        self._refresh_l3()
         return ""
 
     def _cmd_shutdown(self, tokens: list[str]) -> str:
@@ -1240,6 +1326,7 @@ class CLISession:
         if iface:
             iface.admin_state = InterfaceState.DOWN
             iface.oper_state  = InterfaceState.DOWN
+        self._refresh_l3()
         return ""
 
     def _cmd_no_shutdown(self, tokens: list[str]) -> str:
@@ -1248,6 +1335,7 @@ class CLISession:
         if iface:
             iface.admin_state = InterfaceState.UP
             iface.oper_state  = InterfaceState.UP
+        self._refresh_l3()
         return ""
 
     def _cmd_description(self, tokens: list[str]) -> str:
@@ -1413,24 +1501,12 @@ class CLISession:
         router = self._get_router()
         if router is None:
             return "% ip route is only available on router devices."
-        # Find the outgoing interface for this next-hop
-        # Look for the interface whose subnet contains the next-hop
-        iface_name = None
-        for name, iface in self.simulation.topology.devices[self.device_id].interfaces.items():
-            if iface.ip_config and next_hop in iface.ip_config.network:
-                iface_name = name
-                break
-        if iface_name is None:
-            # Still add the route — the interface will be found at forward time
-            # Try to find any UP interface as a default
-            for name, iface in self.simulation.topology.devices[self.device_id].interfaces.items():
-                from simulator_core.types import InterfaceState
-                if iface.admin_state == InterfaceState.UP:
-                    iface_name = name
-                    break
-        if iface_name is None:
-            return "% No suitable interface found for this static route."
-        router.routing_table.add_static_route(network, next_hop, iface_name)
+        # The outgoing interface is resolved from the connected routes.  As on
+        # IOS, a static route whose next hop is not (yet) reachable through a
+        # connected network is accepted and kept in the configuration, but is
+        # not installed until the next hop becomes reachable.
+        router.routing_table.add_static_route(network, next_hop, "")
+        router.routing_table.resolve_static_routes()
         return ""
 
     def _cmd_no_ip_route(self, tokens: list[str]) -> str:
@@ -2487,20 +2563,28 @@ class CLISession:
             return f"% Bad IP address or host name -- {target!r}"
 
         from simulator_core.exceptions import ConfigurationError
+        pinger = None
         try:
-            host = self.simulation.get_host(self.device_id)
+            pinger = self.simulation.get_host(self.device_id)
         except KeyError:
-            return "% Ping is not supported on this device type."
+            pinger = self._get_router()
+        if pinger is None:
+            return (
+                "% Ping from a Layer 2 switch is not supported yet "
+                "(switch management interfaces are not modelled)."
+            )
         try:
-            result = host.ping(target, count=repeat)
+            result = pinger.ping(target, count=repeat)
         except ConfigurationError as exc:
             return f"% {exc}"
         self.simulation.run()
 
+        # One character per echo, in sequence order: '!' reply, '.' timeout.
+        replied = {r.sequence for r in result.results if r.success}
         lines = [
             "\nType escape sequence to abort.",
             f"Sending {result.sent}, 100-byte ICMP Echos to {target}, timeout is 2 seconds:",
-            "".join("!" if r.success else "." for r in result.results),
+            "".join("!" if seq in replied else "." for seq in range(result.sent)),
         ]
         pct = int(result.received / result.sent * 100) if result.sent else 0
         summary = f"Success rate is {pct} percent ({result.received}/{result.sent})"
@@ -2509,49 +2593,61 @@ class CLISession:
             if rtts:
                 summary += f", round-trip min/avg/max = {min(rtts)}/{sum(rtts)//len(rtts)}/{max(rtts)} ticks"
         lines.append(summary)
-        if result.received == 0 and result.results and result.results[0].drop_reason:
-            lines.append(f"% {result.results[0].drop_reason}")
+        if result.received == 0:
+            reason = next(
+                (r.drop_reason for r in result.results if r.drop_reason), None
+            )
+            from simulator_core.devices.router import DROP_ARP_PENDING
+            if reason == DROP_ARP_PENDING:
+                # The ARP request was never answered, so nothing was sent.
+                reason = ("no ARP reply from the next hop - check its address, "
+                          "cabling and that its interface is up")
+            if reason:
+                lines.append(f"% {reason}")
         return "\n".join(lines)
 
     def _show_ip_iface_dispatch(self, tokens: list[str]) -> str:
         """Dispatch 'show ip interface <name>' with fuzzy match."""
-        sub = tokens[2].lower() if len(tokens) > 2 else ""
-        if sub in ("brief", "bri", "br"):
+        # tokens: ['show', 'ip', 'interface', <name>...]
+        tokens = _join_iface_tokens(tokens, 3)
+        if len(tokens) <= 3:
             return self._cmd_show_ip_int_brief(tokens)
-        if len(tokens) > 2:
-            # Try fuzzy match on the interface name token
-            device = self.simulation.topology.devices.get(self.device_id)
-            if device:
-                matches = _match_iface(tokens[2], list(device.interfaces.keys()))
-                if matches:
-                    return self._cmd_show_ip_iface(tokens, matches[0])
-        return self._cmd_show_ip_int_brief(tokens)
+        if "brief".startswith(tokens[3].lower()):
+            return self._cmd_show_ip_int_brief(tokens)
+        device = self.simulation.topology.devices.get(self.device_id)
+        if device:
+            matches = _match_iface(tokens[3], list(device.interfaces.keys()))
+            if len(matches) == 1:
+                return self._cmd_show_ip_iface(tokens, matches[0])
+        return _invalid_at(" ".join(tokens[:4]), tokens[3])
 
     def _show_interfaces_dispatch(self, tokens: list[str]) -> str:
         """Dispatch 'show interfaces [<name>]' with fuzzy match."""
+        tokens = _join_iface_tokens(tokens, 2)
         if len(tokens) < 3:
             return self._cmd_show_interfaces_all(tokens)
         sub = tokens[2].lower()
         if sub in ("brief", "bri", "br"):
             return self._cmd_show_ip_int_brief(tokens)
-        # Fuzzy match on interface name
+        # Type-aware match on interface name
         device = self.simulation.topology.devices.get(self.device_id)
         if device:
             matches = _match_iface(tokens[2], list(device.interfaces.keys()))
-            if matches:
+            if len(matches) == 1:
                 return self._cmd_show_interface(tokens, matches[0])
-        return self._cmd_show_interfaces_all(tokens)
+        return _invalid_at(" ".join(tokens[:3]), tokens[2])
 
     def _show_running_iface_dispatch(self, tokens: list[str]) -> str:
         """Dispatch 'show running-config interface <name>' with fuzzy match."""
         # tokens: ['show', 'running-config', 'interface', '<name>']
+        tokens = _join_iface_tokens(tokens, 3)
         if len(tokens) < 4:
             return "% Incomplete command."
         iface_name = tokens[3]
         device = self.simulation.topology.devices.get(self.device_id)
         if device:
             matches = _match_iface(iface_name, list(device.interfaces.keys()))
-            if matches:
+            if len(matches) == 1:
                 return self._cmd_show_running_iface(tokens, matches[0])
         return f"% Interface {iface_name!r} not found."
 
@@ -2622,25 +2718,34 @@ class CLISession:
             return "% show ip route is only available on router devices."
 
         rt = router.routing_table
-        if not rt.routes:
-            return "% No routes in routing table."
-
         source_codes = {
             "CONNECTED": "C",
             "STATIC":    "S",
         }
 
+        # IOS: "Gateway of last resort is <nh> to network 0.0.0.0" when an
+        # installed default route exists; the default route is flagged "*".
+        default = next(
+            (r for r in rt.routes if r.network.prefixlen == 0), None
+        )
+        if default is not None and default.next_hop is not None:
+            gw_line = f"Gateway of last resort is {default.next_hop} to network 0.0.0.0\n"
+        else:
+            gw_line = "Gateway of last resort is not set\n"
+
         lines = [
-            "Codes: C - connected, S - static\n",
-            "Gateway of last resort is not set\n",
+            "Codes: C - connected, S - static, * - candidate default\n",
+            gw_line,
         ]
         for entry in rt.routes:
             code = source_codes.get(entry.source.name, "?")
+            if entry.network.prefixlen == 0:
+                code += "*"
             if entry.next_hop:
-                via = f" via {entry.next_hop}"
+                desc = f"[{entry.metric}/0] via {entry.next_hop}"
             else:
-                via = f", directly connected"
-            lines.append(f"{code}    {str(entry.network):<20} [{entry.metric}/0]{via}, {entry.outgoing_interface}")
+                desc = f"is directly connected, {entry.outgoing_interface}"
+            lines.append(f"{code:<5}{entry.network} {desc}")
         return "\n".join(lines)
 
     def _cmd_show_interfaces_all(self, tokens: list[str]) -> str:
@@ -2697,6 +2802,9 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_arp(self, tokens: list[str]) -> str:
+        router = self._get_router()
+        if router is not None:
+            return self._show_router_arp(router)
         try:
             host = self.simulation.get_host(self.device_id)
         except KeyError:
@@ -2709,6 +2817,33 @@ class CLISession:
             iface_name = list(self.simulation.topology.devices[self.device_id].interfaces.keys())[0]
             for ip, mac in cache.items():
                 lines.append(f"Internet  {str(ip):<16} -          {mac}   ARPA   {iface_name}")
+        return "\n".join(lines)
+
+    def _show_router_arp(self, router) -> str:
+        """
+        IOS-style router ARP table: the router's own interface addresses
+        (age "-") followed by learned neighbours, each on the interface
+        whose connected subnet contains it.
+        """
+        device = self.simulation.topology.devices[self.device_id]
+        lines = ["Protocol  Address          Age (min)  Hardware Addr         Type   Interface"]
+        own_ips = set()
+        for name, iface in device.interfaces.items():
+            if iface.ip_config and iface.admin_state == InterfaceState.UP:
+                own_ips.add(iface.ip_config.address)
+                lines.append(
+                    f"Internet  {str(iface.ip_config.address):<16} -          "
+                    f"{iface.mac}   ARPA   {name}"
+                )
+        for ip, mac in sorted(router.arp_cache.items()):
+            if ip in own_ips:
+                continue
+            iface_name = next(
+                (n for n, i in device.interfaces.items()
+                 if i.ip_config and ip in i.ip_config.network),
+                "?",
+            )
+            lines.append(f"Internet  {str(ip):<16} 0          {mac}   ARPA   {iface_name}")
         return "\n".join(lines)
 
     def _cmd_show_mac(self, tokens: list[str]) -> str:
@@ -3044,60 +3179,113 @@ class CLISession:
 # Interface name matching
 # ---------------------------------------------------------------------------
 
-# Cisco interface type abbreviations
-_IFACE_PREFIX_MAP = {
-    "gi": "Gi", "gig": "Gi", "giga": "Gi", "gigabitethernet": "Gi",
-    "fa": "Fa", "fast": "Fa", "fastethernet": "Fa",
-    "eth": "eth", "e": "eth",
-    "vl": "Vlan", "vlan": "Vlan",
-    "lo": "Loopback", "loop": "Loopback", "loopback": "Loopback",
+# Full IOS type keyword for each interface-name type prefix used by the
+# device catalog.  A user-typed type is accepted when it is a prefix of the
+# full keyword ("f", "fa", "fast", "FastEthernet" all select "Fa" ports).
+_IFACE_TYPE_FULL = {
+    "fa": "fastethernet",
+    "gi": "gigabitethernet",
+    "te": "tengigabitethernet",
+    "eth": "ethernet",
+    "e": "ethernet",
+    "se": "serial",
+    "po": "port-channel",
+    "loopback": "loopback",
+    "vlan": "vlan",
 }
+
+_IFACE_NAME_RE = re.compile(r"^([A-Za-z][A-Za-z-]*)\s*(\d[\d/.:]*)$")
+
+
+def _split_iface_name(name: str) -> Optional[tuple[str, str]]:
+    """Split ``"Fa0/1"`` into ``("fa", "0/1")``; None if not type+number."""
+    m = _IFACE_NAME_RE.match(name.strip())
+    if not m:
+        return None
+    return m.group(1).lower(), m.group(2)
+
 
 def _match_iface(input_name: str, iface_names: list[str]) -> list[str]:
     """
-    Match an interface name with Cisco-style abbreviation support.
-    
-    Tries in order:
-    1. Exact match (case-insensitive)
-    2. Case-insensitive prefix match
-    3. Cisco type abbreviation (gig0/0 -> Gi0/0, fa0/1 -> Fa0/1)
+    Match a user-typed interface name against the device's interfaces.
+
+    IOS rules: the interface *type* may be abbreviated to any unambiguous
+    prefix of its full keyword, but the *number* must match exactly.
+
+    - ``fa0/1``, ``f0/1``, ``FastEthernet0/1`` → ``Fa0/1``
+    - ``g0/1`` on a FastEthernet-only switch → no match (wrong type)
+    - ``fa0/1.10`` → no match (subinterfaces are not modelled)
+    - ``0/1`` → no match (a type is required)
+
+    Returns every matching interface name; more than one means the typed
+    type prefix is ambiguous on this device.
     """
-    lower_input = input_name.lower()
-    
-    # 1. Exact match
+    lower_input = input_name.strip().lower()
+
     exact = [n for n in iface_names if n.lower() == lower_input]
     if exact:
         return exact
-    
-    # 2. Case-insensitive prefix match
-    prefix_matches = [n for n in iface_names if n.lower().startswith(lower_input)]
-    if prefix_matches:
-        return prefix_matches
-    
-    # 3. Cisco abbreviation: try replacing known type prefixes
-    for abbrev, full_prefix in _IFACE_PREFIX_MAP.items():
-        if lower_input.startswith(abbrev):
-            # Replace the abbreviation with the full prefix
-            rest = input_name[len(abbrev):]
-            normalized = full_prefix + rest
-            norm_matches = [n for n in iface_names if n.lower() == normalized.lower()]
-            if norm_matches:
-                return norm_matches
-            # Also try prefix match with the normalized name
-            norm_prefix = [n for n in iface_names if n.lower().startswith(normalized.lower())]
-            if norm_prefix:
-                return norm_prefix
-    
-    # 4. Try matching just the numeric portion (e.g. "0/0" matches "Gi0/0")
-    import re
-    num_match = re.search(r'[/\d]+$', lower_input)
-    if num_match:
-        num_part = num_match.group()
-        num_matches = [n for n in iface_names if n.lower().endswith(num_part)]
-        if num_matches:
-            return num_matches
-    
-    return []
+
+    parsed = _split_iface_name(input_name)
+    if parsed is None:
+        return []
+    typed_type, typed_number = parsed
+
+    matches = []
+    for name in iface_names:
+        own = _split_iface_name(name)
+        if own is None:
+            continue
+        own_type, own_number = own
+        if own_number != typed_number:
+            continue
+        full_type = _IFACE_TYPE_FULL.get(own_type, own_type)
+        if typed_type == own_type or full_type.startswith(typed_type):
+            matches.append(name)
+    return matches
+
+
+def _join_iface_tokens(tokens: list[str], idx: int) -> list[str]:
+    """
+    Collapse IOS's spaced interface form (``FastEthernet 0/1``) at
+    ``tokens[idx]`` into a single token (``FastEthernet0/1``).
+    """
+    if (len(tokens) > idx + 1 and tokens[idx].isalpha()
+            and tokens[idx + 1][:1].isdigit()):
+        return tokens[:idx] + [tokens[idx] + tokens[idx + 1]] + tokens[idx + 2:]
+    return tokens
+
+
+def _expand_iface_range(spec: str, iface_names: list[str]) -> tuple[list[str], Optional[str]]:
+    """
+    Expand an ``interface range`` specification into interface names.
+
+    Accepts comma-separated segments, each ``<type><slot>/<first>[ - <last>]``,
+    e.g. ``fa0/1 - 5``, ``fa0/1-5``, ``f0/1 - 2 , f0/5``.
+
+    Returns (names, None) on success or ([], error-message) on failure.
+    """
+    seg_re = re.compile(
+        r"^([A-Za-z][A-Za-z-]*)\s*((?:\d+/)*)(\d+)\s*(?:-\s*(\d+))?$"
+    )
+    result: list[str] = []
+    for segment in spec.split(","):
+        segment = segment.strip()
+        m = seg_re.match(segment)
+        if not m:
+            return [], f"% Invalid interface range: {segment!r}"
+        typ, slot, first, last = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        last_i = int(last) if last is not None else first
+        if last_i < first:
+            return [], f"% Invalid interface range: {segment!r}"
+        for port in range(first, last_i + 1):
+            typed = f"{typ}{slot}{port}"
+            found = _match_iface(typed, iface_names)
+            if len(found) != 1:
+                return [], f"% Invalid interface name: {typed!r}"
+            if found[0] not in result:
+                result.append(found[0])
+    return result, None
 
 
 # ---------------------------------------------------------------------------

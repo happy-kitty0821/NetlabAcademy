@@ -18,6 +18,7 @@ No host I/O, no sockets, no subprocess.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
 
@@ -702,16 +703,35 @@ class Switch:
             self._process_bpdu(ingress_iface, frame)
             return  # BPDUs are not forwarded as user frames
 
-        # Resolve VLAN from port mode
+        # Classify the frame into a VLAN (802.1Q ingress rules).
         if iface.switchport_mode == "trunk":
-            # On a trunk the frame may arrive with or without a tag.
-            # In our model all frames within the simulator are conceptually
-            # untagged (the VLAN is tracked via metadata).
-            # We use the VLAN already associated with the frame's originating
-            # access port. For frames from trunk peers, derive from context.
-            # Simple approach: if the frame has no VLAN metadata we use native.
-            vlan = iface.trunk_native_vlan
+            # Tagged frames belong to the VLAN in their tag; untagged frames
+            # belong to the trunk's native VLAN.  A VLAN not allowed on this
+            # trunk is dropped at ingress.
+            if frame.vlan_tag is not None:
+                vlan = frame.vlan_tag
+            else:
+                vlan = iface.trunk_native_vlan
+            if not self._is_vlan_allowed_on_trunk(ingress_iface, vlan):
+                self._sim._record(FrameDropped(
+                    time=arrive_time, seq=self._sim.next_seq(),
+                    device_id=self.device_id,
+                    interface_name=ingress_iface,
+                    frame=frame,
+                    reason=f"VLAN {vlan} not allowed on trunk",
+                ))
+                return
         else:
+            # Access ports carry untagged frames only.
+            if frame.vlan_tag is not None:
+                self._sim._record(FrameDropped(
+                    time=arrive_time, seq=self._sim.next_seq(),
+                    device_id=self.device_id,
+                    interface_name=ingress_iface,
+                    frame=frame,
+                    reason="802.1Q-tagged frame received on access port",
+                ))
+                return
             vlan = iface.vlan
 
         # STP check: drop frames if port is not forwarding for this VLAN
@@ -799,7 +819,26 @@ class Switch:
         # Resolve EtherChannel if needed
         physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac)
         for port in physical_ports:
-            self._send_on_port(time, frame, port)
+            self._send_on_port(time, self._encapsulate_for_egress(frame, port, frame_vlan), port)
+
+    def _encapsulate_for_egress(self, frame: EthernetFrame, egress_iface: str,
+                                frame_vlan: Optional[int]) -> EthernetFrame:
+        """
+        Apply 802.1Q egress rules: a trunk port tags every VLAN except its
+        native VLAN; an access port always sends untagged.  BPDU and CDP
+        frames are left as the control plane built them.
+        """
+        if frame.bpdu_payload is not None or frame.cdp_payload is not None:
+            return frame
+        iface = self._device.interfaces.get(egress_iface)
+        tag: Optional[int] = None
+        if (iface is not None and iface.switchport_mode == "trunk"
+                and frame_vlan is not None
+                and frame_vlan != iface.trunk_native_vlan):
+            tag = frame_vlan
+        if frame.vlan_tag == tag:
+            return frame
+        return replace(frame, vlan_tag=tag)
 
     def _send_on_port(self, time: int, frame: EthernetFrame,
                       egress_iface: str) -> None:

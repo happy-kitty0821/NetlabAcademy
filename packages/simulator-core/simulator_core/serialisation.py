@@ -144,10 +144,20 @@ def _frame_to_dict(frame: EthernetFrame) -> dict[str, Any]:
         "payload_type": payload_type,
         "payload": payload_dict,
         "frame_id": frame.frame_id,
+        "vlan_tag": frame.vlan_tag,
     }
 
 
 def _frame_from_dict(d: dict[str, Any]) -> EthernetFrame:
+    frame = _untagged_frame_from_dict(d)
+    tag = d.get("vlan_tag")
+    if tag is None:
+        return frame
+    from dataclasses import replace
+    return replace(frame, vlan_tag=tag)
+
+
+def _untagged_frame_from_dict(d: dict[str, Any]) -> EthernetFrame:
     if d["payload_type"] == "arp":
         payload = _arp_from_dict(d["payload"])
         return EthernetFrame(

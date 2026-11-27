@@ -44,6 +44,12 @@ class RouteEntry:
         How this route was learned (connected, static, etc.).
     metric:
         Administrative distance / metric.  Lower is preferred.
+    active:
+        Whether the route is installed (usable for forwarding and shown by
+        ``show ip route``).  A static route stays configured but inactive
+        while its next hop is not reachable through a connected network,
+        mirroring IOS, which keeps the ``ip route`` line in the running
+        configuration but withdraws the route from the RIB.
     """
 
     network: IPv4Network
@@ -51,6 +57,7 @@ class RouteEntry:
     outgoing_interface: str
     source: RouteSource = RouteSource.CONNECTED
     metric: int = 0
+    active: bool = True
 
     @property
     def prefix_length(self) -> int:
@@ -140,7 +147,7 @@ class RoutingTable:
         """
         candidates = [
             r for r in self._routes
-            if destination in r.network
+            if r.active and destination in r.network
         ]
         if not candidates:
             return None
@@ -159,8 +166,37 @@ class RoutingTable:
 
     @property
     def routes(self) -> list[RouteEntry]:
-        """All routes, sorted by prefix length (longest first)."""
-        return sorted(self._routes, key=lambda r: (-r.prefix_length, r.metric))
+        """Installed (active) routes, sorted by prefix length (longest first)."""
+        return sorted(
+            (r for r in self._routes if r.active),
+            key=lambda r: (-r.prefix_length, r.metric),
+        )
+
+    @property
+    def static_routes(self) -> list[RouteEntry]:
+        """All configured static routes, installed or not."""
+        return [r for r in self._routes if r.source == RouteSource.STATIC]
+
+    def resolve_static_routes(self) -> None:
+        """
+        Re-resolve every static route against the connected routes.
+
+        A static route is installed only when its next hop falls inside a
+        connected network; its outgoing interface is taken from that
+        connected route.  Resolution is one level deep (no recursion through
+        other static routes), which covers the CCNA static-routing model.
+        """
+        connected = [r for r in self._routes if r.source == RouteSource.CONNECTED]
+        for route in self.static_routes:
+            if route.next_hop is None:
+                continue
+            matches = [c for c in connected if route.next_hop in c.network]
+            if matches:
+                best = max(matches, key=lambda c: c.prefix_length)
+                route.outgoing_interface = best.outgoing_interface
+                route.active = True
+            else:
+                route.active = False
 
     def __len__(self) -> int:
         return len(self._routes)
