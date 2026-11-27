@@ -10,13 +10,13 @@ export const metadata: Metadata = {
 export default function LoginPage() {
   return (
     <AuthShell
-      title="Sign in to NetLab Academy"
-      subtitle="Access your courses, labs and exam results."
+      title="Sign in"
+      subtitle="Welcome back. Pick up your labs, courses and exam results where you left them."
       footer={
         <>
           Don&apos;t have an account?{" "}
-          <Link href="/register" className="text-[var(--accent-primary)] hover:underline">
-            Register
+          <Link href="/register" className="font-medium text-[var(--accent-primary)] hover:underline">
+            Create one
           </Link>
         </>
       }
