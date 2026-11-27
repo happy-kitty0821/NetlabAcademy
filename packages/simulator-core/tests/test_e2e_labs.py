@@ -438,10 +438,11 @@ class TestRouterPing:
         assert "10.1.1.10" in out and "Gi0/0" in out  # learned neighbour
         assert "10.2.2.10" in out and "Gi0/1" in out
 
-    def test_switch_ping_explains_limitation(self) -> None:
+    def test_switch_ping_without_svi_explains_why(self) -> None:
         sim = vlan_lab()
         out = _cli(sim, "sw1", "ping 192.168.10.11")[0]
-        assert "Layer 2 switch" in out
+        assert "....." in out
+        assert "no management interface is up" in out
 
 
 # ---------------------------------------------------------------------------

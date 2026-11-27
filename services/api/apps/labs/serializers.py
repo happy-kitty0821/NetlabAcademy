@@ -17,6 +17,9 @@ class InterfaceSpecSerializer(serializers.Serializer):
     mac_seed = serializers.IntegerField(required=False)
     ip = serializers.CharField(required=False, allow_blank=True)
     gateway = serializers.CharField(required=False, allow_blank=True)
+    # Optional admin state.  Omitted: routers start shut down unless the
+    # interface has an IP (IOS default); everything else starts enabled.
+    shutdown = serializers.BooleanField(required=False)
 
 
 class NodeSpecSerializer(serializers.Serializer):

@@ -10,6 +10,9 @@ Responsibilities:
 - ICMP time-exceeded when TTL hits 0.
 - ICMP destination unreachable when no route exists.
 - Router-originated ping (CLI ``ping`` on a router).
+- 802.1Q subinterfaces (router-on-a-stick): ``Gi0/0.10`` with
+  ``encapsulation dot1Q 10`` sends and receives VLAN-10-tagged frames on
+  its physical parent; a ``native`` subinterface uses untagged frames.
 - CLI: ip route, show ip route.
 
 No host I/O, no sockets, no subprocess.
@@ -18,6 +21,7 @@ No host I/O, no sockets, no subprocess.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from ipaddress import IPv4Address, IPv4Network
 from typing import TYPE_CHECKING, Optional
 
@@ -135,8 +139,12 @@ class Router:
             if r.source != RouteSource.CONNECTED
         ]
 
+        # IOS installs a connected route only while the interface is
+        # up/up (administratively up AND line protocol up).
         for name, iface in self._device.interfaces.items():
-            if iface.ip_config and iface.admin_state == InterfaceState.UP:
+            if (iface.ip_config
+                    and iface.admin_state == InterfaceState.UP
+                    and iface.oper_state == InterfaceState.UP):
                 net = iface.ip_config.network
                 self._routing_table.add_connected_route(net, name)
 
@@ -169,10 +177,15 @@ class Router:
             )
             return
 
-        # Subinterfaces (router-on-a-stick) are not modelled, so a physical
-        # router interface only accepts untagged frames.
-        if frame.vlan_tag is not None:
+        # 802.1Q demultiplexing: hand the frame to the subinterface that owns
+        # its VLAN (or to the physical port when untagged and no native
+        # subinterface exists).  Frames for VLANs with no subinterface are
+        # not ours.
+        logical = self._ingress_interface(event.interface_name, frame.vlan_tag)
+        if logical is None:
             return
+        if logical != event.interface_name:
+            event = replace(event, interface_name=logical)
 
         if frame.ethertype == EthernetFrame.ETHERTYPE_ARP:
             # Router participates in ARP for its own interfaces
@@ -245,7 +258,7 @@ class Router:
         ))
 
         seq_tx = self._sim.next_seq()
-        self._sim.schedule(FrameTransmit(
+        self._schedule_tx(FrameTransmit(
             time=t, seq=seq_tx,
             device_id=self.device_id,
             interface_name=iface.name,
@@ -285,7 +298,7 @@ class Router:
         ))
 
         seq_tx = self._sim.next_seq()
-        self._sim.schedule(FrameTransmit(
+        self._schedule_tx(FrameTransmit(
             time=t, seq=seq_tx,
             device_id=self.device_id,
             interface_name=iface_name,
@@ -399,7 +412,7 @@ class Router:
 
         t = self._sim.clock + 1
         seq_tx = self._sim.next_seq()
-        self._sim.schedule(FrameTransmit(
+        self._schedule_tx(FrameTransmit(
             time=t, seq=seq_tx,
             device_id=self.device_id,
             interface_name=iface_name,
@@ -436,7 +449,7 @@ class Router:
 
         t = event.time + 1
         seq_tx = self._sim.next_seq()
-        self._sim.schedule(FrameTransmit(
+        self._schedule_tx(FrameTransmit(
             time=t, seq=seq_tx,
             device_id=self.device_id,
             interface_name=event.interface_name,
@@ -559,7 +572,7 @@ class Router:
             payload=pkt,
             frame_id=str(uuid.uuid4()),
         )
-        self._sim.schedule(FrameTransmit(
+        self._schedule_tx(FrameTransmit(
             time=t, seq=self._sim.next_seq(),
             device_id=self.device_id,
             interface_name=iface_name,
@@ -582,3 +595,36 @@ class Router:
             rtt_ticks=arrive_time - send_tick,
             drop_reason=None,
         ))
+
+    # ------------------------------------------------------------------
+    # 802.1Q subinterfaces
+    # ------------------------------------------------------------------
+
+    def _ingress_interface(self, physical: str, vlan_tag: Optional[int]) -> Optional[str]:
+        """Logical interface that receives a frame arriving on *physical*."""
+        subifs = [
+            i for i in self._device.interfaces.values()
+            if i.is_subinterface and i.parent_name == physical and i.dot1q_vlan is not None
+        ]
+        if vlan_tag is not None:
+            match = next((i for i in subifs if i.dot1q_vlan == vlan_tag and not i.dot1q_native), None)
+            return match.name if match else None
+        native = next((i for i in subifs if i.dot1q_native), None)
+        return native.name if native else physical
+
+    def _schedule_tx(self, event: FrameTransmit) -> None:
+        """
+        Schedule a transmit, translating a subinterface into its physical
+        parent plus the subinterface's 802.1Q tag (none for the native VLAN).
+        """
+        iface = self._device.interfaces.get(event.interface_name)
+        if iface is not None and iface.is_subinterface:
+            if iface.dot1q_vlan is None:
+                return  # no encapsulation configured: cannot send
+            tag = None if iface.dot1q_native else iface.dot1q_vlan
+            event = replace(
+                event,
+                interface_name=iface.parent_name,
+                frame=replace(event.frame, vlan_tag=tag),
+            )
+        self._sim.schedule(event)

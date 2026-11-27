@@ -205,7 +205,12 @@ class SimulationCLIView(APIView):
       help     — return context-sensitive ? help for the partial input
 
     Request:  { "device_id": "host-a", "command": "sh ip int b", "action": "complete" }
-    Response (execute):  { "output": "...", "prompt": "PC-A>", "mode": "user_exec" }
+    Response (execute):  { "output": "...", "prompt": "PC-A>", "mode": "user_exec",
+                           "awaiting_input": false, "input_hidden": false }
+      awaiting_input — the device is reading the next line itself (Password:,
+                       Username:, Destination filename?, Press RETURN); the
+                       terminal must send it even when empty.
+      input_hidden   — do not echo the next line (password prompts).
     Response (complete): { "completed": "show ip interface brief", "prompt": "PC-A>" }
     Response (help):      { "help": "...", "prompt": "PC-A>" }
     """
@@ -257,6 +262,8 @@ class SimulationCLIView(APIView):
             "output": output,
             "prompt": cli_session.prompt(),
             "mode":   cli_session.mode.name.lower(),
+            "awaiting_input": cli_session.pending_input is not None,
+            "input_hidden":   cli_session.input_hidden,
         })
 
 

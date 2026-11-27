@@ -30,7 +30,7 @@ import type {
   TopologyLink,
 } from "./simulation-api";
 import type { DeviceNode } from "./deviceTypes";
-import { DEFAULT_DEVICE_CATALOG } from "./deviceTypes";
+import { DEFAULT_DEVICE_CATALOG, templatePortNames } from "./deviceTypes";
 
 export type { DeviceNode };
 export type { DeviceNodeData } from "./deviceTypes";
@@ -68,7 +68,8 @@ function resolvePortName(
 
   if (entry?.interfaceTemplate) {
     const t = entry.interfaceTemplate;
-    return `${t.prefix}${t.startIndex + portIndex}`;
+    const names = templatePortNames(t);
+    return names[portIndex] ?? `${t.prefix}${t.startIndex + portIndex}`;
   }
 
   // Fallback when no catalog entry / template is present.
@@ -90,9 +91,10 @@ function generateInterfacesFromTemplate(
 
   if (entry?.interfaceTemplate) {
     const t = entry.interfaceTemplate;
+    const names = templatePortNames(t);
     const count = Math.max(portCount, model === "host" ? 1 : 2);
     return Array.from({ length: count }, (_, i) => {
-      const name = `${t.prefix}${t.startIndex + i}`;
+      const name = names[i] ?? `${t.prefix}${t.startIndex + i}`;
       const iface: { name: string; mac_seed: number; ip?: string; gateway?: string } = {
         name,
         mac_seed: nodeIdx * 10 + i,

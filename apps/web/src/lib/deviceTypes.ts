@@ -12,13 +12,30 @@ import type { Node } from "@xyflow/react";
 
 // ── Device catalog entry (defined by admin) ────────────────────────────────
 
-export interface InterfaceTemplate {
+export interface PortGroup {
   count: number;
   portType: 'FastEthernet' | 'GigabitEthernet' | 'Ethernet';
   prefix: string;        // e.g. 'Fa0/'
-  startIndex: number;    // e.g. 0
+  startIndex: number;    // e.g. 1 (Catalyst access ports start at 1)
   speedMbps: number;
   stpCost: number;
+}
+
+export interface InterfaceTemplate extends PortGroup {
+  /** Further port groups after the main one, e.g. a switch's Gi uplinks. */
+  uplinks?: PortGroup[];
+}
+
+/**
+ * Every port name a template provides, in cabling order: the main group
+ * first, then each uplink group.  Must match the backend INTERFACE_CATALOG
+ * (services/api/apps/labs/services/simulation_adapter.py).
+ */
+export function templatePortNames(t: InterfaceTemplate): string[] {
+  const groups: PortGroup[] = [t, ...(t.uplinks ?? [])];
+  return groups.flatMap((g) =>
+    Array.from({ length: g.count }, (_, i) => `${g.prefix}${g.startIndex + i}`),
+  );
 }
 
 export interface DeviceCatalogEntry {
@@ -116,13 +133,24 @@ export const DEFAULT_DEVICE_CATALOG: DeviceCatalogEntry[] = [
     icon: "switch-l2",
     simulated: true,
     description: "Layer 2 Ethernet switch. Supports MAC learning and forwarding.",
+    // Catalyst 2960-24TT: Fa0/1-0/24 access ports + Gi0/1-0/2 uplinks.
     interfaceTemplate: {
       count: 24,
       portType: "FastEthernet",
       prefix: "Fa0/",
-      startIndex: 0,
+      startIndex: 1,
       speedMbps: 100,
       stpCost: 19,
+      uplinks: [
+        {
+          count: 2,
+          portType: "GigabitEthernet",
+          prefix: "Gi0/",
+          startIndex: 1,
+          speedMbps: 1000,
+          stpCost: 4,
+        },
+      ],
     },
   },
   {

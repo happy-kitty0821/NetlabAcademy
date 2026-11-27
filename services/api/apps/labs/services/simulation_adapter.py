@@ -50,6 +50,14 @@ from simulator_core.types import DeviceModel, InterfaceState
 #   start_index — first port number, e.g. 0
 #   speed_kbps  — interface speed
 #   stp_cost    — IEEE 802.1D short-path STP cost
+#   uplinks     — optional list of further port groups with the same fields
+#                 (e.g. the 2960's two GigabitEthernet uplinks)
+#   supports_svi        — switch accepts "interface vlan N" (management SVI)
+#   supports_l3_routing — switch routes between SVIs (multilayer switch)
+#
+# Port numbering follows the real hardware: a Catalyst 2960-24TT has
+# Fa0/1-Fa0/24 plus uplinks Gi0/1-Gi0/2; a 2911 has Gi0/0-Gi0/2.
+# Keep in sync with apps/web/src/lib/deviceTypes.ts.
 # ---------------------------------------------------------------------------
 
 _InterfaceTemplateSpec = dict[str, Any]
@@ -59,9 +67,23 @@ INTERFACE_CATALOG: dict[str, _InterfaceTemplateSpec] = {
         "count": 24,
         "port_type": "FastEthernet",
         "prefix": "Fa0/",
-        "start_index": 0,
+        "start_index": 1,
         "speed_kbps": 100_000,
         "stp_cost": 19,
+        "uplinks": [
+            {
+                "count": 2,
+                "port_type": "GigabitEthernet",
+                "prefix": "Gi0/",
+                "start_index": 1,
+                "speed_kbps": 1_000_000,
+                "stp_cost": 4,
+            },
+        ],
+        # A Layer 2 2960 still has a management SVI (interface vlan N) with
+        # an IP address, but does not route between VLANs.
+        "supports_svi": True,
+        "supports_l3_routing": False,
     },
     "cisco-2911": {
         "count": 3,
@@ -110,14 +132,8 @@ def _generate_interfaces_from_catalog(
     that the same document always produces the same topology.
 
     IP and gateway from the first entry of the original JSON interface list
-    are preserved onto the first generated interface (Fa0/0, Gi0/0, eth0).
+    are preserved onto the first generated interface (Fa0/1, Gi0/0, eth0).
     """
-    prefix = template["prefix"]
-    start = template["start_index"]
-    count = template["count"]
-    speed = template["speed_kbps"]
-    stp_cost = template["stp_cost"]
-
     # Extract IP/gateway from the first original interface, if present.
     first_ip: str | None = None
     first_gw: str | None = None
@@ -125,26 +141,42 @@ def _generate_interfaces_from_catalog(
         first_ip = original_interfaces[0].get("ip") or None
         first_gw = original_interfaces[0].get("gateway") or None
 
+    groups = [template] + list(template.get("uplinks", []))
+    generated_names = [
+        f"{g['prefix']}{g['start_index'] + i}" for g in groups for i in range(g["count"])
+    ]
+    # Settings the document gives for a port by its exact name win; the
+    # legacy "first entry's IP goes on the first port" rule still applies
+    # when that entry does not name a catalog port (e.g. "eth0" on a switch).
+    by_name = {o.get("name"): o for o in original_interfaces if o.get("name") in generated_names}
+    if original_interfaces and original_interfaces[0].get("name") in by_name:
+        first_ip = first_gw = None
+
     result: list[dict[str, Any]] = []
-    for i in range(count):
-        iface_name = f"{prefix}{start + i}"
-        # Use MD5 (truncated to 31 bits) for a stable seed across process
-        # restarts.  Python's built-in hash() is PYTHONHASHSEED-randomised
-        # and would produce different MACs on every server restart.
-        mac_seed = int(hashlib.md5(
-            (node_id + iface_name).encode()
-        ).hexdigest(), 16) % (2 ** 31)
-        entry: dict[str, Any] = {
-            "name": iface_name,
-            "mac_seed": mac_seed,
-            "speed_kbps": speed,
-            "stp_cost": stp_cost,
-        }
-        if i == 0 and first_ip:
-            entry["ip"] = first_ip
-        if i == 0 and first_gw:
-            entry["gateway"] = first_gw
-        result.append(entry)
+    for group in groups:
+        for i in range(group["count"]):
+            iface_name = f"{group['prefix']}{group['start_index'] + i}"
+            # Use MD5 (truncated to 31 bits) for a stable seed across process
+            # restarts.  Python's built-in hash() is PYTHONHASHSEED-randomised
+            # and would produce different MACs on every server restart.
+            mac_seed = int(hashlib.md5(
+                (node_id + iface_name).encode()
+            ).hexdigest(), 16) % (2 ** 31)
+            entry: dict[str, Any] = {
+                "name": iface_name,
+                "mac_seed": mac_seed,
+                "speed_kbps": group["speed_kbps"],
+                "stp_cost": group["stp_cost"],
+            }
+            if not result and first_ip:
+                entry["ip"] = first_ip
+            if not result and first_gw:
+                entry["gateway"] = first_gw
+            for key in ("ip", "gateway", "shutdown"):
+                value = by_name.get(iface_name, {}).get(key)
+                if value not in (None, ""):
+                    entry[key] = value
+            result.append(entry)
     return result
 
 
@@ -256,11 +288,31 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
             if ip_str:
                 iface.set_ip(ip_str)
 
+            # IOS router interfaces ship "shutdown".  A port the lab document
+            # addresses is treated as configured (and enabled); an explicit
+            # "shutdown": true/false in the document always wins.
+            shutdown = iface_data.get("shutdown")
+            if shutdown is None:
+                shutdown = model == DeviceModel.ROUTER and not ip_str
+            if shutdown:
+                iface.admin_state = InterfaceState.DOWN
+
             gateway = iface_data.get("gateway")
             if gateway:
                 iface.set_gateway(gateway)
 
             device.add_interface(iface)
+
+        # Catalyst switches ship a Vlan1 management SVI, shut down and
+        # unaddressed ("interface vlan 1 / ip address / no shutdown").
+        if (model == DeviceModel.SWITCH and device.supports_svi
+                and "Vlan1" not in device.interfaces):
+            svi_seed = int(hashlib.md5(
+                (str(node_id) + "Vlan1").encode()
+            ).hexdigest(), 16) % (2 ** 31)
+            svi = Interface(name="Vlan1", mac=MACAddress.generate(random.Random(svi_seed)))
+            svi.admin_state = InterfaceState.DOWN
+            device.add_interface(svi)
 
         topo.add_device(device)
 

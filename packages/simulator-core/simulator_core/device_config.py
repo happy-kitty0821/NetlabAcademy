@@ -178,6 +178,10 @@ class DeviceConfig:
     enable_secret_hash: Optional[str] = None
     # enable password (type 0 — stored as hash here for safety)
     enable_password_hash: Optional[str] = None
+    # IOS keeps "enable password" in clear text (type 0) unless
+    # "service password-encryption" is on, and shows it in running-config.
+    # The simulator mirrors that so students can see why type 0 is weak.
+    enable_password_text: Optional[str] = None
     # Whether the device requires enable secret/password to enter priv EXEC
     enable_auth_required: bool = False
 
@@ -191,7 +195,7 @@ class DeviceConfig:
     )
     vty_lines: list[LineConfig] = field(
         default_factory=lambda: [
-            LineConfig(LineType.VTY, i) for i in range(5)  # vty 0 4
+            LineConfig(LineType.VTY, i) for i in range(16)  # vty 0 15 (2960/2911)
         ]
     )
     aux_line: LineConfig = field(
@@ -224,6 +228,10 @@ class DeviceConfig:
     ip_default_gateway: str = ""    # L2 switch management default gateway
     hostname_override: str = ""    # set by 'hostname' command
 
+    # Saved configuration ("copy running-config startup-config" /
+    # "write memory").  None until the first save.
+    startup_config: Optional[str] = None
+
     # ── Methods ───────────────────────────────────────────────────────────────
 
     def set_enable_secret(self, secret: str) -> None:
@@ -234,8 +242,8 @@ class DeviceConfig:
     def set_enable_password(self, password: str) -> None:
         """Set enable password (type 7 equivalent — less secure)."""
         self.enable_password_hash = hashlib.sha256(password.encode()).hexdigest()
-        if self.enable_secret_hash is None:
-            self.enable_auth_required = True
+        self.enable_password_text = password
+        self.enable_auth_required = True
 
     def check_enable(self, secret: str) -> bool:
         """Check enable secret first, then enable password."""
@@ -292,11 +300,14 @@ class DeviceConfig:
 
         lines.append("!")
 
-        # enable secret / password
+        # enable secret / password — IOS shows both when both are set
         if self.enable_secret_hash:
             lines.append(f"enable secret 5 $1$SIMULATED${self.enable_secret_hash[:22]}")
-        elif self.enable_password_hash:
-            lines.append(f"enable password 7 {self.enable_password_hash[:14]}")
+        if self.enable_password_hash:
+            if self.service_password_encryption or self.enable_password_text is None:
+                lines.append(f"enable password 7 {self.enable_password_hash[:14].upper()}")
+            else:
+                lines.append(f"enable password {self.enable_password_text}")
 
         # users
         for username, user in self.users.items():
@@ -352,46 +363,22 @@ class DeviceConfig:
         return out
 
     def _render_vty_lines(self) -> list[str]:
-        """Group consecutive VTY lines with identical config."""
-        if not self.vty_lines:
-            return []
-        # Find the first line and check if all 0-4 are the same
-        first = self.vty_lines[0]
-        same = all(
-            v.exec_timeout == first.exec_timeout
-            and v.login == first.login
-            and v.login_local == first.login_local
-            and v.transport_input == first.transport_input
-            for v in self.vty_lines
-        )
-        if same:
-            # Render as a range: "line vty 0 4"
-            start = self.vty_lines[0].line_num
-            end = self.vty_lines[-1].line_num
-            line = LineConfig(LineType.VTY, start)
-            line.exec_timeout = first.exec_timeout
-            line.login = first.login
-            line.login_local = first.login_local
-            line.transport_input = first.transport_input
-            line.logging_synchronous = first.logging_synchronous
-            line.password_hash = first.password_hash
-            out = [f"line vty {start} {end}"]
-            if line.exec_timeout != 600:
-                m, s = divmod(line.exec_timeout, 60)
-                out.append(f" exec-timeout {m} {s}")
-            if line.login_local:
-                out.append(" login local")
-            elif line.login and line.password_hash:
-                out.append(f" password 7 {line.password_hash[:14]}")
-                out.append(" login")
-            if line.logging_synchronous:
-                out.append(" logging synchronous")
-            if line.transport_input != ["all"]:
-                out.append(f" transport input {' '.join(line.transport_input)}")
-            out.append("!")
-            return out
-        # Individual lines
-        result = []
-        for v in self.vty_lines:
-            result += self._render_line(v)
-        return result
+        """
+        Render VTY lines as IOS does: consecutive lines with identical
+        settings collapse into one range ("line vty 0 4", "line vty 5 15").
+        """
+        groups: list[tuple[int, int, list[str]]] = []
+        for vty in self.vty_lines:
+            body = self._render_line(vty)[1:]   # drop the "line ..." header
+            if groups and groups[-1][2] == body and groups[-1][1] == vty.line_num - 1:
+                first, _, _ = groups[-1]
+                groups[-1] = (first, vty.line_num, body)
+            else:
+                groups.append((vty.line_num, vty.line_num, body))
+        out: list[str] = []
+        for first, last, body in groups:
+            header = f"line vty {first} {last}" if last > first else f"line vty {first}"
+            out.append(header)
+            out += body
+        return out
+

@@ -82,6 +82,10 @@ export function DeviceTerminal({
 
   // Mutable state stored in refs so the key handler closure can access them
   const promptRef = useRef(`${device.hostname ?? device.id}>`);
+  // Set from the last CLI response: the device is reading the next line
+  // itself (so an empty Enter must still be sent) and/or it is a password.
+  const awaitingRef = useRef(false);
+  const hiddenRef = useRef(false);
   const inputRef = useRef<string>("");
   const historyRef = useRef<string[]>([]);
   const histIdxRef = useRef<number>(-1);
@@ -118,14 +122,15 @@ export function DeviceTerminal({
 
       write("\r\n");
 
-      if (trimmed) {
+      // Never keep passwords in the command history.
+      if (trimmed && !hiddenRef.current) {
         historyRef.current.unshift(trimmed);
         if (historyRef.current.length > 50) historyRef.current.pop();
       }
       histIdxRef.current = -1;
       inputRef.current = "";
 
-      if (!trimmed) {
+      if (!trimmed && !awaitingRef.current) {
         write(colorPrompt(promptRef.current));
         return;
       }
@@ -136,6 +141,8 @@ export function DeviceTerminal({
         if (res.output) {
           writeLine(colorOutput(res.output));
         }
+        awaitingRef.current = Boolean(res.awaiting_input);
+        hiddenRef.current = Boolean(res.input_hidden);
         promptRef.current = res.prompt;
         setPromptState(res.prompt);
         write(colorPrompt(promptRef.current));
@@ -258,12 +265,21 @@ export function DeviceTerminal({
           return;
         }
 
-        // Backspace
+        // Backspace (silent while typing a password)
         if (ev.key === "Backspace") {
           if (inputRef.current.length > 0) {
             inputRef.current = inputRef.current.slice(0, -1);
-            term.write("\b \b");
+            if (!hiddenRef.current) term.write("\b \b");
           }
+          return;
+        }
+
+        // Password prompt: collect characters without echo, no Tab / ? / history
+        if (hiddenRef.current) {
+          if (key && key.length === 1 && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+            inputRef.current += key;
+          }
+          if (ev.key === "Tab") ev.preventDefault();
           return;
         }
 

@@ -842,8 +842,14 @@ class STPManager:
     # Show output helpers
     # ------------------------------------------------------------------
 
-    def show_spanning_tree(self, vlan_id: Optional[int] = None) -> str:
-        """Generate 'show spanning-tree' output."""
+    def show_spanning_tree(self, vlan_id: Optional[int] = None,
+                           active_ports: Optional[set] = None) -> str:
+        """
+        Generate 'show spanning-tree' output.
+
+        *active_ports*, when given, limits the port table to those ports
+        (IOS lists only ports whose line protocol is up).
+        """
         if vlan_id is not None:
             instances = [self._get_or_create_instance(vlan_id)]
         else:
@@ -854,7 +860,7 @@ class STPManager:
 
         lines = []
         for inst in instances:
-            lines += self._format_instance(inst)
+            lines += self._format_instance(inst, active_ports)
             lines.append("")
         return "\n".join(lines)
 
@@ -900,7 +906,8 @@ class STPManager:
             lines.append("")
         return "\n".join(lines) if lines else f"% {iface_name} not found in any STP instance."
 
-    def _format_instance(self, inst: STPInstance) -> list[str]:
+    def _format_instance(self, inst: STPInstance,
+                         active_ports: Optional[set] = None) -> list[str]:
         bid = inst.bridge_id
         root_bid = inst.root_bridge_id
         mode_name = {
@@ -939,7 +946,10 @@ class STPManager:
         lines.append("")
         lines.append("Interface           Role Sts Cost      Prio.Nbr Type")
         lines.append("------------------- ---- --- --------- -------- --------------------------------")
-        for name, port in sorted(inst.port_states.items()):
+        for name, port in sorted(inst.port_states.items(),
+                                 key=lambda kv: _port_sort_key(kv[0])):
+            if active_ports is not None and name not in active_ports:
+                continue
             role_abbr = {
                 PortRole.ROOT:       "Root",
                 PortRole.DESIGNATED: "Desg",
@@ -964,3 +974,9 @@ class STPManager:
                 f"{name:<19} {role_abbr:<4} {state_abbr:<3} {port.path_cost:<9} {pid:<8} {type_flags}"
             )
         return lines
+
+
+def _port_sort_key(name: str) -> tuple:
+    """Natural port order: Fa0/2 before Fa0/10 (IOS lists ports numerically)."""
+    import re
+    return tuple(int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name))
