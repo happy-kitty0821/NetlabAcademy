@@ -305,8 +305,28 @@ class STPManager:
         # re-run the network-wide election; a stand-alone manager has none.
         self.on_change: Optional[Callable[[], None]] = None
 
+        # PVST+: does a port carry a VLAN?  The switch sets this from its
+        # VLAN database and port modes (access VLAN, trunk allowed list).
+        # None (stand-alone manager) means every port carries every VLAN.
+        self.port_vlan_filter: Optional[Callable[[str, int], bool]] = None
+
+        # Set by Simulation.run_stp() for the length of one election and
+        # shared by every switch: (vlan, switch) -> switches it can reach.
+        # Links do not change during an election, so each search runs once.
+        self.reach_cache: Optional[dict[tuple[int, str], set[str]]] = None
+
         # Initialize default instance for VLAN 1
         self._get_or_create_instance(1)
+
+    def carries(self, port_name: str, vlan_id: int) -> bool:
+        """True if *port_name* carries *vlan_id* (takes part in its tree)."""
+        return self.port_vlan_filter is None or self.port_vlan_filter(port_name, vlan_id)
+
+    def _vlan_ports(self, vlan_id: int, up_ports: Optional[set[str]]) -> Optional[set[str]]:
+        """Up ports that carry *vlan_id*; None when *up_ports* is None (no filtering)."""
+        if up_ports is None:
+            return None
+        return {p for p in up_ports if self.carries(p, vlan_id)}
 
     def _changed(self) -> bool:
         """Ask the simulation to re-run the election.  False if stand-alone."""
@@ -705,7 +725,7 @@ class STPManager:
 
         # Only switches this one can reach over up links take part (a
         # switch cut off from the rest of the network elects its own root).
-        reachable = self._reachable_switches(topology, all_switches)
+        reachable = self._reachable_switches(topology, all_switches, vlan_id)
         all_bids: list[BridgeID] = [inst.bridge_id]
         for peer_id in reachable:
             peer_inst = all_switches[peer_id].get_instance(vlan_id)
@@ -719,8 +739,8 @@ class STPManager:
 
         def peer_of(port_name: str):
             """(peer STPInstance, peer port state) across an up link, or None."""
-            peer = self._find_connected_switch_port(port_name, topology)
-            if peer is None or peer[0] not in all_switches:
+            peer = self._vlan_peer(port_name, vlan_id, topology, all_switches)
+            if peer is None:
                 return None
             peer_inst = all_switches[peer[0]].get_instance(vlan_id)
             if peer_inst is None:
@@ -805,8 +825,27 @@ class STPManager:
             inst.root_path_cost = 0
             inst.root_port_name = None
 
-    def _reachable_switches(self, topology, all_switches: dict[str, "STPManager"]) -> set[str]:
-        """Other switches reachable from this one over up switch-to-switch links."""
+    def _vlan_peer(self, port_name: str, vlan_id: int, topology,
+                   all_switches: dict[str, "STPManager"]) -> Optional[tuple[str, str]]:
+        """
+        (switch id, port) across an up link on which both ends carry
+        *vlan_id* -- the link is part of that VLAN's spanning tree.
+        """
+        if not self.carries(port_name, vlan_id):
+            return None
+        peer = self._find_connected_switch_port(port_name, topology)
+        if peer is None or peer[0] not in all_switches:
+            return None
+        if not all_switches[peer[0]].carries(peer[1], vlan_id):
+            return None
+        return peer
+
+    def _reachable_switches(self, topology, all_switches: dict[str, "STPManager"],
+                            vlan_id: int) -> set[str]:
+        """Other switches reachable over up links that carry *vlan_id*."""
+        cache = self.reach_cache
+        if cache is not None and (vlan_id, self._device_id) in cache:
+            return cache[(vlan_id, self._device_id)]
         seen = {self._device_id}
         queue = [self._device_id]
         while queue:
@@ -817,10 +856,14 @@ class STPManager:
             if device is None:
                 continue
             for name in device.interfaces:
-                peer = current._find_connected_switch_port(name, topology)
-                if peer and peer[0] not in seen and peer[0] in all_switches:
+                peer = current._vlan_peer(name, vlan_id, topology, all_switches)
+                if peer and peer[0] not in seen:
                     seen.add(peer[0])
                     queue.append(peer[0])
+        if cache is not None:
+            # Everyone in the component reaches the same set of switches.
+            for member in seen:
+                cache[(vlan_id, member)] = seen - {member}
         seen.discard(self._device_id)
         return seen
 
@@ -974,16 +1017,27 @@ class STPManager:
         (IOS lists only ports whose line protocol is up).
         """
         if vlan_id is not None:
-            instances = [self._get_or_create_instance(vlan_id)]
+            inst = self._instances.get(vlan_id)
+            instances = [inst] if inst is not None else []
         else:
             instances = sorted(self._instances.values(), key=lambda i: i.vlan_id)
 
-        if not instances:
-            return "% No spanning-tree instances configured."
+        # Like IOS, a VLAN's instance is shown only while at least one up
+        # port carries that VLAN.
+        shown = []
+        for inst in instances:
+            ports = self._vlan_ports(inst.vlan_id, active_ports)
+            if ports is None or ports:
+                shown.append((inst, ports))
+
+        if not shown:
+            if vlan_id is not None:
+                return f"Spanning tree instance(s) for vlan {vlan_id} does not exist."
+            return "No spanning tree instance exists."
 
         lines = []
-        for inst in instances:
-            lines += self._format_instance(inst, active_ports)
+        for inst, ports in shown:
+            lines += self._format_instance(inst, ports)
             lines.append("")
         return "\n".join(lines)
 
@@ -995,10 +1049,12 @@ class STPManager:
         set (None counts every registered port, for stand-alone use).
         """
         def counted(inst: STPInstance) -> list[STPPortState]:
-            return [p for n, p in inst.port_states.items()
-                    if active_ports is None or n in active_ports]
+            ports = self._vlan_ports(inst.vlan_id, active_ports)
+            return [p for n, p in inst.port_states.items() if ports is None or n in ports]
 
-        instances = sorted(self._instances.values(), key=lambda i: i.vlan_id)
+        # Only VLANs with at least one up port carrying them are listed.
+        instances = [i for i in sorted(self._instances.values(), key=lambda i: i.vlan_id)
+                     if active_ports is None or counted(i)]
         root_for = [f"VLAN{i.vlan_id:04d}" for i in instances if i.is_root]
         portfast = "enabled" if self._portfast_default else "disabled"
         rule = "---------------------- -------- --------- -------- ---------- ----------"

@@ -414,9 +414,11 @@ class TestVLANSeparation:
 
     def test_separate_stp_instances_per_vlan(self) -> None:
         sim = _build_sim(self._build())
-        # Create VLAN 10 on both switches
+        # Create VLAN 10 on both switches and trunk the link so it carries VLAN 10
         sim.get_switch("sw1").create_vlan(10)
         sim.get_switch("sw2").create_vlan(10)
+        for sw in ("sw1", "sw2"):
+            sim.topology.devices[sw].interfaces["Gi0/0"].switchport_mode = "trunk"
         sim.run_stp()
 
         inst1_v1  = sim.get_switch("sw1").stp.get_instance(1)
@@ -438,6 +440,18 @@ class TestVLANSeparation:
         # but they must each be internally consistent
         assert not (inst1_v1.is_root and inst2_v1.is_root), "Only one root per VLAN instance"
         assert not (inst1_v10.is_root and inst2_v10.is_root), "Only one root per VLAN 10 instance"
+
+    def test_access_link_does_not_carry_other_vlans(self) -> None:
+        """PVST+: VLAN 10's tree does not cross an access link in VLAN 1."""
+        sim = _build_sim(self._build())
+        sim.get_switch("sw1").create_vlan(10)
+        sim.get_switch("sw2").create_vlan(10)
+        sim.run_stp()
+        assert sim.get_switch("sw1").stp.get_instance(10).is_root
+        assert sim.get_switch("sw2").stp.get_instance(10).is_root
+        # VLAN 1 still crosses the link: one root
+        assert not (sim.get_switch("sw1").stp.get_instance(1).is_root
+                    and sim.get_switch("sw2").stp.get_instance(1).is_root)
 
 
 # ---------------------------------------------------------------------------

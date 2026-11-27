@@ -248,7 +248,8 @@ class TestShowSpanningTreeSummary:
 
 class TestSTPProtocolStringConsistency:
     def _make_session(self) -> CLISession:
-        topo, sw_id = _build_switch_topology(["Gi0/0", "Gi0/1"], switch_id="sw1")
+        # IOS shows an instance only while a port is up, so cable the switch.
+        topo, _, _ = _build_two_switch_topology()
         sim = Simulation(topo, seed=42)
         s = CLISession(device_id="sw1", simulation=sim)
         s.execute("enable")
