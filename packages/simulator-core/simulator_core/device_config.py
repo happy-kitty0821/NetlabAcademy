@@ -70,9 +70,12 @@ class LogEntry:
     severity: LogSeverity
     facility: str   # e.g. "SYS", "LINE", "STP"
     message: str
+    # IOS message mnemonic (e.g. "UPDOWN"); defaults to the severity name.
+    mnemonic: str = ""
 
     def __str__(self) -> str:
-        return f"*tick {self.tick}: %{self.facility}-{self.severity.value}-{self.severity.name}: {self.message}"
+        mnemonic = self.mnemonic or self.severity.name
+        return f"*tick {self.tick}: %{self.facility}-{self.severity.value}-{mnemonic}: {self.message}"
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +270,11 @@ class DeviceConfig:
         return user is not None and user.check_password(password)
 
     def add_log(self, tick: int, severity: LogSeverity,
-                facility: str, message: str) -> None:
+                facility: str, message: str, mnemonic: str = "") -> None:
         """Add a log entry to the buffer if severity meets the threshold."""
         if severity.value <= self.logging_buffered_level.value:
             entry = LogEntry(tick=tick, severity=severity,
-                             facility=facility, message=message)
+                             facility=facility, message=message, mnemonic=mnemonic)
             self.log_buffer.append(entry)
             # Cap buffer size
             if len(self.log_buffer) > self.logging_buffered_size // 100:

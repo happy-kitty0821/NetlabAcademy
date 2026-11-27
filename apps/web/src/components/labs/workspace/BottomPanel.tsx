@@ -1,346 +1,261 @@
 "use client";
 
 /**
- * BottomPanel — CML-style bottom panel.
+ * BottomPanel — CML-style tabbed pane under the canvas.
  *
- * Shows:
- *  - Terminal tab: xterm.js CLI for the selected device
- *  - Logs tab:     simulation event trace
+ *  - One console tab per device the user opened (double-click a device or
+ *    use "Console" in the inspector). Consoles stay connected while hidden
+ *    so their scrollback and history survive tab switches.
+ *  - Lab log: every device's syslog (link up/down, config changes), live.
+ *  - Packet trace: the simulator's event trace from pings.
  *
- * Collapsible (click tab bar to toggle), resizable by dragging the top edge.
- * Sits at the bottom of the workspace, below the canvas.
+ * Collapsible and resizable from its top edge.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal, Activity, ChevronDown, ChevronUp } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, ChevronDown, ChevronUp, ScrollText, Terminal, X } from "lucide-react";
 import { DeviceTerminal } from "@/components/labs/DeviceTerminal";
-import { PingPanel }      from "@/components/labs/PingPanel";
-import type { DeviceNode }   from "@/lib/deviceTypes";
-import type { TopologyNode, TraceEvent } from "@/lib/simulation-api";
+import { PingPanel } from "@/components/labs/PingPanel";
+import type { DeviceNode } from "@/lib/deviceTypes";
+import type { SyslogEntry, TopologyNode, TraceEvent } from "@/lib/simulation-api";
 import type { SimState } from "@/app/(dashboard)/labs/workspace/page";
 
-type BottomTab = "terminal" | "logs";
+export type BottomTab = "log" | "trace" | `console:${string}`;
 
 interface BottomPanelProps {
-  selectedNode:  DeviceNode | null;
-  sessionId:     string | null;
-  simState:      SimState;
-  trace:         TraceEvent[];
-  onTraceUpdate: (t: TraceEvent[]) => void;
+  nodes:          DeviceNode[];
+  consoles:       string[];               // device ids with an open console
+  tab:            BottomTab;
+  open:           boolean;
+  onOpenChange:   (open: boolean) => void;
+  onTabChange:    (tab: BottomTab) => void;
+  onCloseConsole: (deviceId: string) => void;
+  sessionId:      string | null;
+  simState:       SimState;
+  syslog:         SyslogEntry[];
+  trace:          TraceEvent[];
+  onTraceUpdate:  (t: TraceEvent[]) => void;
 }
 
 const DEFAULT_HEIGHT = 260;
-const MIN_HEIGHT     = 120;
-const MAX_HEIGHT     = 600;
+const MIN_HEIGHT = 120;
+const MAX_HEIGHT = 600;
 
 export function BottomPanel({
-  selectedNode, sessionId, simState, trace, onTraceUpdate,
+  nodes, consoles, tab, open, onOpenChange, onTabChange, onCloseConsole,
+  sessionId, simState, syslog, trace, onTraceUpdate,
 }: BottomPanelProps) {
-  const [open,   setOpen]   = useState(false);
-  const [tab,    setTab]    = useState<BottomTab>("terminal");
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
   const dragging = useRef(false);
-  const startY   = useRef(0);
-  const startH   = useRef(0);
-  const isRunning = simState === "running";
+  const startY = useRef(0);
+  const startH = useRef(0);
+  const running = simState === "running" && !!sessionId;
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
-  // Open panel when a node is selected or sim starts
-  useEffect(() => {
-    if (selectedNode) setOpen(true);
-  }, [selectedNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Drag-resize from top edge ─────────────────────────────────────────────
   const onDragStart = useCallback((e: React.MouseEvent) => {
     dragging.current = true;
-    startY.current   = e.clientY;
-    startH.current   = height;
+    startY.current = e.clientY;
+    startH.current = height;
     e.preventDefault();
   }, [height]);
 
   useEffect(() => {
-    function onMove(e: MouseEvent) {
+    const onMove = (e: MouseEvent) => {
       if (!dragging.current) return;
-      const delta = startY.current - e.clientY;
-      setHeight(Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, startH.current + delta)));
-    }
-    function onUp() { dragging.current = false; }
+      setHeight(Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, startH.current + (startY.current - e.clientY))));
+    };
+    const onUp = () => { dragging.current = false; };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
 
-  // ── Tab bar ───────────────────────────────────────────────────────────────
-  const TABS: { id: BottomTab; icon: React.ElementType; label: string; badge?: number }[] = [
-    { id: "terminal", icon: Terminal, label: "Terminal" },
-    { id: "logs",     icon: Activity, label: "Event Log",
-      badge: trace.length > 0 ? trace.length : undefined },
-  ];
-
-  const deviceLabel = selectedNode
-    ? String(selectedNode.data.hostname || selectedNode.id)
-    : null;
+  const select = (t: BottomTab) => { onTabChange(t); onOpenChange(true); };
 
   return (
-    <div
-      style={{
-        background:   "#ffffff",
-        borderTop:    "1px solid #d0d7de",
-        flexShrink:   0,
-        display:      "flex",
-        flexDirection:"column",
-      }}
-    >
-      {/* Resize handle */}
+    <div className="flex shrink-0 flex-col border-t border-[#d0d7de] bg-white">
       {open && (
-        <div
-          onMouseDown={onDragStart}
-          style={{
-            height: 4, cursor: "row-resize", background: "transparent",
-            borderTop: "2px solid transparent",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.borderTopColor = "#0969da"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.borderTopColor = "transparent"; }}
-        />
+        <div onMouseDown={onDragStart} title="Drag to resize"
+          className="h-1 cursor-row-resize border-t-2 border-transparent hover:border-[#0969da]" />
       )}
 
-      {/* Tab bar */}
-      <div style={{
-        display:        "flex",
-        alignItems:     "center",
-        height:         36,
-        padding:        "0 12px",
-        gap:            4,
-        borderBottom:   open ? "1px solid #d0d7de" : "none",
-        background:     "#f6f8fa",
-        userSelect:     "none",
-      }}>
-        {/* Tabs */}
-        {TABS.map(({ id, icon: Icon, label, badge }) => (
-          <button
-            key={id}
-            onClick={() => { setTab(id); setOpen(true); }}
-            style={{
-              display:      "flex",
-              alignItems:   "center",
-              gap:          5,
-              padding:      "4px 10px",
-              borderRadius: 5,
-              fontSize:     12,
-              fontWeight:   tab === id && open ? 600 : 400,
-              color:        tab === id && open ? "#0969da" : "#656d76",
-              background:   tab === id && open ? "#ddf4ff" : "transparent",
-              border:       "none",
-              cursor:       "pointer",
-              transition:   "color 0.15s, background 0.15s",
-            }}
-          >
-            <Icon size={12} />
-            {label}
-            {badge !== undefined && (
-              <span style={{
-                fontSize: 10, fontWeight: 700, padding: "1px 5px",
-                borderRadius: 10, background: "#ddf4ff", color: "#0969da",
-              }}>
-                {badge}
-              </span>
-            )}
-          </button>
-        ))}
-
-        {/* Device label */}
-        {deviceLabel && (
-          <span style={{
-            fontSize: 11, color: "#9198a1", fontFamily: "monospace",
-            marginLeft: 4, padding: "2px 7px",
-            background: "#f0f2f4", borderRadius: 4,
-          }}>
-            {deviceLabel}
-          </span>
-        )}
-
-        <div style={{ flex: 1 }} />
-
-        {/* Toggle open/close */}
-        <button
-          onClick={() => setOpen((v) => !v)}
-          style={{
-            display: "flex", alignItems: "center", gap: 4,
-            padding: "4px 8px", borderRadius: 5, fontSize: 11,
-            color: "#656d76", background: "transparent", border: "none", cursor: "pointer",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "#f0f2f4"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-          title={open ? "Collapse panel" : "Expand panel"}
-        >
+      {/* Tab strip */}
+      <div className="flex h-9 select-none items-center gap-1 overflow-x-auto bg-[#f6f8fa] px-2"
+        style={{ borderBottom: open ? "1px solid #d0d7de" : "none" }}>
+        {consoles.map((id) => {
+          const name = String(byId.get(id)?.data.hostname ?? id);
+          const key: BottomTab = `console:${id}`;
+          const active = open && tab === key;
+          return (
+            <div key={id} className={"flex shrink-0 items-center rounded " + (active ? "bg-white shadow-[inset_0_0_0_1px_#d0d7de]" : "")}>
+              <button onClick={() => select(key)}
+                className={"flex items-center gap-1.5 py-1 pl-2.5 pr-1 font-mono text-xs " + (active ? "font-semibold text-[#0969da]" : "text-[#656d76] hover:text-[#1f2328]")}>
+                <Terminal size={12} aria-hidden="true" /> {name}
+              </button>
+              <button onClick={() => onCloseConsole(id)} aria-label={`Close ${name} console`}
+                className="mr-1 rounded p-0.5 text-[#9198a1] hover:bg-[#eaeef2] hover:text-[#1f2328]">
+                <X size={11} />
+              </button>
+            </div>
+          );
+        })}
+        {consoles.length > 0 && <span className="mx-1 h-4 w-px shrink-0 bg-[#d0d7de]" />}
+        <TabButton active={open && tab === "log"} onClick={() => select("log")} icon={ScrollText}
+          label="Lab log" count={syslog.length} />
+        <TabButton active={open && tab === "trace"} onClick={() => select("trace")} icon={Activity}
+          label="Packet trace" count={trace.length} />
+        <div className="flex-1" />
+        <button onClick={() => onOpenChange(!open)} title={open ? "Collapse" : "Expand"}
+          className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-[#656d76] hover:bg-[#eaeef2]">
           {open ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
           {open ? "Hide" : "Show"}
         </button>
       </div>
 
-      {/* Panel body */}
-      {open && (
-        <div style={{ height, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          {tab === "terminal" && (
-            <TerminalPane
-              selectedNode={selectedNode}
-              sessionId={sessionId}
-              isRunning={isRunning}
-              onTraceUpdate={onTraceUpdate}
-            />
-          )}
-          {tab === "logs" && (
-            <LogsPane trace={trace} />
-          )}
-        </div>
-      )}
+      {/* Body — consoles stay mounted (hidden) so they keep their state */}
+      <div style={{ height: open ? height : 0 }} className="relative overflow-hidden">
+        {consoles.map((id) => {
+          const node = byId.get(id);
+          const visible = open && tab === `console:${id}`;
+          return (
+            <div key={id} className="absolute inset-0 flex flex-col" style={{ display: visible ? "flex" : "none" }}>
+              {!running || !node ? (
+                <Empty icon={Terminal}>
+                  The lab is not running. Click <strong className="text-[#1a7f37]">Start</strong> to connect
+                  to {String(node?.data.hostname ?? id)}.
+                </Empty>
+              ) : (
+                <ConsolePane node={node} sessionId={sessionId!} onTraceUpdate={onTraceUpdate} />
+              )}
+            </div>
+          );
+        })}
+        {open && tab === "log" && <LabLogPane entries={syslog} running={running} />}
+        {open && tab === "trace" && <TracePane trace={trace} />}
+        {open && tab.startsWith("console:") && !consoles.includes(tab.slice(8)) && (
+          <Empty icon={Terminal}>Double-click a device to open its console.</Empty>
+        )}
+      </div>
     </div>
   );
 }
 
-// ── Terminal pane ─────────────────────────────────────────────────────────────
-
-function TerminalPane({
-  selectedNode, sessionId, isRunning, onTraceUpdate,
-}: {
-  selectedNode:  DeviceNode | null;
-  sessionId:     string | null;
-  isRunning:     boolean;
-  onTraceUpdate: (t: TraceEvent[]) => void;
+function TabButton({ active, onClick, icon: Icon, label, count }: {
+  active: boolean; onClick: () => void; icon: React.ElementType; label: string; count: number;
 }) {
-  if (!selectedNode) {
-    return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center", gap: 8,
-        color: "#9198a1", padding: 24 }}>
-        <Terminal size={20} />
-        <p style={{ fontSize: 12, margin: 0, fontFamily: "monospace" }}>
-          Click a device on the canvas to open its terminal
-        </p>
-      </div>
-    );
-  }
+  return (
+    <button onClick={onClick}
+      className={"flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs " +
+        (active ? "bg-white font-semibold text-[#0969da] shadow-[inset_0_0_0_1px_#d0d7de]" : "text-[#656d76] hover:text-[#1f2328]")}>
+      <Icon size={12} aria-hidden="true" /> {label}
+      {count > 0 && <span className="font-mono text-[10px] text-[#9198a1]">{count}</span>}
+    </button>
+  );
+}
 
-  if (!isRunning || !sessionId) {
-    return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center", gap: 8,
-        color: "#9198a1", padding: 24, textAlign: "center" }}>
-        <Terminal size={20} />
-        <p style={{ fontSize: 12, margin: 0, fontFamily: "monospace", lineHeight: 1.6 }}>
-          Click <strong style={{ color: "#1a7f37" }}>Start</strong> to bring up the simulation,<br />
-          then the terminal for <strong style={{ color: "#1f2328" }}>
-            {String(selectedNode.data.hostname || selectedNode.id)}
-          </strong> will open here.
-        </p>
-      </div>
-    );
-  }
+function Empty({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-xs text-[#9198a1]">
+      <Icon size={18} aria-hidden="true" />
+      <p>{children}</p>
+    </div>
+  );
+}
 
+function ConsolePane({ node, sessionId, onTraceUpdate }: {
+  node: DeviceNode; sessionId: string; onTraceUpdate: (t: TraceEvent[]) => void;
+}) {
   const topoNode: TopologyNode = {
-    id:         selectedNode.id,
-    model:      selectedNode.data.model as TopologyNode["model"],
-    hostname:   String(selectedNode.data.hostname ?? selectedNode.id),
+    id: node.id,
+    model: node.data.model as TopologyNode["model"],
+    hostname: String(node.data.hostname ?? node.id),
     interfaces: [],
   };
-
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      {selectedNode.data.model === "host" && (
-        <div style={{ padding: "6px 12px", borderBottom: "1px solid #d0d7de", background: "#f6f8fa" }}>
+    <>
+      {node.data.model === "host" && (
+        <div className="border-b border-[#d0d7de] bg-[#f6f8fa] px-3 py-1.5">
           <PingPanel sessionId={sessionId} onTraceUpdate={onTraceUpdate} />
         </div>
       )}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <DeviceTerminal
-          key={`${selectedNode.id}-${sessionId}`}
-          sessionId={sessionId}
-          device={topoNode}
-          onClose={() => {}}
-        />
+      <div className="min-h-0 flex-1">
+        <DeviceTerminal key={`${node.id}-${sessionId}`} sessionId={sessionId} device={topoNode} onClose={() => {}} />
+      </div>
+    </>
+  );
+}
+
+/** Link changes read by meaning (up green, down red); others by severity. */
+function messageColor(e: SyslogEntry): string {
+  if (/changed state to up$/.test(e.message)) return "#1a7f37";
+  if (/changed state to (administratively )?down$/.test(e.message)) return "#d1242f";
+  return e.severity <= 3 ? "#d1242f" : e.severity === 4 ? "#9a6700" : "#656d76";
+}
+
+function LabLogPane({ entries, running }: { entries: SyslogEntry[]; running: boolean }) {
+  const [device, setDevice] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+  const devices = useMemo(() => Array.from(new Set(entries.map((e) => e.hostname))).sort(), [entries]);
+  const shown = device ? entries.filter((e) => e.hostname === device) : entries;
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [shown.length]);
+
+  if (entries.length === 0) {
+    return (
+      <Empty icon={ScrollText}>
+        {running ? "No messages yet. Connect or shut down an interface to see link events."
+                 : "Start the lab to see device logs (link up/down, configuration changes)."}
+      </Empty>
+    );
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-[#eaeef2] px-3 py-1 text-xs text-[#656d76]">
+        <label htmlFor="lab-log-device">Device</label>
+        <select id="lab-log-device" value={device} onChange={(e) => setDevice(e.target.value)}
+          className="rounded border border-[#d0d7de] bg-white px-1.5 py-0.5 text-xs text-[#1f2328]">
+          <option value="">All</option>
+          {devices.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <span className="ml-auto">{shown.length} messages</span>
+      </div>
+      <div className="flex-1 overflow-y-auto font-mono text-[11.5px] leading-5">
+        {shown.map((e) => (
+          <div key={e.seq} className="flex gap-3 border-b border-[#f6f8fa] px-3 hover:bg-[#f6f8fa]">
+            <span className="w-14 shrink-0 text-right text-[#9198a1]">{e.tick}</span>
+            <span className="w-20 shrink-0 truncate font-semibold text-[#1f2328]">{e.hostname}</span>
+            <span style={{ color: messageColor(e) }}>{e.text}</span>
+          </div>
+        ))}
+        <div ref={endRef} />
       </div>
     </div>
   );
 }
 
-// ── Logs / event trace pane ───────────────────────────────────────────────────
-
-function LogsPane({ trace }: { trace: TraceEvent[] }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [trace.length]);
-
-  if (trace.length === 0) {
-    return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center", gap: 8,
-        color: "#9198a1", padding: 24 }}>
-        <Activity size={20} />
-        <p style={{ fontSize: 12, margin: 0, fontFamily: "monospace" }}>
-          Run a ping to see event trace
-        </p>
-      </div>
-    );
-  }
-
-  const TYPE_COLOR: Record<string, string> = {
-    arp_request:   "#9a6700",
-    arp_reply:     "#1a7f37",
-    icmp_echo:     "#0969da",
-    icmp_reply:    "#0969da",
-    frame_forward: "#656d76",
-    mac_learned:   "#6639ba",
-    stp:           "#d1242f",
-  };
-
+function TracePane({ trace }: { trace: TraceEvent[] }) {
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [trace.length]);
+  if (trace.length === 0) return <Empty icon={Activity}>Run a ping from a PC console to see its packet trace.</Empty>;
   return (
-    <div style={{ flex: 1, overflowY: "auto", fontFamily: "monospace",
-      fontSize: 11, background: "#0d1117", color: "#e6edf3" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead style={{ position: "sticky", top: 0, background: "#161b22", zIndex: 1 }}>
-          <tr>
-            {["T", "Type", "Device", "Detail"].map((h) => (
-              <th key={h} style={{ textAlign: "left", padding: "4px 10px",
-                color: "#656d76", fontSize: 9, fontWeight: 700,
-                letterSpacing: "0.08em", textTransform: "uppercase",
-                borderBottom: "1px solid #30363d" }}>
-                {h}
-              </th>
-            ))}
-          </tr>
+    <div className="h-full overflow-y-auto font-mono text-[11.5px]">
+      <table className="w-full border-collapse">
+        <thead className="sticky top-0 bg-[#f6f8fa] text-left text-[10px] uppercase tracking-wide text-[#656d76]">
+          <tr>{["Tick", "Event", "Device", "Detail"].map((h) => <th key={h} className="border-b border-[#d0d7de] px-3 py-1 font-semibold">{h}</th>)}</tr>
         </thead>
         <tbody>
-          {trace.map((ev, i) => {
-            const color = TYPE_COLOR[ev.type] ?? "#656d76";
-            const device = ev.device_id ?? ev.switch_id ?? ev.src_device_id ?? "";
-            const detail = ev.ip_address ?? ev.mac_address ?? ev.target_ip
-              ?? ev.sender_ip ?? ev.reason ?? ev.message_type ?? "";
-            return (
-              <tr key={i} style={{ borderBottom: "1px solid #21262d" }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "#161b22"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
-                <td style={{ padding: "3px 10px", color: "#484f58", width: 50 }}>
-                  {ev.time}
-                </td>
-                <td style={{ padding: "3px 10px", color, fontWeight: 600, whiteSpace: "nowrap" }}>
-                  {ev.type.replace(/_/g, " ")}
-                </td>
-                <td style={{ padding: "3px 10px", color: "#8b949e", width: 100 }}>
-                  {device}
-                </td>
-                <td style={{ padding: "3px 10px", color: "#e6edf3" }}>
-                  {detail}
-                </td>
-              </tr>
-            );
-          })}
+          {trace.map((ev, i) => (
+            <tr key={i} className="border-b border-[#f6f8fa] hover:bg-[#f6f8fa]">
+              <td className="w-14 px-3 py-0.5 text-[#9198a1]">{ev.time}</td>
+              <td className="whitespace-nowrap px-3 py-0.5 font-semibold text-[#0969da]">{ev.type}</td>
+              <td className="px-3 py-0.5 text-[#1f2328]">{ev.device_id ?? ev.switch_id ?? ev.src_device_id ?? ""}</td>
+              <td className="px-3 py-0.5 text-[#656d76]">
+                {[ev.interface_name, ev.ip_address ?? ev.target_ip ?? ev.sender_ip, ev.mac_address, ev.reason].filter(Boolean).join("  ")}
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
-      <div ref={bottomRef} />
+      <div ref={endRef} />
     </div>
   );
 }

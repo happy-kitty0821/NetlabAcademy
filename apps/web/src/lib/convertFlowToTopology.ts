@@ -31,6 +31,7 @@ import type {
 } from "./simulation-api";
 import type { DeviceNode } from "./deviceTypes";
 import { DEFAULT_DEVICE_CATALOG, templatePortNames } from "./deviceTypes";
+import { cablePorts, normalizeEdges, type CableData } from "./edgeLabels";
 
 export type { DeviceNode };
 export type { DeviceNodeData } from "./deviceTypes";
@@ -53,28 +54,6 @@ export interface ConversionResult {
    * Use this to stamp labels onto React Flow edges after conversion.
    */
   ifaceMap: Map<string, string>;
-}
-
-// ── Helper: resolve interface name for a node's n-th port ─────────────────────
-
-function resolvePortName(
-  catalogId: string | undefined,
-  model: "host" | "switch" | "router",
-  portIndex: number,
-): string {
-  const entry = catalogId
-    ? DEFAULT_DEVICE_CATALOG.find((e) => e.id === catalogId)
-    : undefined;
-
-  if (entry?.interfaceTemplate) {
-    const t = entry.interfaceTemplate;
-    const names = templatePortNames(t);
-    return names[portIndex] ?? `${t.prefix}${t.startIndex + portIndex}`;
-  }
-
-  // Fallback when no catalog entry / template is present.
-  if (model === "host") return "eth0";
-  return `Gi0/${portIndex}`;
 }
 
 // ── Helper: generate the full interface list for a node from its template ─────
@@ -133,35 +112,40 @@ export function convertFlowToTopology(
 
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-  // ── Phase 1: pre-assign interface names ────────────────────────────────────
+  // ── Phase 1: ports chosen for each cable ────────────────────────────────────
+  // Each edge records the interface used at each end (data.ifaceA on the
+  // source, data.ifaceB on the target), chosen in the link dialog.  Older
+  // edges are normalised first so they get real, free port names.
+  const cabled = normalizeEdges(nodes, edges);
   const ifaceAssignment = new Map<string, string>();
   const switchPortCounter = new Map<string, number>();
+  const seenPorts = new Map<string, string>(); // "node:port" -> edge id
 
-  for (const edge of edges) {
-    if (!nodeMap.has(edge.source)) {
-      throw new TopologyValidationError(
-        `A link references device "${edge.source}" which does not exist.`,
-      );
-    }
-    if (!nodeMap.has(edge.target)) {
-      throw new TopologyValidationError(
-        `A link references device "${edge.target}" which does not exist.`,
-      );
-    }
-
-    function assignIface(nodeId: string): string {
-      const node = nodeMap.get(nodeId)!;
-      if (node.data.model === "host") {
-        // Hosts always use their first port (eth0 or template port 0).
-        return resolvePortName(node.data.catalogId, "host", 0);
+  for (const edge of cabled) {
+    for (const nodeId of [edge.source, edge.target]) {
+      if (!nodeMap.has(nodeId)) {
+        throw new TopologyValidationError(
+          `A link references device "${nodeId}" which does not exist.`,
+        );
       }
-      const current = switchPortCounter.get(nodeId) ?? 0;
-      switchPortCounter.set(nodeId, current + 1);
-      return resolvePortName(node.data.catalogId, node.data.model, current);
     }
-
-    ifaceAssignment.set(`${edge.source}:${edge.id}`, assignIface(edge.source));
-    ifaceAssignment.set(`${edge.target}:${edge.id}`, assignIface(edge.target));
+    const data = (edge.data ?? {}) as CableData;
+    const ends: [string, string | undefined][] = [[edge.source, data.ifaceA], [edge.target, data.ifaceB]];
+    for (const [nodeId, port] of ends) {
+      const host = nodeMap.get(nodeId)!.data.hostname || nodeId;
+      if (!port) {
+        throw new TopologyValidationError(`${host} has no free port left for one of its cables.`);
+      }
+      const key = `${nodeId}:${port}`;
+      if (seenPorts.has(key)) {
+        throw new TopologyValidationError(`${host} ${port} is used by two cables.`);
+      }
+      seenPorts.set(key, edge.id);
+      ifaceAssignment.set(`${nodeId}:${edge.id}`, port);
+    }
+  }
+  for (const node of nodes) {
+    switchPortCounter.set(node.id, cablePorts(node).length);
   }
 
   // ── Phase 2: build TopologyNodes ───────────────────────────────────────────
@@ -212,7 +196,7 @@ export function convertFlowToTopology(
 
   // ── Phase 3: build TopologyLinks ───────────────────────────────────────────
 
-  const topologyLinks: TopologyLink[] = edges.map((edge) => {
+  const topologyLinks: TopologyLink[] = cabled.map((edge) => {
     const ifaceA = ifaceAssignment.get(`${edge.source}:${edge.id}`)!;
     const ifaceB = ifaceAssignment.get(`${edge.target}:${edge.id}`)!;
 

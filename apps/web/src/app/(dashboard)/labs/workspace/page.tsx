@@ -11,6 +11,7 @@ import {
   useNodesState,
   useEdgesState,
   SelectionMode,
+  ConnectionMode,
   type Connection,
   type Edge,
   type Node,
@@ -19,22 +20,26 @@ import "@xyflow/react/dist/base.css";
 
 import { nodeTypes }         from "@/components/labs/FlowNodes";
 import { edgeTypes }         from "@/components/labs/FlowEdge";
-import { stampEdgeLabels }   from "@/lib/edgeLabels";
+import { normalizeEdges }    from "@/lib/edgeLabels";
 import { convertFlowToTopology, TopologyValidationError } from "@/lib/convertFlowToTopology";
 import type { DeviceNode }   from "@/lib/convertFlowToTopology";
 import type { DeviceNodeData } from "@/lib/deviceTypes";
 import { DEFAULT_DEVICE_CATALOG } from "@/lib/deviceTypes";
-import { createSimulation, resetSimulation } from "@/lib/simulation-api";
+import {
+  addSimulationLink, createSimulation, getSyslog, removeSimulationLink, resetSimulation,
+} from "@/lib/simulation-api";
 import {
   canvasForSaving, createLab, getLab, isLabId, labErrorText, updateLab,
 } from "@/lib/lab-api";
-import type { TopologyDocument, TopologyNode, TraceEvent } from "@/lib/simulation-api";
+import type { SyslogEntry, TopologyDocument, TraceEvent } from "@/lib/simulation-api";
 
 import { WorkspaceToolbar } from "@/components/labs/workspace/WorkspaceToolbar";
 import { DevicePalette }    from "@/components/labs/workspace/DevicePalette";
 import { NodeConfigPopup }  from "@/components/labs/workspace/NodeConfigPopup";
-import { NodeSidePanel }    from "@/components/labs/workspace/NodeSidePanel";
-import { BottomPanel }      from "@/components/labs/workspace/BottomPanel";
+import { InspectorPanel, type Selection } from "@/components/labs/workspace/InspectorPanel";
+import { BottomPanel, type BottomTab } from "@/components/labs/workspace/BottomPanel";
+import { LinkDialog }       from "@/components/labs/workspace/LinkDialog";
+import { LabRunningContext } from "@/components/labs/FlowNodes";
 import { SaveLabDialog }    from "@/components/labs/workspace/SaveLabDialog";
 
 export type SimState = "stopped" | "starting" | "running" | "stopping";
@@ -222,23 +227,65 @@ export default function WorkspacePage() {
   // Persist on every change
   useEffect(() => { saveCanvas(nodes, edges); }, [nodes, edges]);
 
-  // Re-stamp interface labels when node count changes
+  // Every cable must name a real, free port at each end (older saved labs
+  // are migrated here); normalizeEdges returns the same array if unchanged.
   useEffect(() => {
-    setEdges((eds) => stampEdgeLabels(nodes, eds));
+    if (nodes.length === 0) return;
+    setEdges((eds) => normalizeEdges(nodes, eds));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes.length]);
+  }, [nodes.length, edges.length]);
 
   // ── Sim state ──────────────────────────────────────────────────────────────
   const [simState,  setSimState]  = useState<SimState>("stopped");
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [topology,  setTopology]  = useState<TopologyDocument | null>(null);
+  const [,          setTopology]  = useState<TopologyDocument | null>(null);
   const [simError,  setSimError]  = useState<string | null>(null);
   const [trace,     setTrace]     = useState<TraceEvent[]>([]);
 
-  // ── Selection ──────────────────────────────────────────────────────────────
-  const [selectedNode, setSelectedNode] = useState<DeviceNode | null>(null);
-  const [configNode,   setConfigNode]   = useState<DeviceNode | null>(null);
-  const [rightTab,     setRightTab]     = useState<"properties" | "interfaces">("properties");
+  // ── Selection, consoles, logs ──────────────────────────────────────────────
+  const [selection,   setSelection]   = useState<Selection>({ kind: "lab" });
+  const [configNode,  setConfigNode]  = useState<DeviceNode | null>(null);
+  const [consoles,    setConsoles]    = useState<string[]>([]);
+  const [bottomTab,   setBottomTab]   = useState<BottomTab>("log");
+  const [bottomOpen,  setBottomOpen]  = useState(false);
+  const [syslog,      setSyslog]      = useState<SyslogEntry[]>([]);
+  const syslogSeqRef = useRef(0);
+
+  // Cable being created: the link dialog picks a port at each end.
+  const [pendingLink, setPendingLink] = useState<{ source: string; target: string;
+    sourceHandle?: string | null; targetHandle?: string | null } | null>(null);
+  const [linkBusy,  setLinkBusy]  = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+
+  const running = simState === "running" && !!sessionId;
+
+  const openConsole = useCallback((deviceId: string) => {
+    setConsoles((list) => (list.includes(deviceId) ? list : [...list, deviceId]));
+    setBottomTab(`console:${deviceId}`);
+    setBottomOpen(true);
+  }, []);
+
+  const closeConsole = useCallback((deviceId: string) => {
+    setConsoles((list) => list.filter((id) => id !== deviceId));
+    setBottomTab((t) => (t === `console:${deviceId}` ? "log" : t));
+  }, []);
+
+  // Lab log: poll the simulation's syslog while it runs.
+  useEffect(() => {
+    if (!running) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const res = await getSyslog(sessionId!, syslogSeqRef.current);
+        if (stopped) return;
+        syslogSeqRef.current = res.last_seq;
+        if (res.entries.length) setSyslog((list) => [...list, ...res.entries].slice(-1000));
+      } catch { /* retried next tick */ }
+    };
+    void poll();
+    const id = window.setInterval(() => { void poll(); }, 1500);
+    return () => { stopped = true; window.clearInterval(id); };
+  }, [running, sessionId]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rfInstanceRef = useRef<any>(null);
@@ -246,10 +293,61 @@ export default function WorkspacePage() {
 
   // ── Connect wire ──────────────────────────────────────────────────────────
   const onConnect = useCallback((conn: Connection) => {
-    setEdges((eds) => stampEdgeLabels(nodes, addEdge(
-      { ...conn, id: `e-${Date.now()}`, type: "lab", data: { active: true } }, eds,
-    )));
-  }, [nodes, setEdges]);
+    if (!conn.source || !conn.target || conn.source === conn.target) return;
+    setLinkError(null);
+    setPendingLink({ source: conn.source, target: conn.target,
+                     sourceHandle: conn.sourceHandle, targetHandle: conn.targetHandle });
+  }, []);
+
+  const confirmLink = useCallback(async (ifaceA: string, ifaceB: string) => {
+    if (!pendingLink) return;
+    const id = `e-${Date.now()}`;
+    if (running) {
+      setLinkBusy(true);
+      try {
+        await addSimulationLink(sessionId!, {
+          id, device_a: pendingLink.source, interface_a: ifaceA,
+          device_b: pendingLink.target, interface_b: ifaceB,
+        });
+      } catch (err) {
+        setLinkError((err as { error?: { message?: string } })?.error?.message
+          ?? "The running lab did not accept this link.");
+        setLinkBusy(false);
+        return;
+      }
+      setLinkBusy(false);
+    }
+    setEdges((eds) => addEdge({
+      id, source: pendingLink.source, target: pendingLink.target,
+      sourceHandle: pendingLink.sourceHandle, targetHandle: pendingLink.targetHandle,
+      type: "lab", data: { ifaceA, ifaceB, labelA: ifaceA, labelB: ifaceB, active: true },
+    }, eds));
+    setPendingLink(null);
+  }, [pendingLink, running, sessionId, setEdges]);
+
+  const deleteEdge = useCallback(async (edgeId: string) => {
+    if (running) {
+      try { await removeSimulationLink(sessionId!, edgeId); }
+      catch { /* not in the running lab (added while stopped): just remove it */ }
+    }
+    setEdges((eds) => eds.filter((e) => e.id !== edgeId));
+    setSelection({ kind: "lab" });
+  }, [running, sessionId, setEdges]);
+
+  // Keyboard deletion: unplug cables in the running lab too, and keep
+  // devices while it runs (the running lab cannot drop a device).
+  const onBeforeDelete = useCallback(async ({ nodes: ns }: { nodes: Node[]; edges: Edge[] }) => {
+    if (running && ns.length) {
+      setSimError("Stop the lab before removing devices.");
+      return false;
+    }
+    return true;
+  }, [running]);
+
+  const onEdgesDelete = useCallback((deleted: Edge[]) => {
+    if (!running) return;
+    for (const e of deleted) void removeSimulationLink(sessionId!, e.id).catch(() => {});
+  }, [running, sessionId]);
 
   // ── Drag-drop from palette ────────────────────────────────────────────────
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -264,6 +362,10 @@ export default function WorkspacePage() {
 
     const entry = DEFAULT_DEVICE_CATALOG.find((d) => d.id === catalogId);
     if (!entry) return;
+    if (running) {
+      setSimError("Stop the lab before adding devices.");
+      return;
+    }
 
     const bounds   = canvasRef.current.getBoundingClientRect();
     const position = rfInstanceRef.current.screenToFlowPosition({
@@ -288,25 +390,25 @@ export default function WorkspacePage() {
 
     setNodes((nds) => [...nds, newNode]);
     setConfigNode(newNode);
-  }, [nodes, setNodes]);
+  }, [nodes, setNodes, running]);
 
   // ── Node interactions ─────────────────────────────────────────────────────
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    setSelectedNode(node as DeviceNode);
-    setRightTab("properties");
+    setSelection({ kind: "node", id: node.id });
   }, []);
 
+  // Double-click: console while running (CML), otherwise edit the device.
   const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
-    setSelectedNode(node as DeviceNode);
-    if (simState === "running" && sessionId) {
-      // Double-click opens the bottom terminal panel (not right panel)
-      setRightTab("properties");
-    } else {
-      setConfigNode(node as DeviceNode);
-    }
-  }, [simState, sessionId]);
+    setSelection({ kind: "node", id: node.id });
+    if (running) openConsole(node.id);
+    else setConfigNode(node as DeviceNode);
+  }, [running, openConsole]);
 
-  const onPaneClick = useCallback(() => setSelectedNode(null), []);
+  const onEdgeClick = useCallback((_: React.MouseEvent, edge: Edge) => {
+    setSelection({ kind: "edge", id: edge.id });
+  }, []);
+
+  const onPaneClick = useCallback(() => setSelection({ kind: "lab" }), []);
 
   const saveConfig = useCallback((id: string, patch: Partial<DeviceNodeData>) => {
     setNodes((nds) => nds.map((n) => n.id === id ? { ...n, data: { ...n.data, ...patch } } : n));
@@ -318,6 +420,8 @@ export default function WorkspacePage() {
     setSimError(null);
     setSimState("starting");
     setTrace([]);
+    setSyslog([]);
+    syslogSeqRef.current = 0;
     try {
       const { topology: topo } = convertFlowToTopology(nodes, edges);
       const session = await createSimulation(topo, 42);
@@ -341,11 +445,12 @@ export default function WorkspacePage() {
     if (sessionId) { try { await resetSimulation(sessionId); } catch { /**/ } }
     setTrace([]); setSimState("stopped"); setSessionId(null);
     setTopology(null); setSimError(null);
+    setSyslog([]); syslogSeqRef.current = 0;
   }, [sessionId]);
 
   const handleClearCanvas = useCallback(() => {
     setNodes([]); setEdges([]);
-    setSelectedNode(null); setConfigNode(null);
+    setSelection({ kind: "lab" }); setConfigNode(null); setConsoles([]);
     sessionStorage.removeItem(STORAGE_KEY);
     handleWipe();
   }, [setNodes, setEdges, handleWipe]);
@@ -359,10 +464,8 @@ export default function WorkspacePage() {
     window.history.replaceState(null, "", "/labs/workspace");
   }, [confirmDiscard, handleClearCanvas, rememberLab]);
 
-  const topoNode: TopologyNode | null =
-    selectedNode && topology
-      ? topology.nodes.find((n) => n.id === selectedNode.id) ?? null
-      : null;
+  const pendingSource = pendingLink ? nodes.find((n) => n.id === pendingLink.source) : undefined;
+  const pendingTarget = pendingLink ? nodes.find((n) => n.id === pendingLink.target) : undefined;
 
   return (
     <div className="flex flex-col h-full bg-white overflow-hidden">
@@ -386,14 +489,18 @@ export default function WorkspacePage() {
           onDragOver={onDragOver}
           onDrop={onDrop}
         >
+          <LabRunningContext.Provider value={running}>
           <ReactFlow
             nodes={nodes}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onBeforeDelete={onBeforeDelete}
+            onEdgesDelete={onEdgesDelete}
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
+            onEdgeClick={onEdgeClick}
             onPaneClick={onPaneClick}
             onInit={(inst) => { rfInstanceRef.current = inst; }}
             nodeTypes={nodeTypes}
@@ -401,6 +508,8 @@ export default function WorkspacePage() {
             deleteKeyCode={["Delete", "Backspace"]}
             nodesDraggable={true}
             nodesConnectable={true}
+            connectionMode={ConnectionMode.Loose}
+            connectionRadius={40}
             elementsSelectable={true}
             selectNodesOnDrag={false}
             selectionOnDrag={false}
@@ -415,6 +524,7 @@ export default function WorkspacePage() {
             <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#e8ecf0" />
             <Controls />
           </ReactFlow>
+          </LabRunningContext.Provider>
 
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 pointer-events-none select-none">
@@ -429,28 +539,49 @@ export default function WorkspacePage() {
           )}
         </div>
 
-        {selectedNode && (
-          <NodeSidePanel
-            flowNode={selectedNode}
-            topoNode={topoNode}
-            topology={topology}
-            tab={rightTab}
-            onTabChange={setRightTab}
-            simState={simState}
-            onClose={() => setSelectedNode(null)}
-            onOpenConfig={() => setConfigNode(selectedNode)}
-          />
-        )}
+        <InspectorPanel
+          selection={selection}
+          nodes={nodes}
+          edges={edges}
+          labName={currentLab?.name ?? null}
+          simState={simState}
+          sessionId={sessionId}
+          refreshKey={syslog.length}
+          onSelect={setSelection}
+          onOpenConsole={openConsole}
+          onEditNode={(n) => setConfigNode(n)}
+          onDeleteEdge={(id) => void deleteEdge(id)}
+        />
       </div>
 
-      {/* Bottom panel — Terminal + Logs (CML style) */}
+      {/* Bottom pane — device consoles, lab log, packet trace (CML style) */}
       <BottomPanel
-        selectedNode={selectedNode}
+        nodes={nodes}
+        consoles={consoles}
+        tab={bottomTab}
+        open={bottomOpen}
+        onOpenChange={setBottomOpen}
+        onTabChange={setBottomTab}
+        onCloseConsole={closeConsole}
         sessionId={sessionId}
         simState={simState}
+        syslog={syslog}
         trace={trace}
         onTraceUpdate={setTrace}
       />
+
+      {pendingLink && pendingSource && pendingTarget && (
+        <LinkDialog
+          source={pendingSource}
+          target={pendingTarget}
+          nodes={nodes}
+          edges={edges}
+          busy={linkBusy}
+          error={linkError}
+          onConnect={(a, b) => void confirmLink(a, b)}
+          onCancel={() => { setPendingLink(null); setLinkError(null); }}
+        />
+      )}
 
       {configNode && (
         <NodeConfigPopup

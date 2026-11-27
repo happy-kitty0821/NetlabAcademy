@@ -12,6 +12,8 @@ export interface CLIResponse {
   awaiting_input?: boolean;
   /** Do not echo the next line (password prompts). */
   input_hidden?: boolean;
+  /** Syslog messages the console prints after this command. */
+  console?: string[];
 }
 
 export interface CompleteResponse {

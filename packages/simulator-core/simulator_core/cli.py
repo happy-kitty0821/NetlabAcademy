@@ -150,12 +150,27 @@ class CLISession:
     _login_user: Optional[str] = None
     _session_started: bool = False
     _exec_depth: int = 0
+    # Highest syslog sequence already shown on this console.
+    _syslog_cursor: int = 0
     # Commands typed in this session (show history)
     history: list[str] = field(default_factory=list)
     # Interfaces selected by 'interface range'; empty for a single interface.
     current_range: list[str] = field(default_factory=list)
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def drain_console(self) -> list[str]:
+        """
+        Syslog messages for this device not yet shown on this console, in
+        order (IOS prints them asynchronously on the console line).  Returns
+        nothing when console logging is off ("no logging console").
+        """
+        entries = self.simulation.syslog_since(self._syslog_cursor, self.device_id)
+        self._syslog_cursor = self.simulation.syslog_last_seq
+        config = self._get_config()
+        if config is not None and not config.logging_enabled:
+            return []
+        return [e.text for e in entries]
 
     @property
     def input_hidden(self) -> bool:
@@ -1214,6 +1229,7 @@ class CLISession:
                 CLIMode.VLAN_CONFIG,
                 CLIMode.LINE_CONFIG,
             ):
+                self._log_config_exit()
                 self.mode = CLIMode.PRIV_EXEC
                 self.current_iface = None
                 self.current_vlan  = None
@@ -1233,6 +1249,7 @@ class CLISession:
             self.mode = CLIMode.GLOBAL_CONFIG
             self.current_line = None
         elif self.mode == CLIMode.GLOBAL_CONFIG:
+            self._log_config_exit()
             self.mode = CLIMode.PRIV_EXEC
         elif self.mode == CLIMode.PRIV_EXEC:
             self.mode = CLIMode.USER_EXEC
@@ -1289,6 +1306,14 @@ class CLISession:
             self.pending_input = "login_pw"
             return out + "\nUser Access Verification\n"
         return out.rstrip("\n")
+
+    def _log_config_exit(self) -> None:
+        """IOS logs %SYS-5-CONFIG_I when a user leaves configuration mode."""
+        from simulator_core.types import DeviceModel
+        device = self.simulation.topology.devices.get(self.device_id)
+        if device is not None and device.model in (DeviceModel.SWITCH, DeviceModel.ROUTER):
+            self.simulation.log_event(self.device_id, "SYS", 5, "CONFIG_I",
+                                      "Configured from console by console")
 
     def _logout(self) -> str:
         device = self.simulation.topology.devices.get(self.device_id)
@@ -3902,28 +3927,8 @@ def _is_valid_host_address(ip: IPv4Address) -> bool:
     return not (first == 0 or first == 127 or first >= 224)
 
 
-# Full IOS interface-type names for the short prefixes the device catalog uses.
-_LONG_IFACE_TYPE = {
-    "fa": "FastEthernet",
-    "gi": "GigabitEthernet",
-    "te": "TenGigabitEthernet",
-    "se": "Serial",
-    "po": "Port-channel",
-}
-
-
-def _long_name(name: str) -> str:
-    """
-    IOS full interface name: ``Fa0/1`` → ``FastEthernet0/1``,
-    ``Gi0/0.10`` → ``GigabitEthernet0/0.10``.  Names without a known short
-    prefix (``Vlan1``, ``Loopback0``, ``eth0``) are returned unchanged.
-    IOS uses full names in show running-config, show ip interface (brief),
-    show interfaces and show ip route; short names elsewhere.
-    """
-    m = re.match(r"^([A-Za-z]+)(\d.*)$", name)
-    if m and m.group(1).lower() in _LONG_IFACE_TYPE:
-        return _LONG_IFACE_TYPE[m.group(1).lower()] + m.group(2)
-    return name
+from simulator_core.naming import LONG_IFACE_TYPE as _LONG_IFACE_TYPE  # noqa: E402
+from simulator_core.naming import long_name as _long_name  # noqa: E402,F401
 
 
 def _display_order(device) -> list[str]:

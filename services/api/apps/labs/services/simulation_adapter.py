@@ -485,6 +485,46 @@ def get_trace(session: SimulationSession) -> list[dict[str, Any]]:
     return _trace_to_list(session.simulation.trace)
 
 
+def add_live_link(session: SimulationSession, link: dict[str, Any]) -> None:
+    """
+    Cable two devices in a running lab.  The simulator validates the
+    endpoints (devices exist, ports exist and are free), brings the ports up
+    and logs the link messages; the session document is updated so the link
+    survives a wipe and appears in later topology reads.
+    """
+    sim_link = Link(
+        id=str(link["id"]),
+        endpoint_a=(str(link["device_a"]), str(link["interface_a"])),
+        endpoint_b=(str(link["device_b"]), str(link["interface_b"])),
+    )
+    session.simulation.add_link(sim_link)
+    session.topology_doc.setdefault("links", []).append({
+        "id": sim_link.id,
+        "device_a": sim_link.endpoint_a[0], "interface_a": sim_link.endpoint_a[1],
+        "device_b": sim_link.endpoint_b[0], "interface_b": sim_link.endpoint_b[1],
+    })
+
+
+def remove_live_link(session: SimulationSession, link_id: str) -> bool:
+    """Unplug a cable in a running lab. Returns False if no such link."""
+    if not any(l.id == link_id for l in session.simulation.topology.links):
+        return False
+    session.simulation.remove_link(link_id)
+    session.topology_doc["links"] = [
+        l for l in session.topology_doc.get("links", []) if l.get("id") != link_id
+    ]
+    return True
+
+
+def get_syslog(session: SimulationSession, since: int = 0) -> dict[str, Any]:
+    """Syslog entries for every device newer than sequence *since*."""
+    sim = session.simulation
+    return {
+        "entries": [e.to_dict() for e in sim.syslog_since(since)],
+        "last_seq": sim.syslog_last_seq,
+    }
+
+
 def reset_session(session: SimulationSession) -> dict[str, Any]:
     """Reset the simulation to its initial state."""
     session.simulation.reset()

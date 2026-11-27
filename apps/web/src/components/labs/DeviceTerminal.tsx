@@ -13,6 +13,10 @@
  *  - Cisco-style welcome banner on open
  *  - Coloured output: prompt in cyan, errors in red, success in green
  *  - Backspace, arrow keys for line editing
+ *  - Device syslog (%LINK-3-UPDOWN, %LINEPROTO-5-UPDOWN, ...) printed as
+ *    it happens: returned with each command and polled while open, then
+ *    the prompt and the line being typed are redrawn (IOS "logging
+ *    synchronous" behaviour)
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -22,7 +26,11 @@ import {
   completeCLICommand,
   getCLIHelp,
 } from "@/lib/cli-api";
+import { getConsoleMessages } from "@/lib/simulation-api";
 import { X } from "lucide-react";
+
+/** How often an open console checks for new device messages. */
+const CONSOLE_POLL_MS = 1500;
 
 // ── ANSI colours ────────────────────────────────────────────────────────────────
 
@@ -36,6 +44,12 @@ const C = {
   gray:    "\x1b[90m",
   dim:     "\x1b[2m",
 };
+
+function colorSyslog(message: string) {
+  // %FACILITY-SEVERITY-MNEMONIC: severities 0-4 highlighted, others plain
+  const sev = Number(/^%[A-Z0-9_]+-(\d)-/.exec(message)?.[1] ?? 6);
+  return sev <= 4 ? `${C.yellow}${message}${C.reset}` : message;
+}
 
 function colorPrompt(prompt: string) {
   return `${C.bold}${C.cyan}${prompt}${C.reset} `;
@@ -141,6 +155,9 @@ export function DeviceTerminal({
         if (res.output) {
           writeLine(colorOutput(res.output));
         }
+        for (const message of res.console ?? []) {
+          writeLine(colorSyslog(message));
+        }
         awaitingRef.current = Boolean(res.awaiting_input);
         hiddenRef.current = Boolean(res.input_hidden);
         promptRef.current = res.prompt;
@@ -203,18 +220,49 @@ export function DeviceTerminal({
     }
   }, [sessionId, device.id, write, writeLine]);
 
+  // ── Asynchronous console messages ─────────────────────────────────────────
+  // Messages caused elsewhere (a cable plugged in, the peer port shut down)
+  // are fetched periodically and printed above the current line.
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || loadingRef.current || !termRef.current) return;
+      try {
+        const res = await getConsoleMessages(sessionId, device.id);
+        if (stopped || !res.console.length || !termRef.current) return;
+        const term = termRef.current;
+        term.write("\r\x1b[K");
+        for (const message of res.console) {
+          term.write(colorSyslog(message) + "\r\n");
+        }
+        term.write(colorPrompt(promptRef.current));
+        if (!hiddenRef.current) term.write(inputRef.current);
+      } catch {
+        // Session gone or network hiccup: the next tick retries.
+      }
+    };
+    const id = window.setInterval(() => { void tick(); }, CONSOLE_POLL_MS);
+    return () => { stopped = true; window.clearInterval(id); };
+  }, [sessionId, device.id]);
+
   // ── Initialise xterm.js ───────────────────────────────────────────────────
 
   useEffect(() => {
     if (!containerRef.current) return;
 
-    let term: import("@xterm/xterm").Terminal;
+    let term: import("@xterm/xterm").Terminal | undefined;
+    let ro: ResizeObserver | undefined;
+    // Set by cleanup.  The terminal is created after async imports, so a
+    // cleanup can run first (React StrictMode mounts effects twice in
+    // development); without this guard two terminals would share the box.
+    let disposed = false;
 
     (async () => {
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
+      if (disposed || !containerRef.current) return;
 
-      term = new Terminal({
+      const live = new Terminal({
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
         fontSize: 13,
         lineHeight: 1.4,
@@ -239,10 +287,11 @@ export function DeviceTerminal({
         },
         scrollback: 1000,
       });
+      term = live;
 
       const fit = new FitAddon();
-      term.loadAddon(fit);
-      term.open(containerRef.current!);
+      live.loadAddon(fit);
+      live.open(containerRef.current!);
       fit.fit();
 
       termRef.current = term;
@@ -256,7 +305,7 @@ export function DeviceTerminal({
 
       // ── Key handler ─────────────────────────────────────────────────────────
 
-      term.onKey(({ key, domEvent }) => {
+      live.onKey(({ key, domEvent }) => {
         const ev = domEvent;
 
         // Enter — submit command
@@ -269,7 +318,7 @@ export function DeviceTerminal({
         if (ev.key === "Backspace") {
           if (inputRef.current.length > 0) {
             inputRef.current = inputRef.current.slice(0, -1);
-            if (!hiddenRef.current) term.write("\b \b");
+            if (!hiddenRef.current) live.write("\b \b");
           }
           return;
         }
@@ -294,7 +343,7 @@ export function DeviceTerminal({
         if (key === "?" && !ev.ctrlKey && !ev.altKey) {
           // Echo the ? then trigger help
           inputRef.current += "?";
-          term.write("?");
+          live.write("?");
           doHelp();
           return;
         }
@@ -344,19 +393,20 @@ export function DeviceTerminal({
           // Remove trailing ? if present (user might have triggered help then continues typing)
           inputRef.current = inputRef.current.replace(/\?$/, "");
           inputRef.current += key;
-          term.write(key);
+          live.write(key);
         }
       });
 
       // Resize observer
-      const ro = new ResizeObserver(() => fit.fit());
+      ro = new ResizeObserver(() => fit.fit());
       ro.observe(containerRef.current!);
-      return () => ro.disconnect();
     })();
 
     return () => {
-      termRef.current?.dispose();
-      termRef.current = null;
+      disposed = true;
+      ro?.disconnect();
+      term?.dispose();
+      if (termRef.current === term) termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
