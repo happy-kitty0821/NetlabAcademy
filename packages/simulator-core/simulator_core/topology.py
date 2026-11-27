@@ -71,6 +71,12 @@ class Interface:
     # "ethernet" (10 Mbps), "fastethernet" (100 Mbps), "gigabitethernet" (1 Gbps),
     # "tengigabitethernet" (10 Gbps), "loopback" (virtual, no speed)
     port_type: str = "gigabitethernet"
+
+    # 802.1Q VLAN of a router subinterface (``encapsulation dot1Q <vlan>``);
+    # None until configured.  ``dot1q_native`` marks the native VLAN, whose
+    # frames travel untagged.
+    dot1q_vlan: Optional[int] = None
+    dot1q_native: bool = False
     # Configured speed in Kbps (auto-detected from port_type, overridable).
     # None means auto (use port_type default).
     speed_kbps: Optional[int] = None
@@ -124,15 +130,25 @@ class Interface:
         return self.name.lower().startswith("loopback")
 
     @property
+    def is_subinterface(self) -> bool:
+        """True for a router subinterface such as ``Gi0/0.10``."""
+        return "." in self.name
+
+    @property
+    def parent_name(self) -> str:
+        """Physical parent of a subinterface (``Gi0/0.10`` → ``Gi0/0``)."""
+        return self.name.split(".", 1)[0]
+
+    @property
     def is_physical_switchport(self) -> bool:
         """
         True if this interface is a physical Ethernet port that supports
         Layer 2 switchport commands (mode, trunk, access VLAN, etc.).
 
-        SVIs and loopbacks are Layer 3 logical interfaces and must NOT
-        accept switchport commands.
+        SVIs, loopbacks and subinterfaces are Layer 3 logical interfaces and
+        must NOT accept switchport commands.
         """
-        return not self.is_svi and not self.is_loopback
+        return not self.is_svi and not self.is_loopback and not self.is_subinterface
 
     def set_ip(self, cidr: str) -> None:
         """

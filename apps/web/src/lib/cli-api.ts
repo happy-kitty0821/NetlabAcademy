@@ -8,6 +8,10 @@ export interface CLIResponse {
   output: string;
   prompt: string;
   mode: string;
+  /** Device is reading the next line itself (Password:, Press RETURN, ...). */
+  awaiting_input?: boolean;
+  /** Do not echo the next line (password prompts). */
+  input_hidden?: boolean;
 }
 
 export interface CompleteResponse {

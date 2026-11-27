@@ -12,6 +12,11 @@ Data-plane behaviour:
 - STP: before forwarding, the switch checks whether the port is in a
   FORWARDING state for the VLAN.
 
+Management plane:
+- A switch virtual interface (``interface vlan N`` with an IP address)
+  answers ARP and ping in its VLAN, and the switch can ping from it,
+  reaching other subnets through ``ip default-gateway``.
+
 No host I/O, no sockets, no subprocess.
 """
 
@@ -270,6 +275,11 @@ class Switch:
             capabilities="Switch",
             platform="Cisco Catalyst 2960",
         )
+
+        # Management plane (SVI) state.
+        self._mgmt_arp: dict = {}            # IPv4Address -> MACAddress
+        self._mgmt_pending_arp: dict = {}    # next hop -> [(seq, result, dst, src, vlan)]
+        self._mgmt_pending_echo: dict = {}   # (seq, ident) -> (send_tick, result)
 
     # ------------------------------------------------------------------
     # STP port registration
@@ -747,6 +757,12 @@ class Switch:
         self._learn(arrive_time, frame.src_mac.value, ingress_iface, vlan)
 
         # Forward
+        # The switch's own management interface in this VLAN sees the frame
+        # first.  Frames addressed to the SVI stop here; broadcasts are
+        # processed and still flooded.
+        if self._svi_receive(arrive_time, frame, vlan):
+            return
+
         dst_mac = frame.dst_mac.value
         if frame.dst_mac.is_broadcast:
             self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
@@ -771,7 +787,7 @@ class Switch:
     def _port_carries_vlan(self, iface_name: str, vlan_id: int) -> bool:
         """True if this port should carry traffic for vlan_id."""
         iface = self._device.interfaces.get(iface_name)
-        if iface is None:
+        if iface is None or not iface.is_physical_switchport:
             return False
         if iface.switchport_mode == "access":
             return iface.vlan == vlan_id
@@ -873,3 +889,223 @@ class Switch:
             self._forward(time, frame, iface_name,
                           frame.src_mac.value, frame.dst_mac.value,
                           frame_vlan=vlan)
+
+    # ------------------------------------------------------------------
+    # Management plane: SVI ARP / ICMP and switch-originated ping
+    # ------------------------------------------------------------------
+
+    _MGMT_ICMP_IDENTIFIER = 0x5157
+    _MGMT_RTT_SPACING = 6
+
+    def _active_svi(self, vlan: int):
+        """The SVI for *vlan* if it has an address and is up/up, else None."""
+        svi = self._device.interfaces.get(f"Vlan{vlan}")
+        if (svi is None or svi.ip_config is None
+                or svi.admin_state != InterfaceState.UP
+                or svi.oper_state != InterfaceState.UP):
+            return None
+        return svi
+
+    def _svi_receive(self, time: int, frame: EthernetFrame, vlan: int) -> bool:
+        """
+        Let the VLAN's SVI process *frame*.  Returns True when the frame was
+        addressed to the SVI and must not be forwarded further.
+        """
+        from simulator_core.frames import ARPMessage, ICMPMessage, IPv4Packet
+
+        svi = self._active_svi(vlan)
+        if svi is None:
+            return False
+        own_ip = svi.ip_config.address
+
+        if frame.ethertype == EthernetFrame.ETHERTYPE_ARP and isinstance(frame.payload, ARPMessage):
+            arp = frame.payload
+            if arp.target_ip == own_ip or arp.sender_ip in self._mgmt_pending_arp:
+                self._mgmt_arp[arp.sender_ip] = arp.sender_mac
+            if arp.operation == ARPMessage.ARP_REQUEST and arp.target_ip == own_ip:
+                reply = ARPMessage(
+                    operation=ARPMessage.ARP_REPLY,
+                    sender_mac=svi.mac, sender_ip=own_ip,
+                    target_mac=arp.sender_mac, target_ip=arp.sender_ip,
+                )
+                self._svi_send(time + 1, EthernetFrame(
+                    src_mac=svi.mac, dst_mac=arp.sender_mac,
+                    ethertype=EthernetFrame.ETHERTYPE_ARP, payload=reply,
+                    frame_id=self._frame_id(),
+                ), vlan)
+            elif arp.operation == ARPMessage.ARP_REPLY and frame.dst_mac == svi.mac:
+                self._mgmt_unblock(arp.sender_ip, arp.sender_mac)
+            return frame.dst_mac == svi.mac
+
+        if frame.dst_mac != svi.mac:
+            return False
+        if (frame.ethertype == EthernetFrame.ETHERTYPE_IPV4
+                and isinstance(frame.payload, IPv4Packet)
+                and frame.payload.dst == own_ip
+                and frame.payload.protocol == IPv4Packet.PROTOCOL_ICMP):
+            pkt = frame.payload
+            icmp = pkt.payload
+            if icmp.type == ICMPMessage.ECHO_REQUEST:
+                reply = IPv4Packet(
+                    src=own_ip, dst=pkt.src, protocol=IPv4Packet.PROTOCOL_ICMP,
+                    ttl=255,
+                    payload=ICMPMessage(
+                        type=ICMPMessage.ECHO_REPLY, code=0,
+                        sequence=icmp.sequence, identifier=icmp.identifier,
+                    ),
+                )
+                self._svi_send(time + 1, EthernetFrame(
+                    src_mac=svi.mac, dst_mac=frame.src_mac,
+                    ethertype=EthernetFrame.ETHERTYPE_IPV4, payload=reply,
+                    frame_id=self._frame_id(),
+                ), vlan)
+            elif icmp.type == ICMPMessage.ECHO_REPLY:
+                self._mgmt_complete_echo(time, icmp)
+        return True
+
+    def _svi_send(self, t: int, frame: EthernetFrame, vlan: int) -> None:
+        """Inject a frame originated by the SVI into the VLAN at tick *t*."""
+        svi_name = f"Vlan{vlan}"
+        known = None if frame.dst_mac.is_broadcast else self._mac_table.get(
+            (frame.dst_mac.value, vlan)
+        )
+        # _forward/_flood transmit at (time + 1), so pass t - 1.
+        if known is not None and self._port_carries_vlan(known, vlan):
+            self._forward(t - 1, frame, known, frame.src_mac.value,
+                          frame.dst_mac.value, frame_vlan=vlan)
+        else:
+            self._flood_in_vlan(t - 1, frame, svi_name, vlan)
+
+    @staticmethod
+    def _frame_id() -> str:
+        import uuid
+        return str(uuid.uuid4())
+
+    def ping(self, dst_ip: str, count: int = 5):
+        """
+        Ping from the switch's management SVI (IOS ``ping`` on a 2960).
+
+        The source SVI is the one whose subnet contains the destination;
+        otherwise traffic goes to ``ip default-gateway`` through the SVI on
+        the gateway's subnet.  As on IOS, the first echo is lost while ARP
+        resolves the next hop.
+        """
+        from ipaddress import IPv4Address
+        from simulator_core.devices.host import EchoResult, PingResult
+        from simulator_core.devices.router import DROP_ARP_PENDING
+
+        dst = IPv4Address(dst_ip)
+        result = PingResult(target_ip=dst_ip, count=count, sent=count, received=0)
+        self._mgmt_pending_arp.clear()
+        self._mgmt_pending_echo.clear()
+
+        def fail_all(reason: str):
+            for seq in range(count):
+                result.results.append(EchoResult(
+                    sequence=seq, success=False, rtt_ticks=None, drop_reason=reason,
+                ))
+            return result
+
+        svis = []
+        for name, iface in self._device.interfaces.items():
+            if iface.is_svi:
+                try:
+                    vlan = int(name[4:])
+                except ValueError:
+                    continue
+                if self._active_svi(vlan) is not None:
+                    svis.append((vlan, iface))
+        if not svis:
+            return fail_all(
+                "no management interface is up - configure 'interface vlan N' "
+                "with an IP address and 'no shutdown'"
+            )
+
+        for vlan, svi in svis:
+            if svi.ip_config.address == dst:
+                for seq in range(count):
+                    result.results.append(EchoResult(
+                        sequence=seq, success=True, rtt_ticks=0, drop_reason=None,
+                    ))
+                result.received = count
+                return result
+
+        chosen = next(((v, i) for v, i in svis if dst in i.ip_config.network), None)
+        next_hop = dst
+        if chosen is None:
+            gw_str = getattr(self._device.config, "ip_default_gateway", "") or ""
+            if not gw_str:
+                return fail_all("destination is not on a management subnet and no "
+                                "'ip default-gateway' is configured")
+            next_hop = IPv4Address(gw_str)
+            chosen = next(((v, i) for v, i in svis if next_hop in i.ip_config.network), None)
+            if chosen is None:
+                return fail_all("the default gateway is not on any management subnet")
+        vlan, svi = chosen
+        src = svi.ip_config.address
+
+        if next_hop in self._mgmt_arp:
+            mac = self._mgmt_arp[next_hop]
+            for seq in range(count):
+                self._mgmt_send_echo(dst, src, mac, vlan, seq, result,
+                                     self._sim.clock + 1 + seq * self._MGMT_RTT_SPACING)
+            return result
+
+        result.results.append(EchoResult(
+            sequence=0, success=False, rtt_ticks=None, drop_reason=DROP_ARP_PENDING,
+        ))
+        self._mgmt_pending_arp[next_hop] = [
+            (seq, result, dst, src, vlan) for seq in range(1, count)
+        ]
+        from simulator_core.addresses import BROADCAST_MAC, ZERO_MAC
+        from simulator_core.frames import ARPMessage
+        request = ARPMessage(
+            operation=ARPMessage.ARP_REQUEST,
+            sender_mac=svi.mac, sender_ip=src,
+            target_mac=ZERO_MAC, target_ip=next_hop,
+        )
+        self._svi_send(self._sim.clock + 1, EthernetFrame(
+            src_mac=svi.mac, dst_mac=BROADCAST_MAC,
+            ethertype=EthernetFrame.ETHERTYPE_ARP, payload=request,
+            frame_id=self._frame_id(),
+        ), vlan)
+        return result
+
+    def _mgmt_unblock(self, ip, mac) -> None:
+        pending = self._mgmt_pending_arp.pop(ip, [])
+        for k, (seq, result, dst, src, vlan) in enumerate(pending):
+            self._mgmt_send_echo(dst, src, mac, vlan, seq, result,
+                                 self._sim.clock + 1 + k * self._MGMT_RTT_SPACING)
+
+    def _mgmt_send_echo(self, dst, src, dst_mac, vlan, seq, result, t) -> None:
+        from simulator_core.frames import ICMPMessage, IPv4Packet
+        svi = self._device.interfaces[f"Vlan{vlan}"]
+        pkt = IPv4Packet(
+            src=src, dst=dst, protocol=IPv4Packet.PROTOCOL_ICMP, ttl=255,
+            payload=ICMPMessage(
+                type=ICMPMessage.ECHO_REQUEST, code=0,
+                sequence=seq, identifier=self._MGMT_ICMP_IDENTIFIER,
+            ),
+        )
+        self._svi_send(t, EthernetFrame(
+            src_mac=svi.mac, dst_mac=dst_mac,
+            ethertype=EthernetFrame.ETHERTYPE_IPV4, payload=pkt,
+            frame_id=self._frame_id(),
+        ), vlan)
+        self._mgmt_pending_echo[(seq, self._MGMT_ICMP_IDENTIFIER)] = (t, result)
+
+    def _mgmt_complete_echo(self, time: int, icmp) -> None:
+        from simulator_core.devices.host import EchoResult
+        entry = self._mgmt_pending_echo.pop((icmp.sequence, icmp.identifier), None)
+        if entry is None:
+            return
+        send_tick, result = entry
+        result.received += 1
+        result.results.append(EchoResult(
+            sequence=icmp.sequence, success=True,
+            rtt_ticks=time - send_tick, drop_reason=None,
+        ))
+
+    @property
+    def mgmt_arp_cache(self) -> dict:
+        return dict(self._mgmt_arp)

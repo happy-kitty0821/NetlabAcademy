@@ -16,7 +16,10 @@ from apps.labs.services.simulation_adapter import build_topology_from_document
 
 
 class TestCisco2960Catalog(SimpleTestCase):
-    """catalog_id 'cisco-2960' must generate exactly 24 FastEthernet ports."""
+    """
+    catalog_id 'cisco-2960' must match the real Catalyst 2960-24TT:
+    FastEthernet0/1-0/24 plus GigabitEthernet0/1-0/2 uplinks.
+    """
 
     def _doc(self, **kwargs):
         node = {
@@ -28,52 +31,48 @@ class TestCisco2960Catalog(SimpleTestCase):
         node.update(kwargs)
         return {"nodes": [node], "links": []}
 
-    def test_cisco2960_generates_24_fastethernet_ports(self):
+    def test_cisco2960_generates_24_fastethernet_and_2_gigabit_ports(self):
         topo = build_topology_from_document(self._doc())
-        device = topo.devices["sw1"]
-        self.assertEqual(
-            len(device.interfaces),
-            24,
-            f"Expected 24 interfaces, got {len(device.interfaces)}: "
-            f"{list(device.interfaces.keys())}",
-        )
-        for name in device.interfaces:
-            self.assertTrue(
-                name.startswith("Fa0/"),
-                f"Interface {name!r} does not start with 'Fa0/'",
-            )
+        names = [n for n in topo.devices["sw1"].interfaces if not n.startswith("Vlan")]
+        self.assertEqual(len(names), 26, names)
+        self.assertEqual(sum(n.startswith("Fa0/") for n in names), 24)
+        self.assertEqual(sum(n.startswith("Gi0/") for n in names), 2)
 
-    def test_cisco2960_speed_is_100_000_kbps(self):
+    def test_cisco2960_fastethernet_speed_and_cost(self):
         topo = build_topology_from_document(self._doc())
-        device = topo.devices["sw1"]
-        for name, iface in device.interfaces.items():
-            self.assertEqual(
-                iface.speed_kbps,
-                100_000,
-                f"Interface {name}: expected speed_kbps=100_000, got {iface.speed_kbps}",
-            )
+        for name, iface in topo.devices["sw1"].interfaces.items():
+            if name.startswith("Fa0/"):
+                self.assertEqual(iface.speed_kbps, 100_000, name)
+                self.assertEqual(iface.stp_path_cost, 19, name)
 
-    def test_cisco2960_stp_cost_is_19(self):
+    def test_cisco2960_uplink_speed_and_cost(self):
         topo = build_topology_from_document(self._doc())
-        device = topo.devices["sw1"]
-        for name, iface in device.interfaces.items():
-            self.assertEqual(
-                iface.stp_path_cost,
-                19,
-                f"Interface {name}: expected stp_path_cost=19, got {iface.stp_path_cost}",
-            )
+        for name in ("Gi0/1", "Gi0/2"):
+            iface = topo.devices["sw1"].interfaces[name]
+            self.assertEqual(iface.speed_kbps, 1_000_000, name)
+            self.assertEqual(iface.stp_path_cost, 4, name)
 
-    def test_cisco2960_port_names_fa0_0_to_fa0_23(self):
+    def test_cisco2960_port_names_match_hardware(self):
         topo = build_topology_from_document(self._doc())
-        device = topo.devices["sw1"]
-        expected = {f"Fa0/{i}" for i in range(24)}
-        actual = set(device.interfaces.keys())
-        self.assertEqual(actual, expected)
+        expected = {f"Fa0/{i}" for i in range(1, 25)} | {"Gi0/1", "Gi0/2", "Vlan1"}
+        self.assertEqual(set(topo.devices["sw1"].interfaces), expected)
+        self.assertNotIn("Fa0/0", topo.devices["sw1"].interfaces)
+
+    def test_cisco2960_ships_vlan1_svi_shut_down(self):
+        from simulator_core.types import InterfaceState
+        vlan1 = build_topology_from_document(self._doc()).devices["sw1"].interfaces["Vlan1"]
+        self.assertEqual(vlan1.admin_state, InterfaceState.DOWN)
+        self.assertIsNone(vlan1.ip_config)
+
+    def test_cisco2960_supports_management_svi_but_not_routing(self):
+        topo = build_topology_from_document(self._doc())
+        self.assertTrue(topo.devices["sw1"].supports_svi)
+        self.assertFalse(topo.devices["sw1"].supports_l3_routing)
 
     def test_cisco2960_ip_preserved_on_first_interface(self):
         """
         When the JSON interface list has an IP on its first entry, it must be
-        applied to Fa0/0 of the generated catalog interfaces.
+        applied to Fa0/1, the first port of the generated catalog interfaces.
         """
         doc = {
             "nodes": [
@@ -88,13 +87,13 @@ class TestCisco2960Catalog(SimpleTestCase):
         }
         topo = build_topology_from_document(doc)
         device = topo.devices["sw1"]
-        fa0_0 = device.interfaces.get("Fa0/0")
-        self.assertIsNotNone(fa0_0, "Fa0/0 must exist in the generated interfaces")
+        fa0_1 = device.interfaces.get("Fa0/1")
+        self.assertIsNotNone(fa0_1, "Fa0/1 must exist in the generated interfaces")
         self.assertIsNotNone(
-            fa0_0.ip_config,
-            "Fa0/0 must have ip_config set from the original interface list",
+            fa0_1.ip_config,
+            "Fa0/1 must have ip_config set from the original interface list",
         )
-        self.assertEqual(str(fa0_0.ip_config), "10.0.0.1/24")
+        self.assertEqual(str(fa0_1.ip_config), "10.0.0.1/24")
 
     def test_cisco2960_mac_seeds_are_deterministic(self):
         """Same document must produce the same MAC addresses (determinism).
@@ -112,10 +111,10 @@ class TestCisco2960Catalog(SimpleTestCase):
         macs2 = {n: i.mac.value for n, i in topo2.devices["sw1"].interfaces.items()}
         self.assertEqual(macs1, macs2, "MAC addresses must be deterministic")
 
-        # Verify the seed for Fa0/0 equals the expected MD5-derived constant.
+        # Verify the seed for Fa0/1 equals the expected MD5-derived constant.
         # If this assertion ever fails it means the hash function changed.
         expected_seed = int(hashlib.md5(
-            ("sw1" + "Fa0/0").encode()
+            ("sw1" + "Fa0/1").encode()
         ).hexdigest(), 16) % (2 ** 31)
         # Recompute from the actual topo to confirm the formula was applied.
         # We cannot easily extract the seed after MAC generation, but we can
@@ -125,7 +124,7 @@ class TestCisco2960Catalog(SimpleTestCase):
         from simulator_core.addresses import MACAddress
         mac_from_expected_seed = MACAddress.generate(_random.Random(expected_seed))
         self.assertEqual(
-            topo1.devices["sw1"].interfaces["Fa0/0"].mac,
+            topo1.devices["sw1"].interfaces["Fa0/1"].mac,
             mac_from_expected_seed,
             "MAC seed must come from hashlib.md5 (cross-process stable), not hash()",
         )
@@ -293,3 +292,38 @@ class TestEndpointCatalogDevices(SimpleTestCase):
         device = topo.devices["dev1"]
         self.assertEqual(len(device.interfaces), 1)
         self.assertIn("eth0", device.interfaces)
+
+
+class TestRouterDefaultShutdown(SimpleTestCase):
+    """IOS router interfaces ship administratively down."""
+
+    def _router(self, interfaces):
+        return build_topology_from_document({
+            "nodes": [{"id": "r1", "model": "router", "catalogId": "cisco-2911",
+                       "interfaces": interfaces}],
+            "links": [],
+        }).devices["r1"]
+
+    def test_unconfigured_router_ports_start_shutdown(self):
+        from simulator_core.types import InterfaceState
+        r1 = self._router([])
+        for name, iface in r1.interfaces.items():
+            self.assertEqual(iface.admin_state, InterfaceState.DOWN, name)
+
+    def test_router_port_addressed_in_document_starts_enabled(self):
+        from simulator_core.types import InterfaceState
+        r1 = self._router([{"name": "Gi0/0", "ip": "10.0.0.1/24"}])
+        self.assertEqual(r1.interfaces["Gi0/0"].admin_state, InterfaceState.UP)
+        self.assertEqual(r1.interfaces["Gi0/1"].admin_state, InterfaceState.DOWN)
+
+    def test_switch_ports_start_enabled(self):
+        from simulator_core.types import InterfaceState
+        topo = build_topology_from_document({
+            "nodes": [{"id": "sw1", "model": "switch", "catalogId": "cisco-2960",
+                       "interfaces": []}],
+            "links": [],
+        })
+        for name, iface in topo.devices["sw1"].interfaces.items():
+            if name.startswith("Vlan"):
+                continue  # the management SVI ships shut down (tested above)
+            self.assertEqual(iface.admin_state, InterfaceState.UP, name)

@@ -290,6 +290,94 @@ class Simulation:
         if self._stp_initialized:
             self.run_stp()
 
+    # ------------------------------------------------------------------
+    # Interface operational state
+    # ------------------------------------------------------------------
+
+    def refresh_interface_states(self) -> None:
+        """
+        Recompute every interface's operational state and rebuild router
+        connected routes.
+
+        Call after anything that can change line protocol: ``shutdown`` /
+        ``no shutdown``, adding or removing a link, creating or deleting a
+        VLAN, or changing a port's VLAN membership.
+        """
+        self._compute_oper_states()
+        for router in self._routers.values():
+            router.update_connected_routes()
+
+    def _compute_oper_states(self) -> None:
+        """
+        IOS line-protocol rules:
+
+        - administratively down                → down
+        - loopback                             → up
+        - physical port: up only when cabled, the link is up and the peer
+          port is administratively up (an unplugged port is "notconnect")
+        - subinterface (``Gi0/0.10``)          → follows its parent port
+        - SVI (``Vlan10``) on a switch         → up when at least one up
+          physical port carries that VLAN (access member or trunk)
+        """
+        topo = self._topology
+        for device in topo.devices.values():
+            for iface in device.interfaces.values():
+                if iface.is_svi or iface.is_loopback or iface.is_subinterface:
+                    continue
+                iface.oper_state = self._physical_oper_state(device.id, iface)
+        for device in topo.devices.values():
+            for iface in device.interfaces.values():
+                if iface.admin_state == InterfaceState.DOWN:
+                    if iface.is_svi or iface.is_loopback or iface.is_subinterface:
+                        iface.oper_state = InterfaceState.DOWN
+                    continue
+                if iface.is_loopback:
+                    iface.oper_state = InterfaceState.UP
+                elif iface.is_subinterface:
+                    parent = device.interfaces.get(iface.parent_name)
+                    iface.oper_state = (
+                        parent.oper_state if parent is not None else InterfaceState.DOWN
+                    )
+                elif iface.is_svi:
+                    iface.oper_state = self._svi_oper_state(device, iface)
+
+    def _physical_oper_state(self, device_id: str, iface) -> InterfaceState:
+        if iface.admin_state == InterfaceState.DOWN:
+            return InterfaceState.DOWN
+        link = self._topology.get_link(device_id, iface.name)
+        if link is None or link.admin_state == InterfaceState.DOWN:
+            return InterfaceState.DOWN
+        peer = self._topology.neighbours(device_id, iface.name)
+        if peer is None:
+            return InterfaceState.DOWN
+        peer_dev = self._topology.devices.get(peer[0])
+        peer_iface = peer_dev.interfaces.get(peer[1]) if peer_dev else None
+        if peer_iface is None or peer_iface.admin_state == InterfaceState.DOWN:
+            return InterfaceState.DOWN
+        return InterfaceState.UP
+
+    def _svi_oper_state(self, device, svi) -> InterfaceState:
+        from simulator_core.types import DeviceModel
+        if device.model != DeviceModel.SWITCH:
+            # A router's "interface vlan" has no member ports to track.
+            return InterfaceState.UP
+        try:
+            vlan_id = int(svi.name[4:])
+        except ValueError:
+            return InterfaceState.DOWN
+        for port in device.interfaces.values():
+            if port.is_svi or port.is_loopback or port.is_subinterface:
+                continue
+            if port.oper_state != InterfaceState.UP:
+                continue
+            if port.switchport_mode == "access" and port.vlan == vlan_id:
+                return InterfaceState.UP
+            if port.switchport_mode == "trunk" and (
+                port.trunk_allowed_vlans is None or vlan_id in port.trunk_allowed_vlans
+            ):
+                return InterfaceState.UP
+        return InterfaceState.DOWN
+
     def add_link(self, link: "object") -> None:
         """
         Add a link to the working topology and trigger STP recalculation.
@@ -300,6 +388,7 @@ class Simulation:
         from simulator_core.topology import Link as _Link
         assert isinstance(link, _Link)
         self._topology.add_link(link)
+        self.refresh_interface_states()
         self._trigger_stp()
 
     def remove_link(self, link_id: str) -> None:
@@ -310,6 +399,7 @@ class Simulation:
         after Simulation init so that STP converges automatically.
         """
         self._topology.remove_link(link_id)
+        self.refresh_interface_states()
         self._trigger_stp()
 
     def start_hello_timers(self, start_tick: int = 0) -> None:
@@ -436,6 +526,10 @@ class Simulation:
 
         # Guard against _trigger_stp calls while switches are being created.
         self._stp_initialized = False
+
+        # Operational state (line protocol) must be known before routers
+        # build their connected routes.
+        self._compute_oper_states()
 
         for device in self._topology.devices.values():
             if device.model == DeviceModel.HOST:

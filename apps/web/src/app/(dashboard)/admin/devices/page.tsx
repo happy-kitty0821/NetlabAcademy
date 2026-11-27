@@ -91,12 +91,12 @@ const PORT_TYPES: PortTypeSpec[] = [
 
 const DEVICE_INTERFACE_TEMPLATES: Record<
   string,
-  { count: number; portType: string; defaultName: string }
+  { count: number; portType: string; defaultName: string; startIndex?: number }
 > = {
   "cisco-pc":     { count: 1, portType: "gigabitethernet", defaultName: "eth0" },
   "cisco-laptop": { count: 1, portType: "gigabitethernet", defaultName: "eth0" },
   "cisco-server": { count: 1, portType: "gigabitethernet", defaultName: "eth0" },
-  "cisco-2960":   { count: 24, portType: "fastethernet",    defaultName: "Fa0/{n}" },
+  "cisco-2960":   { count: 24, portType: "fastethernet",    defaultName: "Fa0/{n}", startIndex: 1 },
   "cisco-2911":   { count: 3, portType: "gigabitethernet",  defaultName: "Gi0/{n}" },
 };
 
@@ -338,7 +338,7 @@ function DeviceCard({
                         {Array.from({ length: Math.min(template.count, 8) }, (_, i) => (
                           <tr key={i} className="border-b border-[#21262d] last:border-0">
                             <td className="py-1.5 pr-2 text-[#8b949e]">
-                              {template.defaultName.replace("{n}", String(i))}
+                              {template.defaultName.replace("{n}", String(i + (template.startIndex ?? 0)))}
                             </td>
                             <td className="py-1.5 pr-2 text-[#e6edf3]">{portTypeSpec.ciscoName}</td>
                             <td className="py-1.5 pr-2 text-[#58a6ff]">{portTypeSpec.speed}</td>

@@ -171,13 +171,18 @@ class TestShowSpanningTreePortDisplay:
             f"Expected Gi0/1 in spanning-tree output:\n{out}"
         )
 
-    def test_show_spanning_tree_all_four_ports_on_sw1(self) -> None:
-        """SW1 has 4 interfaces; all 4 must appear in spanning-tree output."""
+    def test_show_spanning_tree_lists_only_up_ports_on_sw1(self) -> None:
+        """
+        SW1 has 4 interfaces but only Gi0/1 is cabled.  IOS lists only
+        ports whose line protocol is up, so the unplugged ports must not
+        appear (they are still registered with STP — see the tests above).
+        """
         s = self._make_session("sw1")
         out = s.execute("show spanning-tree")
-        for iface in ("Gi0/0", "Gi0/1", "Gi0/2", "Gi0/3"):
-            assert iface in out, (
-                f"Expected {iface} in spanning-tree output:\n{out}"
+        assert "Gi0/1" in out, f"Expected Gi0/1 in spanning-tree output:\n{out}"
+        for iface in ("Gi0/0", "Gi0/2", "Gi0/3"):
+            assert f"\n{iface} " not in out, (
+                f"Unplugged {iface} must not be listed:\n{out}"
             )
 
 
