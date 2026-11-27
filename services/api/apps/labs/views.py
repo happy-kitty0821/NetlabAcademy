@@ -6,6 +6,7 @@ API views for simulation sessions and device CLI.
 
 from __future__ import annotations
 
+from rest_framework import generics
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -14,7 +15,13 @@ from rest_framework.views import APIView
 
 from simulator_core import ConfigurationError, TopologyError
 
-from .serializers import PingRequestSerializer, TopologyDocumentSerializer
+from .models import Lab
+from .serializers import (
+    LabListSerializer,
+    LabSerializer,
+    PingRequestSerializer,
+    TopologyDocumentSerializer,
+)
 from .services import simulation_adapter as adapter
 
 
@@ -251,3 +258,42 @@ class SimulationCLIView(APIView):
             "prompt": cli_session.prompt(),
             "mode":   cli_session.mode.name.lower(),
         })
+
+
+# ── Lab persistence (CRUD) ─────────────────────────────────────────────────────
+
+
+class LabListCreateView(generics.ListCreateAPIView):
+    """GET / POST /api/v1/labs/labs/
+
+    Lists the caller's labs as a plain array (pagination disabled) and
+    creates a new lab owned by the caller. The list endpoint uses the
+    compact ``LabListSerializer`` (no topology payload, with device/link
+    counts); writes use the full ``LabSerializer``.
+    """
+
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return Lab.objects.filter(owner=self.request.user)
+
+    def get_serializer_class(self):
+        if self.request.method == "GET":
+            return LabListSerializer
+        return LabSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class LabDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/v1/labs/labs/<lab_id>/"""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = LabSerializer
+    lookup_url_kwarg = "lab_id"
+    lookup_field = "id"
+
+    def get_queryset(self):
+        return Lab.objects.filter(owner=self.request.user)

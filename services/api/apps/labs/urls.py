@@ -7,6 +7,8 @@ URL routing for the labs / simulation API.
 from django.urls import path
 
 from .views import (
+    LabDetailView,
+    LabListCreateView,
     SimulationDetailView,
     SimulationDeviceStateView,
     SimulationListCreateView,
@@ -17,6 +19,10 @@ from .views import (
 )
 
 urlpatterns = [
+    # ── Lab persistence ───────────────────────────────────────────────
+    path("labs/", LabListCreateView.as_view(), name="lab-list-create"),
+    path("labs/<uuid:lab_id>/", LabDetailView.as_view(), name="lab-detail"),
+
     # ── Simulation sessions ───────────────────────────────────────────
     path("simulations/", SimulationListCreateView.as_view(), name="sim-list-create"),
     path("simulations/<str:session_id>/", SimulationDetailView.as_view(), name="sim-detail"),

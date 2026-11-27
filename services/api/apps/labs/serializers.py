@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from .models import Lab
+
 
 class InterfaceSpecSerializer(serializers.Serializer):
     """One interface on a device in the topology document."""
@@ -46,3 +48,81 @@ class PingRequestSerializer(serializers.Serializer):
     device_id = serializers.CharField(max_length=64)
     target_ip = serializers.CharField(max_length=45)
     count = serializers.IntegerField(min_value=1, max_value=100, default=4)
+
+
+# ── Lab persistence ────────────────────────────────────────────────────────────
+
+
+class LabSerializer(serializers.ModelSerializer):
+    """Full representation of a Lab, including the topology canvas.
+
+    ``owner_name`` is read-only and sourced from the owner's ``full_name``
+    property so the frontend can attribute a lab without a second request.
+    The ``topology`` field stores the raw React Flow canvas document shaped
+    as ``{"nodes": [...], "edges": [...]}``.
+    """
+
+    owner_name = serializers.CharField(source="owner.full_name", read_only=True)
+
+    class Meta:
+        model = Lab
+        fields = [
+            "id",
+            "name",
+            "description",
+            "topology",
+            "created_at",
+            "updated_at",
+            "owner_name",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at", "owner_name"]
+
+
+class LabListSerializer(serializers.ModelSerializer):
+    """Compact lab list item: omit the topology payload, add counts.
+
+    List responses return a plain array (the view sets
+    ``pagination_class=None``), so this serializer keeps each entry small by
+    excluding ``topology`` and ``owner_name`` and exposing derived device and
+    link counts pulled from the canvas document.
+    """
+
+    device_count = serializers.SerializerMethodField()
+    link_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lab
+        fields = [
+            "id",
+            "name",
+            "description",
+            "created_at",
+            "updated_at",
+            "device_count",
+            "link_count",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "device_count",
+            "link_count",
+        ]
+
+    def _topology_dict(self, obj: Lab) -> dict:
+        """Return the topology as a dict, tolerating a non-dict (e.g. list).
+
+        ``JSONField(default=dict)`` normally yields a dict, but legacy or
+        malformed rows could store another JSON type; guard those cases so a
+        broken row never raises in the list view.
+        """
+        topology = obj.topology
+        return topology if isinstance(topology, dict) else {}
+
+    def get_device_count(self, obj: Lab) -> int:
+        nodes = self._topology_dict(obj).get("nodes", [])
+        return len(nodes) if isinstance(nodes, list) else 0
+
+    def get_link_count(self, obj: Lab) -> int:
+        edges = self._topology_dict(obj).get("edges", [])
+        return len(edges) if isinstance(edges, list) else 0
