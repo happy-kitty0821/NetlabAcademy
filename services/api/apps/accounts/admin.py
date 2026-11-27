@@ -18,13 +18,14 @@ class UserAdmin(BaseUserAdmin):
         ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
         ("Dates", {"fields": ("date_joined", "last_login")}),
     )
+    # is_active is derived from status (see User.save); change status instead.
     add_fieldsets = (
         (None, {
             "classes": ("wide",),
             "fields": ("email", "first_name", "last_name", "role", "password1", "password2"),
         }),
     )
-    readonly_fields = ["date_joined", "last_login"]
+    readonly_fields = ["date_joined", "last_login", "is_active"]
 
 
 @admin.register(UserProfile)
