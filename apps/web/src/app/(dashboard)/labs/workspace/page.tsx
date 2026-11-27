@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   ReactFlow,
   Background,
@@ -24,6 +25,9 @@ import type { DeviceNode }   from "@/lib/convertFlowToTopology";
 import type { DeviceNodeData } from "@/lib/deviceTypes";
 import { DEFAULT_DEVICE_CATALOG } from "@/lib/deviceTypes";
 import { createSimulation, resetSimulation } from "@/lib/simulation-api";
+import {
+  canvasForSaving, createLab, getLab, isLabId, labErrorText, updateLab,
+} from "@/lib/lab-api";
 import type { TopologyDocument, TopologyNode, TraceEvent } from "@/lib/simulation-api";
 
 import { WorkspaceToolbar } from "@/components/labs/workspace/WorkspaceToolbar";
@@ -31,6 +35,7 @@ import { DevicePalette }    from "@/components/labs/workspace/DevicePalette";
 import { NodeConfigPopup }  from "@/components/labs/workspace/NodeConfigPopup";
 import { NodeSidePanel }    from "@/components/labs/workspace/NodeSidePanel";
 import { BottomPanel }      from "@/components/labs/workspace/BottomPanel";
+import { SaveLabDialog }    from "@/components/labs/workspace/SaveLabDialog";
 
 export type SimState = "stopped" | "starting" | "running" | "stopping";
 
@@ -60,6 +65,28 @@ function saveCanvas(nodes: DeviceNode[], edges: Edge[]) {
   catch { /* quota */ }
 }
 
+// The saved lab this tab is editing, so a page refresh keeps the association.
+const CURRENT_LAB_KEY = "netlab_current_lab";
+
+interface CurrentLab { id: string; name: string; description: string; savedSnapshot: string }
+
+function loadCurrentLab(): CurrentLab | null {
+  try {
+    const raw = sessionStorage.getItem(CURRENT_LAB_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function storeCurrentLab(lab: CurrentLab | null) {
+  try {
+    if (lab) sessionStorage.setItem(CURRENT_LAB_KEY, JSON.stringify(lab));
+    else sessionStorage.removeItem(CURRENT_LAB_KEY);
+  } catch { /* quota */ }
+}
+
+const snapshot = (nodes: DeviceNode[], edges: Edge[]) =>
+  JSON.stringify(canvasForSaving(nodes, edges));
+
 // ── ID counter ────────────────────────────────────────────────────────────────
 let _counter = 100;
 function bumpCounter(nodes: DeviceNode[]) {
@@ -76,19 +103,121 @@ export default function WorkspacePage() {
   // Clear stale storage from old sessions on first render
   useEffect(() => { clearOldStorage(); }, []);
 
+  const router = useRouter();
   const [nodes, setNodes, onNodesChange] = useNodesState<DeviceNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
-  // Load persisted canvas after mount (avoid SSR mismatch)
+  // ── Saved-lab state ─────────────────────────────────────────────────────
+  const [currentLab, setCurrentLab] = useState<CurrentLab | null>(null);
+  const [saveDialog, setSaveDialog] = useState<null | "save" | "saveAs">(null);
+  const [saving,     setSaving]     = useState(false);
+  const [labError,   setLabError]   = useState<string | null>(null);
+  const [labNotice,  setLabNotice]  = useState<string | null>(null);
+
+  const rememberLab = useCallback((lab: CurrentLab | null) => {
+    setCurrentLab(lab);
+    storeCurrentLab(lab);
+  }, []);
+
+  // Load after mount (avoid SSR mismatch): ?lab=<uuid> opens a saved lab;
+  // otherwise restore this tab's canvas (and its saved-lab association).
   useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("lab");
+    if (isLabId(requested)) {
+      getLab(requested)
+        .then((lab) => {
+          const loaded = canvasForSaving(lab.topology?.nodes ?? [], lab.topology?.edges ?? []);
+          bumpCounter(loaded.nodes);
+          setNodes(loaded.nodes);
+          setEdges(loaded.edges);
+          rememberLab({ id: lab.id, name: lab.name, description: lab.description,
+                        savedSnapshot: JSON.stringify(loaded) });
+          setLabError(null);
+        })
+        .catch((err) => setLabError(`Could not open lab: ${labErrorText(err)}`));
+      return;
+    }
     const saved = loadCanvas();
+    const storedLab = loadCurrentLab();
+    if (new URLSearchParams(window.location.search).get("new") === "1") {
+      // "Create New Lab": start empty, unless this tab holds unsaved work
+      // the user wants to keep.
+      window.history.replaceState(null, "", "/labs/workspace");
+      const hasNodes = !!saved?.nodes?.length;
+      const unsaved = hasNodes && (!storedLab ||
+        snapshot(saved!.nodes, saved!.edges ?? []) !== storedLab.savedSnapshot);
+      if (!unsaved || window.confirm("Start a new lab? Unsaved changes on the current canvas will be lost.")) {
+        sessionStorage.removeItem(STORAGE_KEY);
+        storeCurrentLab(null);
+        return;
+      }
+    }
     if (saved?.nodes?.length) {
       bumpCounter(saved.nodes);
       setNodes(saved.nodes);
       setEdges(saved.edges ?? []);
     }
+    setCurrentLab(storedLab);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const dirty = useMemo(() => {
+    if (!currentLab) return nodes.length > 0;
+    return snapshot(nodes, edges) !== currentLab.savedSnapshot;
+  }, [nodes, edges, currentLab]);
+
+  // Clear the "Saved" notice after a moment.
+  useEffect(() => {
+    if (!labNotice) return;
+    const t = setTimeout(() => setLabNotice(null), 2500);
+    return () => clearTimeout(t);
+  }, [labNotice]);
+
+  const persistLab = useCallback(async (mode: "update" | "create", name: string, description: string) => {
+    setSaving(true);
+    setLabError(null);
+    const topology = canvasForSaving(nodes, edges);
+    try {
+      const lab = mode === "update" && currentLab
+        ? await updateLab(currentLab.id, { name, description, topology })
+        : await createLab({ name, description, topology });
+      rememberLab({ id: lab.id, name: lab.name, description: lab.description,
+                    savedSnapshot: JSON.stringify(topology) });
+      window.history.replaceState(null, "", `/labs/workspace?lab=${lab.id}`);
+      setSaveDialog(null);
+      setLabNotice(mode === "update" ? "Saved" : `Saved as "${lab.name}"`);
+    } catch (err) {
+      setLabError(`Save failed: ${labErrorText(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [nodes, edges, currentLab, rememberLab]);
+
+  const handleSave = useCallback(() => {
+    if (currentLab) void persistLab("update", currentLab.name, currentLab.description);
+    else setSaveDialog("save");
+  }, [currentLab, persistLab]);
+
+  const confirmDiscard = useCallback(
+    () => !dirty || window.confirm("You have unsaved changes. Discard them?"),
+    [dirty],
+  );
+
+  const handleOpenLabs = useCallback(() => {
+    if (confirmDiscard()) router.push("/labs");
+  }, [confirmDiscard, router]);
+
+  // Ctrl/Cmd+S saves
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (!saving && nodes.length > 0 && !saveDialog) handleSave();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleSave, saving, nodes.length, saveDialog]);
 
   // Persist on every change
   useEffect(() => { saveCanvas(nodes, edges); }, [nodes, edges]);
@@ -221,6 +350,15 @@ export default function WorkspacePage() {
     handleWipe();
   }, [setNodes, setEdges, handleWipe]);
 
+  // New: empty canvas, no longer linked to a saved lab.
+  const handleNewLab = useCallback(() => {
+    if (!confirmDiscard()) return;
+    handleClearCanvas();
+    rememberLab(null);
+    setLabError(null);
+    window.history.replaceState(null, "", "/labs/workspace");
+  }, [confirmDiscard, handleClearCanvas, rememberLab]);
+
   const topoNode: TopologyNode | null =
     selectedNode && topology
       ? topology.nodes.find((n) => n.id === selectedNode.id) ?? null
@@ -231,7 +369,10 @@ export default function WorkspacePage() {
       <WorkspaceToolbar
         simState={simState} sessionId={sessionId} nodeCount={nodes.length}
         onStart={handleStart} onStop={handleStop} onWipe={handleWipe}
-        onClear={handleClearCanvas} error={simError}
+        onClear={handleClearCanvas} error={simError ?? labError}
+        labName={currentLab?.name ?? null} dirty={dirty} saving={saving} notice={labNotice}
+        onSave={handleSave} onSaveAs={() => setSaveDialog("saveAs")}
+        onOpen={handleOpenLabs} onNew={handleNewLab}
       />
 
       {/* Middle: palette + canvas + right panel */}
@@ -316,6 +457,18 @@ export default function WorkspacePage() {
           node={configNode}
           onSave={saveConfig}
           onClose={() => setConfigNode(null)}
+        />
+      )}
+
+      {saveDialog && (
+        <SaveLabDialog
+          title={saveDialog === "saveAs" ? "Save as new lab" : "Save lab"}
+          initialName={saveDialog === "saveAs" && currentLab ? `${currentLab.name} (copy)` : currentLab?.name ?? ""}
+          initialDescription={currentLab?.description ?? ""}
+          saving={saving}
+          error={labError}
+          onSubmit={(name, description) => void persistLab("create", name, description)}
+          onClose={() => { setSaveDialog(null); setLabError(null); }}
         />
       )}
     </div>

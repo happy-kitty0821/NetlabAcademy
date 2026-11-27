@@ -1,6 +1,9 @@
 "use client";
 
-import { Play, Square, RotateCcw, Trash2, AlertTriangle, Network } from "lucide-react";
+import {
+  Play, Square, RotateCcw, Trash2, AlertTriangle, Network,
+  Save, CopyPlus, FolderOpen, FilePlus2, CheckCircle2,
+} from "lucide-react";
 import type { SimState } from "@/app/(dashboard)/labs/workspace/page";
 
 const BADGE: Record<SimState, { label: string; color: string; bg: string }> = {
@@ -19,11 +22,23 @@ interface WorkspaceToolbarProps {
   onWipe:    () => void;
   onClear:   () => void;
   error:     string | null;
+  /** Saved-lab name; null for an unsaved canvas. */
+  labName:   string | null;
+  /** Canvas differs from what was last saved/opened. */
+  dirty:     boolean;
+  saving:    boolean;
+  /** Short success message (e.g. "Saved"). */
+  notice:    string | null;
+  onSave:    () => void;
+  onSaveAs:  () => void;
+  onOpen:    () => void;
+  onNew:     () => void;
 }
 
 export function WorkspaceToolbar({
   simState, sessionId, nodeCount,
   onStart, onStop, onWipe, onClear, error,
+  labName, dirty, saving, notice, onSave, onSaveAs, onOpen, onNew,
 }: WorkspaceToolbarProps) {
   const badge     = BADGE[simState];
   const isRunning = simState === "running";
@@ -33,17 +48,37 @@ export function WorkspaceToolbar({
 
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 12,
-      padding: "0 16px", height: 44,
+      display: "flex", alignItems: "center", gap: 10,
+      padding: "0 12px", height: 44, minWidth: 0, overflowX: "auto",
       background: "#ffffff", borderBottom: "1px solid #d0d7de",
       flexShrink: 0, userSelect: "none",
     }}>
       {/* Lab name */}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <Network size={14} color="#0969da" />
-        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "ui-monospace,monospace", color: "#1f2328" }}>
-          Untitled Lab
+        <span
+          title={labName ? `Saved lab: ${labName}` : "Not saved yet"}
+          style={{ fontSize: 13, fontWeight: 700, fontFamily: "ui-monospace,monospace", color: "#1f2328",
+            maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {labName ?? "Untitled Lab"}
         </span>
+        {dirty && (
+          <span title="Unsaved changes" aria-label="Unsaved changes"
+            style={{ width: 7, height: 7, borderRadius: "50%", background: "#9a6700" }} />
+        )}
+      </div>
+
+      {/* Lab file actions */}
+      <div style={{ display: "flex", gap: 4 }}>
+        <Btn onClick={onSave} disabled={saving || nodeCount === 0} color="#0969da" bg="#ddf4ff" border="#b6e3ff"
+          title={labName ? "Save changes (Ctrl+S)" : "Save as a new lab (Ctrl+S)"}
+          icon={<Save size={12} />} label={saving ? "Saving…" : "Save"} />
+        <Btn onClick={onSaveAs} disabled={saving || nodeCount === 0} color="#656d76" bg="#f6f8fa" border="#d0d7de"
+          title="Save a copy as a new lab" icon={<CopyPlus size={12} />} label="Save as" />
+        <Btn onClick={onOpen} disabled={false} color="#656d76" bg="#f6f8fa" border="#d0d7de"
+          title="Open a saved lab" icon={<FolderOpen size={12} />} label="Open" />
+        <Btn onClick={onNew} disabled={false} color="#656d76" bg="#f6f8fa" border="#d0d7de"
+          title="Start a new, empty lab" icon={<FilePlus2 size={12} />} label="New" />
       </div>
 
       <div style={{ width: 1, height: 20, background: "#d0d7de" }} />
@@ -76,8 +111,16 @@ export function WorkspaceToolbar({
 
       <div style={{ flex: 1 }} />
 
+      {notice && !error && (
+        <div role="status" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11,
+          fontFamily: "ui-monospace,monospace", color: "#1a7f37" }}>
+          <CheckCircle2 size={11} />
+          {notice}
+        </div>
+      )}
+
       {error && (
-        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11,
+        <div role="alert" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11,
           fontFamily: "ui-monospace,monospace", color: "#d1242f",
           maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           <AlertTriangle size={11} />
@@ -92,7 +135,7 @@ export function WorkspaceToolbar({
       )}
 
       <div style={{
-        display: "flex", alignItems: "center", gap: 6,
+        display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
         padding: "3px 10px", borderRadius: 20, fontSize: 11,
         fontFamily: "ui-monospace,monospace", fontWeight: 700,
         color: badge.color, background: badge.bg,
@@ -116,8 +159,8 @@ function Btn({ onClick, disabled, color, bg, border, title, icon, label }: {
 }) {
   return (
     <button onClick={onClick} disabled={disabled} title={title}
-      style={{ display: "flex", alignItems: "center", gap: 5,
-        padding: "5px 10px", borderRadius: 6, fontSize: 11,
+      style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", flexShrink: 0,
+        padding: "5px 8px", borderRadius: 6, fontSize: 11,
         fontFamily: "ui-monospace,monospace", fontWeight: 600,
         color, background: disabled ? "#f6f8fa" : bg,
         border: `1px solid ${disabled ? "#d0d7de" : border}`,

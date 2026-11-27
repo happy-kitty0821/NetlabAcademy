@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { MyLabsSection } from "./MyLabsSection";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -154,6 +155,11 @@ export default function LabsPage() {
           </Button>
         </Link>
       </div>
+
+      {/* The user's saved labs */}
+      <MyLabsSection />
+
+      <h2 className="text-sm font-semibold text-[var(--text-primary)] -mb-4">Curated Labs</h2>
 
       {/* Stats bar */}
       <div className="grid grid-cols-3 gap-4">
