@@ -76,5 +76,10 @@ class CLIViewTests(TestCase):
     def test_document_shutdown_flag_is_honoured(self):
         self.cli("r1", "enable")
         brief = self.cli("r1", "show ip interface brief")["output"]
-        gi00 = next(l for l in brief.splitlines() if l.startswith("Gi0/0 "))
+        gi00 = next(l for l in brief.splitlines() if l.startswith("GigabitEthernet0/0 "))
         self.assertIn("administratively down", gi00)
+
+    def test_2960_defaults_to_pvst(self):
+        self.cli("sw1", "enable")
+        out = self.cli("sw1", "show spanning-tree summary")["output"]
+        self.assertIn("Switch is in pvst mode", out)

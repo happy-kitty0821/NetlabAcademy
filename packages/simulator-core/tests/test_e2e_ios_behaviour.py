@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from simulator_core.cli import CLIMode
+from simulator_core.cli import CLIMode, _long_name
 from simulator_core.events import FrameTransmit
 from tests.test_e2e_labs import _build, _cli, _pc, _ping, _router, _session, _switch
 
@@ -66,7 +66,7 @@ def roas_lab():
 
 def brief_line(sim, dev: str, iface: str) -> str:
     out = _cli(sim, dev, "show ip interface brief")[0]
-    return next(l for l in out.splitlines() if l.startswith(iface + " "))
+    return next(l for l in out.splitlines() if l.startswith(_long_name(iface) + " "))
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +193,8 @@ class TestRouterOnAStick:
     def test_connected_routes_on_subinterfaces(self) -> None:
         sim = roas_lab()
         out = _cli(sim, "r1", "show ip route")[0]
-        assert "192.168.10.0/24 is directly connected, Gi0/0.10" in out
-        assert "192.168.20.0/24 is directly connected, Gi0/0.20" in out
+        assert "192.168.10.0/24 is directly connected, GigabitEthernet0/0.10" in out
+        assert "192.168.20.0/24 is directly connected, GigabitEthernet0/0.20" in out
 
     def test_ip_address_requires_encapsulation_first(self) -> None:
         sim = roas_lab()
@@ -206,7 +206,7 @@ class TestRouterOnAStick:
         sim = roas_lab()
         out = _cli(sim, "r1", "conf t", "int g0/0.30", "encapsulation dot1Q 10",
                    "int g0/0", "encapsulation dot1Q 30")
-        assert "already configured on Gi0/0.10" in out[2]
+        assert "already configured on GigabitEthernet0/0.10" in out[2]
         assert "main interface is not supported" in out[4]
 
     def test_subinterface_follows_parent_shutdown(self) -> None:
@@ -218,7 +218,7 @@ class TestRouterOnAStick:
     def test_running_config_shows_subinterfaces(self) -> None:
         sim = roas_lab()
         out = _cli(sim, "r1", "show running-config")[0]
-        assert "interface Gi0/0.10\n encapsulation dot1Q 10\n ip address 192.168.10.1 255.255.255.0" in out
+        assert "interface GigabitEthernet0/0.10\n encapsulation dot1Q 10\n ip address 192.168.10.1 255.255.255.0" in out
         assert "switchport" not in out
 
     def test_native_vlan_subinterface_uses_untagged_frames(self) -> None:
@@ -239,7 +239,7 @@ class TestRouterOnAStick:
 class TestPrivilegeAndLogin:
     def test_show_running_config_needs_privileged_mode(self) -> None:
         sim = access_lab()
-        assert _cli(sim, "sw1", "show running-config")[0].startswith("% Invalid input")
+        assert _cli(sim, "sw1", "show running-config")[0].endswith("% Invalid input detected at '^' marker.")
         assert "Interface" in _cli(sim, "sw1", "show ip interface brief")[0]
 
     def test_enable_asks_for_secret(self) -> None:
@@ -344,13 +344,13 @@ class TestAddressValidation:
     def test_prefix_length_form_rejected(self) -> None:
         sim = access_lab()
         out = _cli(sim, "r1", "enable", "conf t", "int g0/2", "ip address 10.1.1.1 24")[-1]
-        assert out.startswith("% Invalid input")
+        assert out.endswith("% Invalid input detected at '^' marker.")
 
     def test_overlapping_subnet_rejected(self) -> None:
         sim = access_lab()
         configure_access_router(sim)
         out = _cli(sim, "r1", "conf t", "int g0/2", "ip address 192.168.1.5 255.255.255.0")[-1]
-        assert out == "% 192.168.1.0 overlaps with Gi0/0"
+        assert out == "% 192.168.1.0 overlaps with GigabitEthernet0/0"
 
     def test_readdressing_same_interface_is_not_an_overlap(self) -> None:
         sim = access_lab()
@@ -391,7 +391,7 @@ class TestParsing:
     def test_invalid_line_numbers(self) -> None:
         sim = access_lab()
         out = _cli(sim, "sw1", "enable", "conf t", "line vty 0 16", "line con 1")
-        assert out[2].startswith("% Invalid input") and out[3].startswith("% Invalid input")
+        assert out[2].endswith("% Invalid input detected at '^' marker.") and out[3].endswith("% Invalid input detected at '^' marker.")
 
     def test_vty_lines_grouped_in_running_config(self) -> None:
         sim = access_lab()
@@ -402,6 +402,7 @@ class TestParsing:
 
     def test_include_accepts_regular_expression(self) -> None:
         sim = access_lab()
-        out = _cli(sim, "sw1", "enable", "show ip interface brief | include Fa0/1 |Fa0/23")[1]
+        out = _cli(sim, "sw1", "enable",
+                   "show ip interface brief | include FastEthernet0/1 |FastEthernet0/23")[1]
         names = [l.split()[0] for l in out.splitlines()]
-        assert names == ["Fa0/1", "Fa0/23"]
+        assert names == ["FastEthernet0/1", "FastEthernet0/23"]

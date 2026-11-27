@@ -261,6 +261,9 @@ class Switch:
             mac=list(device.interfaces.values())[0].mac.value
                 if device.interfaces else "00:00:00:00:00:01",
         )
+        # Factory STP mode of this switch model (before any instance exists)
+        if device.stp_mode:
+            self._stp.mode = STPMode(device.stp_mode)
         # Initialise STP for VLAN 1
         self._stp.ensure_vlan(1)
 
@@ -400,6 +403,12 @@ class Switch:
     def get_port_vlan(self, iface_name: str) -> int:
         iface = self._device.interfaces.get(iface_name)
         return iface.vlan if iface else DEFAULT_VLAN
+
+    def clear_dynamic_mac_addresses(self) -> int:
+        """clear mac address-table dynamic — returns how many were removed."""
+        removed = len(self._mac_table)
+        self._mac_table.clear()
+        return removed
 
     def ports_in_vlan(self, vlan_id: int) -> list[str]:
         result = []

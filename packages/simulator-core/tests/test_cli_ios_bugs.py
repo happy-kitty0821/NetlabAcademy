@@ -392,10 +392,10 @@ class TestShowIpInterfaceBrief:
         s = CLISession(device_id="switch-1", simulation=sim)
         s.execute("enable")
         out = s.execute("show ip interface brief")
-        # Both Gi0/0 and Gi0/1 are UP by default
+        # Both Gi0/0 and Gi0/1 are UP by default (IOS lists full names)
         lines = {line.split()[0]: line for line in out.splitlines()[1:] if line.strip()}
-        assert "up" in lines.get("Gi0/0", "").lower()
-        assert "up" in lines.get("Gi0/1", "").lower()
+        assert "up" in lines.get("GigabitEthernet0/0", "").lower()
+        assert "up" in lines.get("GigabitEthernet0/1", "").lower()
 
     def test_admin_down_interface_shows_administratively_down(self) -> None:
         sim = build_sim(seed=42)
@@ -408,7 +408,7 @@ class TestShowIpInterfaceBrief:
         out = s.execute("show ip interface brief")
         # Gi0/0 must show "administratively down"
         gi00_line = next(
-            (line for line in out.splitlines() if line.startswith("Gi0/0")), ""
+            (line for line in out.splitlines() if line.startswith("GigabitEthernet0/0")), ""
         )
         assert "administratively down" in gi00_line, (
             f"Expected 'administratively down' in line: {gi00_line!r}"
@@ -676,12 +676,13 @@ class TestPipeFilters:
         assert "Invalid input" not in out
         assert "hostname" in out.lower() or out.strip() == ""
 
-    def test_pipe_include_case_insensitive(self) -> None:
+    def test_pipe_include_is_case_sensitive(self) -> None:
+        # IOS output filters are case-sensitive regular expressions.
         s = self._session_with_user()
         out_lower = s.execute("show running-config | include username")
         out_upper = s.execute("show running-config | include USERNAME")
-        # Both should return the same set of lines
-        assert out_lower == out_upper
+        assert "username alice" in out_lower
+        assert out_upper.strip() == ""
 
 
 class TestSVICapabilityEnforcement:

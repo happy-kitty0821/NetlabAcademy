@@ -227,6 +227,9 @@ class Device:
     # enables these explicitly.
     supports_svi: bool = False          # interface vlan N creates an SVI
     supports_l3_routing: bool = False   # ip route, routed physical ports
+    # Factory spanning-tree mode for a switch ("pvst" on Catalyst 2960s);
+    # None keeps the simulator default (rapid-pvst).
+    stp_mode: Optional[str] = None
 
     def add_interface(self, interface: Interface) -> None:
         """

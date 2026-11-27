@@ -149,6 +149,9 @@ class CLISession:
     _attempts: int = 0
     _login_user: Optional[str] = None
     _session_started: bool = False
+    _exec_depth: int = 0
+    # Commands typed in this session (show history)
+    history: list[str] = field(default_factory=list)
     # Interfaces selected by 'interface range'; empty for a single interface.
     current_range: list[str] = field(default_factory=list)
 
@@ -166,6 +169,7 @@ class CLISession:
             "login_pw": "Password: ",
             "enable_pw": "Password: ",
             "copy_dest": "Destination filename [startup-config]? ",
+            "conf_source": "Configuring from terminal, memory, or network [terminal]? ",
         }
         if self.pending_input in pending_prompts:
             return pending_prompts[self.pending_input]
@@ -182,6 +186,30 @@ class CLISession:
         return f"{hostname}{suffixes.get(self.mode, '>')}"
 
     def execute(self, raw: str) -> str:
+        """
+        Parse and execute a command line; returns the output text.
+
+        Invalid-input errors are rendered IOS-style here, at the outermost
+        call, with the caret aligned to the prompt the user typed at.
+        """
+        prompt = self.prompt()
+        # Record commands (IOS includes "show history" itself) but never a
+        # line typed at an interactive prompt such as a password.
+        is_command = self.pending_input is None and (
+            self._session_started or not self._line_requires_login()
+        )
+        if self._exec_depth == 0 and raw.strip() and is_command:
+            self.history.append(raw.strip())
+        self._exec_depth += 1
+        try:
+            output = self._execute(raw)
+        finally:
+            self._exec_depth -= 1
+        if self._exec_depth == 0:
+            output = _render_invalid(output, raw, prompt)
+        return output
+
+    def _execute(self, raw: str) -> str:
         """
         Parse and execute a command line.
 
@@ -394,6 +422,20 @@ class CLISession:
                 handler=lambda s, t: s._logout()),
             Cmd("logout",    "Exit from the EXEC",
                 handler=lambda s, t: s._logout()),
+            Cmd("terminal",  "Set terminal line parameters",
+                children=[
+                    Cmd("length", "Set number of lines on a screen",
+                        args_hint="<0-512>", handler=lambda s, t: s._cmd_terminal(t)),
+                    Cmd("width",  "Set width of the display terminal",
+                        args_hint="<0-512>", handler=lambda s, t: s._cmd_terminal(t)),
+                    Cmd("monitor", "Copy debug output to the current terminal line",
+                        handler=lambda s, t: ""),
+                    Cmd("no",     "Negate a command or set its defaults",
+                        children=[
+                            Cmd("monitor", "Stop copying debug output",
+                                handler=lambda s, t: ""),
+                        ]),
+                ]),
         ]
 
     def _priv_tree(self) -> list[Cmd]:
@@ -403,10 +445,24 @@ class CLISession:
                     Cmd("terminal", "Enter global configuration mode",
                         handler=lambda s, t: s._cmd_conf_terminal(t)),
                 ],
-                # 'configure' alone also works as 'configure terminal'
-                handler=lambda s, t: s._cmd_conf_terminal(t)),
+                # IOS: bare 'configure' asks where to configure from
+                handler=lambda s, t: s._cmd_conf_prompt(t)),
             Cmd("enable",    "Enter privileged EXEC mode (already enabled)",
                 handler=lambda s, t: ""),
+            Cmd("terminal",  "Set terminal line parameters",
+                children=[
+                    Cmd("length", "Set number of lines on a screen",
+                        args_hint="<0-512>", handler=lambda s, t: s._cmd_terminal(t)),
+                    Cmd("width",  "Set width of the display terminal",
+                        args_hint="<0-512>", handler=lambda s, t: s._cmd_terminal(t)),
+                    Cmd("monitor", "Copy debug output to the current terminal line",
+                        handler=lambda s, t: ""),
+                    Cmd("no",     "Negate a command or set its defaults",
+                        children=[
+                            Cmd("monitor", "Stop copying debug output",
+                                handler=lambda s, t: ""),
+                        ]),
+                ]),
             Cmd("disable",   "Exit privileged EXEC mode",
                 handler=lambda s, t: s._cmd_disable(t)),
             Cmd("ping",      "Send ICMP echo messages",
@@ -447,6 +503,15 @@ class CLISession:
                 children=[
                     Cmd("arp",  "Delete entries from the ARP table",
                         handler=lambda s, t: ""),
+                    Cmd("mac",  "MAC forwarding table",
+                        children=[
+                            Cmd("address-table", "MAC forwarding table",
+                                children=[
+                                    Cmd("dynamic", "Dynamic entries",
+                                        handler=lambda s, t: s._cmd_clear_mac(t)),
+                                ],
+                                handler=lambda s, t: s._cmd_clear_mac(t)),
+                        ]),
                 ]),
             Cmd("exit",      "Exit from the EXEC",
                 handler=lambda s, t: s._logout()),
@@ -876,7 +941,7 @@ class CLISession:
                     Cmd("brief", "VTP management domain status",
                         handler=lambda s, t: s._cmd_show_vlan_brief(t)),
                 ],
-                handler=lambda s, t: s._cmd_show_vlan_brief(t)),
+                handler=lambda s, t: s._cmd_show_vlan(t)),
             Cmd("cdp",         "CDP information",
                 children=[
                     Cmd("neighbors", "CDP neighbor information",
@@ -895,7 +960,7 @@ class CLISession:
             Cmd("clock",       "Display the system clock",
                 handler=lambda s, t: f"% Logical clock: tick {self.simulation.clock}"),
             Cmd("history",     "Display the session command history",
-                handler=lambda s, t: "% Command history: not yet implemented."),
+                handler=lambda s, t: "\n".join(f"  {c}" for c in s.history[-10:])),
             Cmd("logging",     "Display logging information",
                 handler=lambda s, t: s._cmd_show_logging(t)),
             Cmd("users",        "Display information about terminal lines",
@@ -933,6 +998,8 @@ class CLISession:
                 children=[
                     Cmd("trunk",   "Show trunk interfaces",
                         handler=lambda s, t: s._cmd_show_interfaces_trunk(t)),
+                    Cmd("switchport", "Show interface switchport information",
+                        handler=lambda s, t: s._cmd_show_switchport(None)),
                     Cmd("status",  "Brief interface status",
                         handler=lambda s, t: s._cmd_show_interfaces_status(t)),
                     Cmd("brief",   "Brief IP interface summary",
@@ -1023,6 +1090,7 @@ class CLISession:
         Mirrors IOS: 'show ?' lists sub-commands of show.
         """
         # Remove trailing ?
+        word_help = not line[:-1].endswith(" ") and line[:-1].strip() != ""
         before = line.rstrip("?").rstrip()
         tokens = before.split() if before else []
 
@@ -1032,6 +1100,18 @@ class CLISession:
         if not tokens:
             # '?' at the start of a blank line
             return _format_help(node_list)
+
+        if word_help:
+            # IOS: "sh?" lists the keywords that start with "sh" at that
+            # position (word help), not the arguments of the command.
+            for tok in tokens[:-1]:
+                found = _match(tok.lower(), [c.keyword for c in node_list])
+                if len(found) != 1:
+                    return "% Unrecognized command"
+                node_list = next(c for c in node_list if c.keyword == found[0]).children
+            partial = tokens[-1].lower()
+            words = [c.keyword for c in node_list if c.keyword.lower().startswith(partial)]
+            return "  ".join(words) if words else "% Unrecognized command"
 
         # Walk tree to find current context
         for depth, tok in enumerate(tokens):
@@ -1076,20 +1156,19 @@ class CLISession:
                                plus all indented lines following it
           begin   <pattern>  — keep lines from the first match onward
 
-        The pattern is a regular expression, as on IOS, so
-        ``include ip|vlan`` keeps lines matching either word.  An invalid
-        expression falls back to a plain substring match.  Matching is
-        case-insensitive here (IOS itself is case-sensitive).
+        The pattern is a case-sensitive regular expression, as on IOS, so
+        ``include ip|vlan`` keeps lines matching either word and
+        ``include Vlan`` does not match ``vlan``.  An invalid expression
+        falls back to a plain substring match.
         """
         if not output:
             return output
         lines = output.splitlines()
         try:
-            rx = re.compile(pattern, re.IGNORECASE)
+            rx = re.compile(pattern)
             matches = lambda line: rx.search(line) is not None  # noqa: E731
         except re.error:
-            p = pattern.lower()
-            matches = lambda line: p in line.lower()  # noqa: E731
+            matches = lambda line: pattern in line  # noqa: E731
 
         if ftype == "include":
             return "\n".join(l for l in lines if matches(l))
@@ -1223,6 +1302,12 @@ class CLISession:
         kind = self.pending_input
         value = raw.strip()
 
+        if kind == "conf_source":
+            self.pending_input = None
+            if value == "" or "terminal".startswith(value.lower()):
+                return self._cmd_conf_terminal([])
+            return "% Only configuring from the terminal is supported in this simulator."
+
         if kind == "copy_dest":
             self.pending_input = None
             if value and value != "startup-config":
@@ -1310,6 +1395,25 @@ class CLISession:
             config.startup_config = None
         return ("Erasing the nvram filesystem will remove all configuration files! "
                 "Continue? [confirm]\n[OK]\nErase of nvram: complete")
+
+    def _cmd_conf_prompt(self, tokens: list[str]) -> str:
+        self.pending_input = "conf_source"
+        return ""
+
+    def _cmd_terminal(self, tokens: list[str]) -> str:
+        # terminal length|width <0-512> — accepted; output is never paged here
+        if len(tokens) < 3:
+            return "% Incomplete command."
+        if not tokens[2].isdigit() or not 0 <= int(tokens[2]) <= 512:
+            return _invalid_at(" ".join(tokens[:3]), tokens[2])
+        return ""
+
+    def _cmd_clear_mac(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return _invalid_at(" ".join(tokens[:2]), tokens[1])
+        switch.clear_dynamic_mac_addresses()
+        return ""
 
     def _cmd_disable(self, tokens: list[str]) -> str:
         self.mode = CLIMode.USER_EXEC
@@ -1433,12 +1537,9 @@ class CLISession:
         # Capability check — L2-only switches do not support SVIs.
         if not device.supports_svi:
             return (
-                "% Invalid input detected at '^' marker.\n"
-                "\n"
-                "  interface vlan\n"
-                "                ^\n"
-                "% SVI (interface vlan) is not supported on this device.\n"
-                "  Use 'ip default-gateway' for management access on a L2 switch."
+                _invalid_at("interface vlan", "vlan")
+                + "\n% SVI (interface vlan) is not supported on this device."
+                "\n  Use 'ip default-gateway' for management access on a L2 switch."
             )
 
         if not 1 <= vlan_id <= 4094:
@@ -1496,7 +1597,8 @@ class CLISession:
         result = self.execute(sub_command)
         self.mode = saved_mode
         self.current_iface = saved_iface
-        return result
+        # Keep caret positions relative to the whole "do ..." line
+        return result.replace(_INVALID_HEADER + "\x00", _INVALID_HEADER + "\x00do ")
 
     # ── Interface config commands ──────────────────────────────────────────────
 
@@ -1529,19 +1631,13 @@ class CLISession:
         if iface.is_svi:
             # IOS positions the caret under the first invalid token.
             return (
-                "% Invalid input detected at '^' marker.\n"
-                "\n"
-                "  switchport\n"
-                "            ^\n"
-                "% SVI interfaces (Vlan) do not support switchport commands."
+                _invalid("switchport")
+                + "\n% SVI interfaces (Vlan) do not support switchport commands."
             )
         if iface.is_loopback:
             return (
-                "% Invalid input detected at '^' marker.\n"
-                "\n"
-                "  switchport\n"
-                "            ^\n"
-                "% Loopback interfaces do not support switchport commands."
+                _invalid("switchport")
+                + "\n% Loopback interfaces do not support switchport commands."
             )
         return None
 
@@ -1568,7 +1664,7 @@ class CLISession:
         overlap = self._overlapping_interface(IPv4Network(cidr, strict=False))
         if overlap is not None:
             net = IPv4Network(cidr, strict=False).network_address
-            return f"% {net} overlaps with {overlap}"
+            return f"% {net} overlaps with {_long_name(overlap)}"
         iface = self._get_current_iface()
         if iface is not None and iface.is_subinterface and iface.dot1q_vlan is None:
             return ("% Configuring IP routing on a LAN subinterface is only allowed if that\n"
@@ -1608,7 +1704,7 @@ class CLISession:
                     and other.dot1q_vlan == vlan):
                 return (f"% Configuration of multiple subinterfaces of the same main\n"
                         f"% interface with the same VID ({vlan}) is not permitted.\n"
-                        f"% This VID is already configured on {other.name}.")
+                        f"% This VID is already configured on {_long_name(other.name)}.")
         iface.dot1q_vlan = vlan
         iface.dot1q_native = native
         return ""
@@ -1674,11 +1770,8 @@ class CLISession:
         # Speed is only valid on physical ports.
         if iface.is_svi or iface.is_loopback:
             return (
-                "% Invalid input detected at '^' marker.\n"
-                "\n"
-                "  speed\n"
-                "       ^\n"
-                "% 'speed' is not supported on logical interfaces (SVI, Loopback)."
+                _invalid("speed")
+                + "\n% 'speed' is not supported on logical interfaces (SVI, Loopback)."
             )
         val = tokens[1].lower()
         if val == "auto":
@@ -1709,11 +1802,8 @@ class CLISession:
         # Duplex is only valid on physical ports.
         if iface.is_svi or iface.is_loopback:
             return (
-                "% Invalid input detected at '^' marker.\n"
-                "\n"
-                "  duplex\n"
-                "        ^\n"
-                "% 'duplex' is not supported on logical interfaces (SVI, Loopback)."
+                _invalid("duplex")
+                + "\n% 'duplex' is not supported on logical interfaces (SVI, Loopback)."
             )
         iface.duplex = mode
         return ""
@@ -1801,26 +1891,37 @@ class CLISession:
             return None
 
     def _cmd_ip_route(self, tokens: list[str]) -> str:
-        # tokens: ['ip', 'route', '<network>', '<mask>', '<next-hop>']
+        # ip route <network> <mask> {<next-hop> | <interface> [<next-hop>]}
         if len(tokens) < 5:
-            return "% Incomplete command.\nUsage: ip route <network> <mask> <next-hop>"
-        net_str, mask_str, nh_str = tokens[2], tokens[3], tokens[4]
+            return "% Incomplete command.\nUsage: ip route <network> <mask> {<next-hop> | <interface> [<next-hop>]}"
+        tokens = _join_iface_tokens(tokens, 4)
+        net_str, mask_str = tokens[2], tokens[3]
         network = self._parse_network_and_mask(net_str, mask_str)
         if network is None:
             return "%Inconsistent address and mask"
-        from ipaddress import IPv4Address
-        try:
-            next_hop = IPv4Address(nh_str)
-        except ValueError:
-            return f"% Invalid next-hop address: {nh_str!r}"
         router = self._get_router()
         if router is None:
             return "% ip route is only available on router devices."
-        # The outgoing interface is resolved from the connected routes.  As on
-        # IOS, a static route whose next hop is not (yet) reachable through a
-        # connected network is accepted and kept in the configuration, but is
-        # not installed until the next hop becomes reachable.
-        router.routing_table.add_static_route(network, next_hop, "")
+        from ipaddress import IPv4Address
+        next_hop = None
+        exit_iface = None
+        try:
+            next_hop = IPv4Address(tokens[4])
+        except ValueError:
+            device = self.simulation.topology.devices[self.device_id]
+            found = _match_iface(tokens[4], list(device.interfaces))
+            if len(found) != 1:
+                return _invalid_at(" ".join(tokens[:5]), tokens[4])
+            exit_iface = found[0]
+            if len(tokens) > 5:
+                try:
+                    next_hop = IPv4Address(tokens[5])
+                except ValueError:
+                    return _invalid_at(" ".join(tokens[:6]), tokens[5])
+        # Outgoing interfaces are resolved from the connected routes.  As on
+        # IOS, a static route that cannot be resolved yet is kept in the
+        # configuration but not installed until it can be.
+        router.routing_table.add_static_route(network, next_hop, "", exit_interface=exit_iface)
         router.routing_table.resolve_static_routes()
         return ""
 
@@ -2328,17 +2429,13 @@ class CLISession:
         from simulator_core.port_types import detect_port_type, format_speed
 
         lines = [
-            "Port      Name               Status       Vlan       Duplex  Speed   Type",
+            "Port      Name               Status       Vlan       Duplex  Speed Type",
         ]
-        for name, iface in device.interfaces.items():
+        for name in _display_order(device):
+            iface = device.interfaces[name]
             if not iface.is_physical_switchport:
                 continue
-            if iface.admin_state == InterfaceState.DOWN:
-                status = "disabled"
-            elif iface.oper_state == InterfaceState.UP:
-                status = "connected"
-            else:
-                status = "notconnect"
+            status = _switch_port_status(iface)
             mode = iface.switchport_mode
             if mode == "trunk":
                 vlan_field = "trunk"
@@ -2348,11 +2445,15 @@ class CLISession:
                 vlan_field = "routed"
             desc = getattr(iface, "_description", "")[:18]
             pt = detect_port_type(name)
-            speed_str = format_speed(iface.speed_kbps or pt.speed_kbps)
-            duplex_str = iface.duplex if iface.duplex != "auto" else "a-full"
-            type_str = pt.value
+            mbps = (iface.speed_kbps or pt.speed_kbps or 0) // 1000
+            if status == "connected":
+                duplex_str = "a-full" if iface.duplex == "auto" else iface.duplex
+                speed_str = f"a-{mbps}"
+            else:
+                duplex_str = "auto" if iface.duplex == "auto" else iface.duplex
+                speed_str = "auto"
             lines.append(
-                f"{name:<9} {desc:<18} {status:<12} {vlan_field:<10} {duplex_str:<7} {speed_str:<7} {type_str}"
+                f"{name:<9} {desc:<18} {status:<12} {vlan_field:<10} {duplex_str:>6} {speed_str:>5} {_media_type(name)}"
             )
         return "\n".join(lines)
 
@@ -2906,7 +3007,7 @@ class CLISession:
         try:
             IPv4Address(target)
         except ValueError:
-            return f"% Bad IP address or host name -- {target!r}"
+            return "% Unrecognized host or address, or protocol not running."
 
         from simulator_core.exceptions import ConfigurationError
         pinger = None
@@ -3010,16 +3111,17 @@ class CLISession:
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
-        from simulator_core.types import InterfaceState
         lines = [
-            "Interface                  IP-Address      OK? Method Status                Protocol",
+            "Interface              IP-Address      OK? Method Status                Protocol",
         ]
-        for name, iface in device.interfaces.items():
+        for name in _display_order(device):
+            iface = device.interfaces[name]
             ip     = str(iface.ip_config.address) if iface.ip_config else "unassigned"
-            ok     = "YES" if iface.ip_config else "NO "
-            method = "manual" if iface.ip_config else "unset "
+            method = "manual" if iface.ip_config else "unset"
             status, proto = _status_words(iface)
-            lines.append(f"{name:<26} {ip:<15} {ok}  {method:<6} {status:<21} {proto}")
+            lines.append(
+                f"{_long_name(name):<22} {ip:<15} YES {method:<6} {status:<21} {proto}"
+            )
         return "\n".join(lines)
 
     def _cmd_show_ip_iface(self, tokens: list[str], iface_name: str) -> str:
@@ -3033,7 +3135,7 @@ class CLISession:
         from simulator_core.types import InterfaceState
         status, proto = _status_words(iface)
         lines = [
-            f"{iface_name} is {status}, line protocol is {proto}",
+            f"{_long_name(iface_name)} is {status}, line protocol is {proto}",
         ]
         if iface.ip_config:
             net = iface.ip_config.network
@@ -3053,40 +3155,124 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_ip_route(self, tokens: list[str]) -> str:
+        """
+        show ip route [static | connected | <address>]
+
+        IOS layout: L (local /32) routes alongside each connected network,
+        classful "is subnetted" / "is variably subnetted" headers, entries in
+        address order, full interface names.
+        """
         try:
             router = self.simulation.get_router(self.device_id)
         except KeyError:
             return "% show ip route is only available on router devices."
+        from ipaddress import IPv4Address as _Addr, IPv4Network as _Net
+        from simulator_core.routing import RouteSource
 
+        device = self.simulation.topology.devices[self.device_id]
+        args = tokens[3:]
         rt = router.routing_table
-        source_codes = {
-            "CONNECTED": "C",
-            "STATIC":    "S",
-        }
 
-        # IOS: "Gateway of last resort is <nh> to network 0.0.0.0" when an
-        # installed default route exists; the default route is flagged "*".
-        default = next(
-            (r for r in rt.routes if r.network.prefixlen == 0), None
-        )
-        if default is not None and default.next_hop is not None:
-            gw_line = f"Gateway of last resort is {default.next_hop} to network 0.0.0.0\n"
-        else:
-            gw_line = "Gateway of last resort is not set\n"
+        if args and args[0][:1].isdigit():
+            try:
+                return self._show_ip_route_entry(rt, _Addr(args[0]))
+            except ValueError:
+                return _invalid_at(" ".join(tokens[:4]), args[0])
 
-        lines = [
-            "Codes: C - connected, S - static, * - candidate default\n",
-            gw_line,
-        ]
-        for entry in rt.routes:
-            code = source_codes.get(entry.source.name, "?")
-            if entry.network.prefixlen == 0:
-                code += "*"
-            if entry.next_hop:
-                desc = f"[{entry.metric}/0] via {entry.next_hop}"
+        # (network, code, description) for every displayed route
+        entries: list[tuple] = []
+        for r in rt.routes:
+            if r.source == RouteSource.CONNECTED:
+                iface = device.interfaces.get(r.outgoing_interface)
+                long = _long_name(r.outgoing_interface)
+                entries.append((r.network, "C", f"is directly connected, {long}"))
+                if iface is not None and iface.ip_config is not None:
+                    entries.append((_Net(f"{iface.ip_config.address}/32"), "L",
+                                    f"is directly connected, {long}"))
+            elif r.source == RouteSource.STATIC:
+                code = "S*" if r.network.prefixlen == 0 else "S"
+                if r.next_hop is None:
+                    desc = f"is directly connected, {_long_name(r.outgoing_interface)}"
+                elif r.exit_interface:
+                    desc = f"[1/0] via {r.next_hop}, {_long_name(r.exit_interface)}"
+                else:
+                    desc = f"[1/0] via {r.next_hop}"
+                entries.append((r.network, code, desc))
+
+        if args:
+            word = args[0].lower()
+            if "static".startswith(word):
+                entries = [e for e in entries if e[1].startswith("S")]
+            elif "connected".startswith(word):
+                entries = [e for e in entries if e[1] in ("C", "L")]
             else:
-                desc = f"is directly connected, {entry.outgoing_interface}"
-            lines.append(f"{code:<5}{entry.network} {desc}")
+                return _invalid_at(" ".join(tokens[:4]), args[0])
+
+        default = next((r for r in rt.routes if r.network.prefixlen == 0), None)
+        if default is not None and default.next_hop is not None:
+            gw_line = f"Gateway of last resort is {default.next_hop} to network 0.0.0.0"
+        elif default is not None:
+            gw_line = "Gateway of last resort is 0.0.0.0 to network 0.0.0.0"
+        else:
+            gw_line = "Gateway of last resort is not set"
+        lines = [
+            "Codes: L - local, C - connected, S - static, * - candidate default",
+            "",
+            gw_line,
+            "",
+        ]
+
+        def classful(net) -> Optional[int]:
+            first = int(net.network_address) >> 24
+            return 8 if first < 128 else 16 if first < 192 else 24 if first < 224 else None
+
+        groups: dict = {}
+        for net, code, desc in sorted(entries, key=lambda e: (int(e[0].network_address), e[0].prefixlen)):
+            bits = classful(net)
+            if bits is None or net.prefixlen < bits:
+                groups.setdefault((net, None), []).append((net, code, desc))
+            else:
+                major = _Net(f"{net.network_address}/{bits}", strict=False)
+                groups.setdefault((major, bits), []).append((net, code, desc))
+
+        for (key, bits), items in sorted(groups.items(), key=lambda kv: int(kv[0][0].network_address)):
+            subnetted = bits is not None and any(n.prefixlen > bits for n, _, _ in items)
+            if subnetted:
+                masks = {n.prefixlen for n, _, _ in items}
+                if len(masks) == 1:
+                    lines.append(f"      {key.network_address}/{masks.pop()} is subnetted, {len(items)} subnets")
+                else:
+                    lines.append(f"      {key} is variably subnetted, {len(items)} subnets, {len(masks)} masks")
+                for net, code, desc in items:
+                    lines.append(f"{code:<9}{net} {desc}")
+            else:
+                for net, code, desc in items:
+                    lines.append(f"{code:<6}{net} {desc}")
+        return "\n".join(lines)
+
+    def _show_ip_route_entry(self, rt, address) -> str:
+        """show ip route <address>: the best matching route in detail."""
+        from simulator_core.routing import RouteSource
+        route = rt.lookup(address)
+        if route is None:
+            return "% Network not in table"
+        lines = [f"Routing entry for {route.network}"]
+        if route.source == RouteSource.CONNECTED:
+            lines += [
+                '  Known via "connected", distance 0, metric 0 (connected, via interface)',
+                "  Routing Descriptor Blocks:",
+                f"  * directly connected, via {_long_name(route.outgoing_interface)}",
+                "      Route metric is 0, traffic share count is 1",
+            ]
+        else:
+            via = (f"  * {route.next_hop}" if route.next_hop is not None
+                   else f"  * directly connected, via {_long_name(route.outgoing_interface)}")
+            lines += [
+                '  Known via "static", distance 1, metric 0',
+                "  Routing Descriptor Blocks:",
+                via,
+                "      Route metric is 0, traffic share count is 1",
+            ]
         return "\n".join(lines)
 
     def _cmd_show_interfaces_all(self, tokens: list[str]) -> str:
@@ -3094,19 +3280,66 @@ class CLISession:
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
-        blocks = []
-        for name in device.interfaces:
-            blocks.append(self._iface_block(name))
-        return "\n\n".join(blocks)
+        return "\n".join(self._iface_block(name) for name in _display_order(device))
 
     def _cmd_show_interface(self, tokens: list[str], iface_name: str) -> str:
-        """show interfaces <name>"""
+        """show interfaces <name> [switchport]"""
         device = self.simulation.topology.devices.get(self.device_id)
         if not device:
             return "% Device not found."
         if iface_name not in device.interfaces:
             return f"% Interface {iface_name!r} not found."
+        extra = _join_iface_tokens(tokens, 2)[3:]
+        if extra:
+            if "switchport".startswith(extra[0].lower()) and len(extra) == 1:
+                return self._cmd_show_switchport(iface_name)
+            return _invalid_at(" ".join(_join_iface_tokens(tokens, 2)[:4]), extra[0])
         return self._iface_block(iface_name)
+
+    def _cmd_show_switchport(self, iface_name: Optional[str]) -> str:
+        """show interfaces [<name>] switchport — per-port L2 settings."""
+        switch = self._get_switch()
+        device = self.simulation.topology.devices[self.device_id]
+        if switch is None:
+            return "% show interfaces switchport is only available on switch devices."
+        names = [iface_name] if iface_name else [
+            n for n in _display_order(device) if device.interfaces[n].is_physical_switchport
+        ]
+        blocks = []
+        for name in names:
+            iface = device.interfaces[name]
+            if not iface.is_physical_switchport:
+                blocks.append(f"Name: {name}\nSwitchport: Disabled")
+                continue
+            vname = lambda v: switch.vlans.get(v) or ("default" if v == 1 else f"VLAN{v:04d}")  # noqa: E731
+            if iface.switchport_mode == "trunk":
+                admin = "trunk"
+                oper = "trunk" if iface.oper_state == InterfaceState.UP else "down"
+                encap = "dot1q"
+                negotiation = "On"
+            else:
+                admin = "static access"
+                oper = "static access" if iface.oper_state == InterfaceState.UP else "down"
+                encap = "native"
+                negotiation = "Off"
+            allowed = ("ALL" if iface.trunk_allowed_vlans is None
+                       else self._format_vlan_list(sorted(iface.trunk_allowed_vlans)))
+            blocks.append("\n".join([
+                f"Name: {name}",
+                "Switchport: Enabled",
+                f"Administrative Mode: {admin}",
+                f"Operational Mode: {oper}",
+                "Administrative Trunking Encapsulation: dot1q",
+                f"Operational Trunking Encapsulation: {encap}",
+                f"Negotiation of Trunking: {negotiation}",
+                f"Access Mode VLAN: {iface.vlan} ({vname(iface.vlan)})",
+                f"Trunking Native Mode VLAN: {iface.trunk_native_vlan} ({vname(iface.trunk_native_vlan)})",
+                "Voice VLAN: none",
+                f"Trunking VLANs Enabled: {allowed}",
+                "Pruning VLANs Enabled: 2-1001",
+                "Protected: false",
+            ]))
+        return "\n\n".join(blocks)
 
     def _iface_block(self, iface_name: str) -> str:
         from simulator_core.types import InterfaceState
@@ -3118,23 +3351,33 @@ class CLISession:
         iface = device.interfaces.get(iface_name)
         if not iface:
             return ""
+        from simulator_core.types import DeviceModel
         status, proto = _status_words(iface)
         desc  = getattr(iface, "_description", "")
         port_type = detect_port_type(iface_name)
-        speed_str = format_speed(iface.speed_kbps or port_type.speed_kbps)
-        lines = [
-            f"{iface_name} is {status}, line protocol is {proto}",
-        ]
+        speed_kbps = iface.speed_kbps or port_type.speed_kbps or 0
+        header = f"{_long_name(iface_name)} is {status}, line protocol is {proto}"
+        if device.model == DeviceModel.SWITCH and iface.is_physical_switchport:
+            header += f" ({_switch_port_status(iface)})"
+        lines = [header]
+        mac = _cisco_mac(iface.mac)
+        lines.append(f"  Hardware is {_hardware_name(iface_name)}, address is {mac} (bia {mac})")
         if desc:
             lines.append(f"  Description: {desc}")
-        lines.append(f"  Hardware is {port_type.cisco_prefix}, address is {iface.mac} (bia {iface.mac})")
         if iface.ip_config:
             lines.append(f"  Internet address is {iface.ip_config.address}/{iface.ip_config.prefix_length}")
-        lines.append(f"  MTU 1500 bytes, BW {speed_str}, DLY 100 usec,")
+        bw = speed_kbps if speed_kbps else 8000000
+        lines.append(f"  MTU 1500 bytes, BW {bw} Kbit/sec, DLY 100 usec,")
         lines.append(f"     reliability 255/255, txload 1/255, rxload 1/255")
-        lines.append(f"  Encapsulation ARPA, loopback not set")
-        lines.append(f"  Full-duplex, {speed_str}, link type is auto, media type is {port_type.value}")
-        lines.append(f"  Auto-duplex, {speed_str if port_type.is_physical else 'N/A'}, link type is auto")
+        if iface.is_subinterface and iface.dot1q_vlan is not None:
+            lines.append(f"  Encapsulation 802.1Q Virtual LAN, Vlan ID  {iface.dot1q_vlan}.")
+        else:
+            lines.append(f"  Encapsulation ARPA, loopback not set")
+        if port_type.is_physical and not iface.is_subinterface:
+            if iface.oper_state == InterfaceState.UP:
+                lines.append(f"  Full-duplex, {speed_kbps // 1000}Mb/s, media type is {_media_type(iface_name)}")
+            else:
+                lines.append(f"  Auto-duplex, Auto-speed, media type is {_media_type(iface_name)}")
         lines.append(f"     {iface.rx_frames} packets input,  0 bytes,  0 no buffer")
         lines.append(f"     Received 0 broadcasts, 0 runts, 0 giants, 0 throttles")
         lines.append(f"     0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored")
@@ -3160,7 +3403,7 @@ class CLISession:
         else:
             iface_name = list(self.simulation.topology.devices[self.device_id].interfaces.keys())[0]
             for ip, mac in cache.items():
-                lines.append(f"Internet  {str(ip):<16} -          {mac}   ARPA   {iface_name}")
+                lines.append(f"Internet  {str(ip):<16} -          {_cisco_mac(mac)}   ARPA   {iface_name}")
         return "\n".join(lines)
 
     def _show_router_arp(self, arp_cache: dict) -> str:
@@ -3170,32 +3413,59 @@ class CLISession:
         whose connected subnet contains it.
         """
         device = self.simulation.topology.devices[self.device_id]
-        lines = ["Protocol  Address          Age (min)  Hardware Addr         Type   Interface"]
+        router = self._get_router()
+        rows = []
         own_ips = set()
         for name, iface in device.interfaces.items():
-            if iface.ip_config and iface.admin_state == InterfaceState.UP:
+            if (iface.ip_config and iface.admin_state == InterfaceState.UP
+                    and iface.oper_state == InterfaceState.UP):
                 own_ips.add(iface.ip_config.address)
-                lines.append(
-                    f"Internet  {str(iface.ip_config.address):<16} -          "
-                    f"{iface.mac}   ARPA   {name}"
-                )
-        for ip, mac in sorted(arp_cache.items()):
+                rows.append((iface.ip_config.address, "-", iface.mac, name))
+        for ip, mac in arp_cache.items():
             if ip in own_ips:
                 continue
             iface_name = next(
                 (n for n, i in device.interfaces.items()
                  if i.ip_config and ip in i.ip_config.network),
-                "?",
+                None,
             )
-            lines.append(f"Internet  {str(ip):<16} 0          {mac}   ARPA   {iface_name}")
+            if iface_name is None and router is not None:
+                # Learned by proxy ARP / exit-interface routing
+                route = router.routing_table.lookup(ip)
+                iface_name = route.outgoing_interface if route else ""
+            rows.append((ip, "0", mac, iface_name or ""))
+        lines = ["Protocol  Address          Age (min)  Hardware Addr   Type   Interface"]
+        for ip, age, mac, name in sorted(rows, key=lambda r: int(r[0])):
+            lines.append(
+                f"Internet  {str(ip):<16} {age:>9}   {_cisco_mac(mac)}  ARPA   {_long_name(name)}"
+            )
         return "\n".join(lines)
 
     def _cmd_show_mac(self, tokens: list[str]) -> str:
+        """show mac address-table [dynamic | vlan <id> | interface <name>]"""
         try:
             switch = self.simulation.get_switch(self.device_id)
         except KeyError:
             return "% show mac address-table is only supported on switch devices."
-        table = switch.mac_table
+        device = self.simulation.topology.devices[self.device_id]
+        entries = sorted(
+            ((vlan, mac, port) for (mac, vlan), port in switch.mac_table.items()),
+            key=lambda e: (e[0], _natural_key(e[2]), e[1]),
+        )
+        args = [a.lower() for a in tokens[3:]]
+        if args:
+            if "dynamic".startswith(args[0]):
+                pass
+            elif "vlan".startswith(args[0]) and len(args) > 1 and args[1].isdigit():
+                entries = [e for e in entries if e[0] == int(args[1])]
+            elif "interface".startswith(args[0]) and len(args) > 1:
+                joined = _join_iface_tokens(tokens[3:], 1)
+                found = _match_iface(joined[1], list(device.interfaces))
+                if len(found) != 1:
+                    return _invalid_at(" ".join(tokens[:5]), tokens[4])
+                entries = [e for e in entries if e[2] == found[0]]
+            else:
+                return _invalid_at(" ".join(tokens[:4]), tokens[3])
         lines = [
             "          Mac Address Table",
             "-------------------------------------------",
@@ -3203,12 +3473,9 @@ class CLISession:
             "Vlan    Mac Address       Type        Ports",
             "----    -----------       --------    -----",
         ]
-        if not table:
-            lines.append("(empty)")
-        else:
-            for (mac, vlan), port in table.items():
-                lines.append(f"   {vlan}    {mac}  DYNAMIC    {port}")
-            lines.append(f"\nTotal Mac Addresses for this criterion: {len(table)}")
+        for vlan, mac, port in entries:
+            lines.append(f"{vlan:>4}    {_cisco_mac(mac)}    DYNAMIC     {port}")
+        lines.append(f"Total Mac Addresses for this criterion: {len(entries)}")
         return "\n".join(lines)
 
     # ── CDP show / config commands ─────────────────────────────────────────────
@@ -3413,7 +3680,13 @@ class CLISession:
         if router is not None and router.routing_table.static_routes:
             lines.append("!")
             for r in router.routing_table.static_routes:
-                lines.append(f"ip route {r.network.network_address} {r.network.netmask} {r.next_hop}")
+                target = " ".join(
+                    part for part in (
+                        _long_name(r.exit_interface) if r.exit_interface else "",
+                        str(r.next_hop) if r.next_hop is not None else "",
+                    ) if part
+                )
+                lines.append(f"ip route {r.network.network_address} {r.network.netmask} {target}")
         lines += ["!", "end"]
         return "\n".join(lines)
 
@@ -3441,20 +3714,75 @@ class CLISession:
         lines += ["end"]
         return "\n".join(lines)
 
+    # Factory-default VLANs present on every Catalyst switch.
+    _LEGACY_VLANS = [
+        (1002, "fddi-default", "fddi"),
+        (1003, "token-ring-default", "tr"),
+        (1004, "fddinet-default", "fdnet"),
+        (1005, "trnet-default", "trnet"),
+    ]
+
+    def _vlan_rows(self, switch) -> list[tuple[int, str, str, list[str]]]:
+        """(vlan, name, status, access ports) for show vlan, IOS-ordered."""
+        device = self.simulation.topology.devices[self.device_id]
+        rows = []
+        for vlan_id in sorted(switch.vlans):
+            # IOS lists only access ports here; trunks appear in
+            # "show interfaces trunk".
+            ports = [
+                n for n in _display_order(device)
+                if device.interfaces[n].is_physical_switchport
+                and device.interfaces[n].switchport_mode == "access"
+                and device.interfaces[n].vlan == vlan_id
+            ]
+            rows.append((vlan_id, switch.vlans[vlan_id] or f"VLAN{vlan_id:04d}", "active", ports))
+        for vlan_id, name, _ in self._LEGACY_VLANS:
+            rows.append((vlan_id, name, "act/unsup", []))
+        return rows
+
+    @staticmethod
+    def _wrap_ports(ports: list[str]) -> list[str]:
+        """IOS wraps the Ports column at about 31 characters."""
+        chunks, line = [], ""
+        for port in ports:
+            piece = port if not line else f"{line}, {port}"
+            if line and len(piece) > 31:
+                chunks.append(line + ",")
+                line = port
+            else:
+                line = piece
+        if line:
+            chunks.append(line)
+        return chunks or [""]
+
     def _cmd_show_vlan_brief(self, tokens: list[str]) -> str:
         switch = self._get_switch()
         if switch is None:
             return "% show vlan is only available on switch devices."
-        vlans = switch.vlans
         lines = [
-            "\nVLAN Name                             Status    Ports",
+            "",
+            "VLAN Name                             Status    Ports",
             "---- -------------------------------- --------- -------------------------------",
         ]
-        for vlan_id in sorted(vlans.keys()):
-            name = vlans[vlan_id]
-            ports = switch.ports_in_vlan(vlan_id)
-            port_str = ", ".join(ports) if ports else ""
-            lines.append(f"{vlan_id:<4} {name:<32} active    {port_str}")
+        for vlan_id, name, status, ports in self._vlan_rows(switch):
+            chunks = self._wrap_ports(ports)
+            lines.append(f"{vlan_id:<4} {name:<32} {status:<9} {chunks[0]}".rstrip())
+            for extra in chunks[1:]:
+                lines.append(f"{'':48}{extra}")
+        return "\n".join(lines)
+
+    def _cmd_show_vlan(self, tokens: list[str]) -> str:
+        """show vlan: the brief table followed by the VLAN type table."""
+        switch = self._get_switch()
+        if switch is None:
+            return "% show vlan is only available on switch devices."
+        lines = [self._cmd_show_vlan_brief(tokens), "",
+                 "VLAN Type  SAID       MTU   Parent RingNo BridgeNo Stp  BrdgMode Trans1 Trans2",
+                 "---- ----- ---------- ----- ------ ------ -------- ---- -------- ------ ------"]
+        legacy_types = {v: t for v, _, t in self._LEGACY_VLANS}
+        for vlan_id, _, _, _ in self._vlan_rows(switch):
+            vtype = legacy_types.get(vlan_id, "enet")
+            lines.append(f"{vlan_id:<4} {vtype:<5} {100000 + vlan_id:<10} 1500  -      -      -        -    -        0      0")
         return "\n".join(lines)
 
     def _cmd_show_logging(self, tokens: list[str]) -> str:
@@ -3530,7 +3858,7 @@ def _iface_config_lines(device, name: str, iface) -> list[str]:
     from ipaddress import IPv4Network
     from simulator_core.types import DeviceModel
 
-    lines = [f"interface {name}"]
+    lines = [f"interface {_long_name(name)}"]
     desc = getattr(iface, "_description", "")
     if desc:
         lines.append(f" description {desc}")
@@ -3572,6 +3900,89 @@ def _is_valid_host_address(ip: IPv4Address) -> bool:
     """IOS rejects loopback, 0.x, multicast and class E as interface addresses."""
     first = int(ip) >> 24
     return not (first == 0 or first == 127 or first >= 224)
+
+
+# Full IOS interface-type names for the short prefixes the device catalog uses.
+_LONG_IFACE_TYPE = {
+    "fa": "FastEthernet",
+    "gi": "GigabitEthernet",
+    "te": "TenGigabitEthernet",
+    "se": "Serial",
+    "po": "Port-channel",
+}
+
+
+def _long_name(name: str) -> str:
+    """
+    IOS full interface name: ``Fa0/1`` → ``FastEthernet0/1``,
+    ``Gi0/0.10`` → ``GigabitEthernet0/0.10``.  Names without a known short
+    prefix (``Vlan1``, ``Loopback0``, ``eth0``) are returned unchanged.
+    IOS uses full names in show running-config, show ip interface (brief),
+    show interfaces and show ip route; short names elsewhere.
+    """
+    m = re.match(r"^([A-Za-z]+)(\d.*)$", name)
+    if m and m.group(1).lower() in _LONG_IFACE_TYPE:
+        return _LONG_IFACE_TYPE[m.group(1).lower()] + m.group(2)
+    return name
+
+
+def _display_order(device) -> list[str]:
+    """
+    IOS listing order: physical ports in hardware order, each followed by
+    its subinterfaces, then loopbacks and SVIs in numeric order.
+    """
+    names = list(device.interfaces)
+    physical = [n for n in names if "." not in n
+                and not n.lower().startswith(("vlan", "loopback"))]
+    order: list[str] = []
+    for n in physical:
+        order.append(n)
+        subs = [s for s in names if s.startswith(n + ".")]
+        order += sorted(subs, key=lambda x: int(x.rsplit(".", 1)[1]))
+    rest = [n for n in names if n not in order]
+    order += sorted(rest, key=_natural_key)
+    return order
+
+
+def _natural_key(name: str) -> tuple:
+    """Sort Fa0/2 before Fa0/10."""
+    return tuple(int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name))
+
+
+def _hardware_name(name: str) -> str:
+    low = name.lower()
+    for prefix, hw in (("fa", "Fast Ethernet"), ("gi", "Gigabit Ethernet"),
+                       ("te", "Ten Gigabit Ethernet"), ("vlan", "EtherSVI"),
+                       ("loopback", "Loopback"), ("po", "EtherChannel")):
+        if low.startswith(prefix):
+            return hw
+    return "Ethernet"
+
+
+def _media_type(name: str) -> str:
+    low = name.lower()
+    if low.startswith("gi"):
+        return "10/100/1000BaseTX"
+    if low.startswith("te"):
+        return "10GBase-SR"
+    return "10/100BaseTX"
+
+
+def _switch_port_status(iface) -> str:
+    """show interfaces status word: connected / notconnect / disabled."""
+    if iface.admin_state == InterfaceState.DOWN:
+        return "disabled"
+    if iface.oper_state == InterfaceState.UP:
+        return "connected"
+    return "notconnect"
+
+
+def _cisco_mac(mac) -> str:
+    """Cisco dotted MAC notation: ``aa:bb:cc:dd:ee:ff`` → ``aabb.ccdd.eeff``."""
+    raw = str(getattr(mac, "value", mac)).replace(":", "").replace("-", "").replace(".", "").lower()
+    if len(raw) != 12:
+        return str(mac)
+    return f"{raw[0:4]}.{raw[4:8]}.{raw[8:12]}"
 
 
 def _virtual_iface_mac(device_id: str, iface_name: str):
@@ -3693,24 +4104,45 @@ def _format_help(cmds: list[Cmd]) -> str:
     return "\n".join(lines)
 
 
+_INVALID_HEADER = "% Invalid input detected at '^' marker."
+# _invalid/_invalid_at return the header followed by a machine-readable
+# marker (typed prefix + offending token).  CLISession.execute() replaces it
+# with IOS layout: a caret under the offending token, aligned with the
+# prompt line, then the header.
+_INVALID_MARK = re.compile(re.escape(_INVALID_HEADER) + "\x00([^\x00]*)\x00([^\x01]*)\x01")
+
+
 def _invalid(tok: str) -> str:
-    return (
-        f"% Invalid input detected at '^' marker.\n"
-        f"\n"
-        f"        {tok}\n"
-        f"        ^"
-    )
+    return f"{_INVALID_HEADER}\x00{tok}\x00{tok}\x01"
 
 
 def _invalid_at(line: str, bad_tok: str) -> str:
-    idx = line.lower().rfind(bad_tok.lower())
-    caret = " " * (8 + idx) + "^"
-    return (
-        f"% Invalid input detected at '^' marker.\n"
-        f"\n"
-        f"        {line}\n"
-        f"{caret}"
-    )
+    return f"{_INVALID_HEADER}\x00{line}\x00{bad_tok}\x01"
+
+
+def _render_invalid(output: str, raw: str, prompt: str) -> str:
+    """
+    IOS error layout::
+
+        Switch#shwo version
+               ^
+        % Invalid input detected at '^' marker.
+
+    The caret sits under the offending token of the line as typed.
+    """
+    if "\x00" not in output:
+        return output
+    typed = raw.split("|", 1)[0]
+    starts = [m.start() for m in re.finditer(r"\S+", typed)]
+
+    def repl(m: re.Match) -> str:
+        parts = m.group(1).split()
+        bad = m.group(2).lower()
+        idx = max((i for i, t in enumerate(parts) if t.lower() == bad), default=len(parts) - 1)
+        col = starts[idx] if 0 <= idx < len(starts) else len(typed.rstrip())
+        return " " * (len(prompt) + col) + "^\n" + _INVALID_HEADER
+
+    return _INVALID_MARK.sub(repl, output)
 
 
 def _ambiguous(tok: str, matches: list[str]) -> str:

@@ -184,8 +184,10 @@ class TestRoutedLab:
         sim = routed_lab()
         configure_r1(sim)
         out = _cli(sim, "r1", "show ip route")[0]
-        assert "C    10.1.1.0/24 is directly connected, Gi0/0" in out
-        assert "C    10.2.2.0/24 is directly connected, Gi0/1" in out
+        assert "C        10.1.1.0/24 is directly connected, GigabitEthernet0/0" in out
+        assert "L        10.1.1.1/32 is directly connected, GigabitEthernet0/0" in out
+        assert "C        10.2.2.0/24 is directly connected, GigabitEthernet0/1" in out
+        assert "10.0.0.0/8 is variably subnetted, 4 subnets, 2 masks" in out
 
     def test_host_arps_for_gateway_not_remote_destination(self) -> None:
         sim = routed_lab()
@@ -240,7 +242,9 @@ class TestStaticRoutes:
         assert "172.16.0.0" not in _cli(sim, "r1", "do show ip route")[0]
         _cli(sim, "r1", "int g0/1", "ip address 10.2.2.1 255.255.255.0")
         out = _cli(sim, "r1", "do show ip route")[0]
-        assert "S    172.16.0.0/16 [1/0] via 10.2.2.254" in out
+        # 172.16.0.0/16 is the classful network itself: listed at top level
+        assert "S     172.16.0.0/16 [1/0] via 10.2.2.254" in out
+        assert "172.16.0.0/16 is subnetted" not in out
 
     def test_static_route_withdrawn_when_next_hop_interface_shuts(self) -> None:
         sim = two_router_lab()
@@ -252,7 +256,7 @@ class TestStaticRoutes:
         _cli(sim, "r1", "conf t", "ip route 0.0.0.0 0.0.0.0 10.0.12.2", "end")
         out = _cli(sim, "r1", "show ip route")[0]
         assert "Gateway of last resort is 10.0.12.2 to network 0.0.0.0" in out
-        assert "S*   0.0.0.0/0 [1/0] via 10.0.12.2" in out
+        assert "S*    0.0.0.0/0 [1/0] via 10.0.12.2" in out
 
 
 # ---------------------------------------------------------------------------
@@ -378,15 +382,15 @@ class TestInterfaceNames:
         s.execute("enable")
         s.execute("conf t")
         s.execute("interface g0/1")
-        assert s.execute("bogus command").startswith("% Invalid input")
+        assert s.execute("bogus command").endswith("% Invalid input detected at '^' marker.")
         assert s.mode == CLIMode.IFACE_CONFIG and s.current_iface == "Gi0/1"
 
     def test_show_interfaces_accepts_abbreviations_on_router(self) -> None:
         sim = routed_lab()
         out = _cli(sim, "r1", "enable", "show interfaces g0/1",
                    "show interfaces fa0/9")
-        assert out[1].startswith("Gi0/1 is")
-        assert out[2].startswith("% Invalid input")
+        assert out[1].startswith("GigabitEthernet0/1 is")
+        assert out[2].endswith("% Invalid input detected at '^' marker.")
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +438,10 @@ class TestRouterPing:
         _ping(sim, "pca", "10.2.2.10")
         out = _cli(sim, "r1", "show arp")[0]
         assert "not supported" not in out
-        assert "10.1.1.1         -" in out          # own interface
-        assert "10.1.1.10" in out and "Gi0/0" in out  # learned neighbour
-        assert "10.2.2.10" in out and "Gi0/1" in out
+        rows = {l.split()[1]: l.split() for l in out.splitlines()[1:]}
+        assert rows["10.1.1.1"][2] == "-"                      # own interface
+        assert rows["10.1.1.10"][-1] == "GigabitEthernet0/0"    # learned neighbour
+        assert rows["10.2.2.10"][-1] == "GigabitEthernet0/1"
 
     def test_switch_ping_without_svi_explains_why(self) -> None:
         sim = vlan_lab()
