@@ -256,33 +256,35 @@ class TestSTPProtocolStringConsistency:
 
     def test_stp_protocol_string_consistent(self) -> None:
         """
-        show spanning-tree must say 'rapid-pvst' (not 'rst' or 'rstp').
-        show spanning-tree summary must say 'Rapid PVST+'.
+        IOS wording in rapid-pvst mode: show spanning-tree prints
+        "Spanning tree enabled protocol rstp" and show spanning-tree summary
+        prints "Switch is in rapid-pvst mode".  (PVST+ prints "protocol ieee".)
         """
         s = self._make_session()
         st_out = s.execute("show spanning-tree")
-        assert "rapid-pvst" in st_out, (
-            f"Expected 'rapid-pvst' in show spanning-tree output:\n{st_out}"
-        )
-        assert "rstp" not in st_out.lower().replace("rapid-pvst", ""), (
-            f"'rstp' found in output (old incorrect value):\n{st_out}"
+        assert "Spanning tree enabled protocol rstp" in st_out, (
+            f"Expected 'protocol rstp' in show spanning-tree output:\n{st_out}"
         )
 
         summary_out = s.execute("show spanning-tree summary")
-        assert "Rapid PVST+" in summary_out, (
-            f"Expected 'Rapid PVST+' in show spanning-tree summary:\n{summary_out}"
+        assert "Switch is in rapid-pvst mode" in summary_out, (
+            f"Expected 'Switch is in rapid-pvst mode' in summary:\n{summary_out}"
         )
 
     def test_pvst_mode_shows_pvst(self) -> None:
-        """After 'spanning-tree mode pvst', show spanning-tree must say 'pvst'."""
+        """
+        After 'spanning-tree mode pvst', IOS prints "protocol ieee" in
+        show spanning-tree and "Switch is in pvst mode" in the summary.
+        """
         s = self._make_session()
         s.execute("configure terminal")
         s.execute("spanning-tree mode pvst")
         s.execute("end")
         out = s.execute("show spanning-tree")
-        assert "protocol pvst" in out, (
-            f"Expected 'protocol pvst' in output:\n{out}"
+        assert "Spanning tree enabled protocol ieee" in out, (
+            f"Expected 'protocol ieee' in output:\n{out}"
         )
+        assert "Switch is in pvst mode" in s.execute("show spanning-tree summary")
 
 
 # ---------------------------------------------------------------------------

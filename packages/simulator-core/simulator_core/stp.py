@@ -867,9 +867,9 @@ class STPManager:
     def show_spanning_tree_brief(self) -> str:
         """Generate 'show spanning-tree summary' output."""
         mode_name = {
-            STPMode.PVST: "PVST+",
-            STPMode.RAPID_PVST: "Rapid PVST+",
-            STPMode.MST: "MST",
+            STPMode.PVST: "pvst",
+            STPMode.RAPID_PVST: "rapid-pvst",
+            STPMode.MST: "mst",
         }.get(self._mode, "unknown")
 
         lines = [
@@ -911,9 +911,9 @@ class STPManager:
         bid = inst.bridge_id
         root_bid = inst.root_bridge_id
         mode_name = {
-            STPMode.PVST: "pvst",
-            STPMode.RAPID_PVST: "rapid-pvst",
-            STPMode.MST: "mst",
+            STPMode.PVST: "ieee",
+            STPMode.RAPID_PVST: "rstp",
+            STPMode.MST: "mstp",
         }.get(self._mode, "?")
 
         lines = [
@@ -924,7 +924,7 @@ class STPManager:
         if root_bid:
             lines.append(
                 f"  Root ID    Priority    {root_bid.bridge_priority}\n"
-                f"             Address     {root_bid.mac}\n"
+                f"             Address     {_dotted_mac(root_bid.mac)}\n"
                 f"             {'This bridge is the root' if inst.is_root else f'Cost       {inst.root_path_cost}'}"
             )
             if not inst.is_root and inst.root_port_name:
@@ -938,7 +938,7 @@ class STPManager:
             lines.append(
                 f"\n  Bridge ID  Priority    {bid.bridge_priority} "
                 f"(priority {bid.priority} sys-id-ext {bid.sys_id_ext})\n"
-                f"             Address     {bid.mac}\n"
+                f"             Address     {_dotted_mac(bid.mac)}\n"
                 f"             Hello Time  {inst.timers.hello_time} sec  "
                 f"Max Age {inst.timers.max_age} sec  "
                 f"Forward Delay {inst.timers.forward_delay} sec"
@@ -980,3 +980,11 @@ def _port_sort_key(name: str) -> tuple:
     """Natural port order: Fa0/2 before Fa0/10 (IOS lists ports numerically)."""
     import re
     return tuple(int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name))
+
+
+def _dotted_mac(mac) -> str:
+    """Cisco notation for show output: aa:bb:cc:dd:ee:ff -> aabb.ccdd.eeff."""
+    raw = str(mac).replace(":", "").replace("-", "").replace(".", "").lower()
+    if len(raw) != 12:
+        return str(mac)
+    return f"{raw[0:4]}.{raw[4:8]}.{raw[8:12]}"

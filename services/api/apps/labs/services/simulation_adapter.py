@@ -84,6 +84,8 @@ INTERFACE_CATALOG: dict[str, _InterfaceTemplateSpec] = {
         # an IP address, but does not route between VLANs.
         "supports_svi": True,
         "supports_l3_routing": False,
+        # Catalyst 2960 factory default is PVST+ ("spanning-tree mode pvst").
+        "stp_mode": "pvst",
     },
     "cisco-2911": {
         "count": 3,
@@ -253,6 +255,8 @@ def build_topology_from_document(doc: dict[str, Any]) -> Topology:
             device.supports_l3_routing = INTERFACE_CATALOG[catalog_id].get(
                 "supports_l3_routing", False
             )
+        if catalog_id and INTERFACE_CATALOG.get(catalog_id, {}).get("stp_mode"):
+            device.stp_mode = INTERFACE_CATALOG[catalog_id]["stp_mode"]
         original_interfaces = node.get("interfaces", [])
         if catalog_id and catalog_id in INTERFACE_CATALOG:
             iface_list = _generate_interfaces_from_catalog(

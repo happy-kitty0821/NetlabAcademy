@@ -58,6 +58,9 @@ class RouteEntry:
     source: RouteSource = RouteSource.CONNECTED
     metric: int = 0
     active: bool = True
+    # Exit interface given in "ip route <net> <mask> <interface> [<next-hop>]".
+    # None when the route names only a next hop.
+    exit_interface: Optional[str] = None
 
     @property
     def prefix_length(self) -> int:
@@ -104,11 +107,18 @@ class RoutingTable:
     def add_static_route(
         self,
         network: IPv4Network,
-        next_hop: IPv4Address,
+        next_hop: Optional[IPv4Address],
         interface: str,
         metric: int = 1,
+        exit_interface: Optional[str] = None,
     ) -> None:
-        """Add or replace a static route."""
+        """
+        Add or replace a static route.
+
+        *next_hop* may be None for a route that names only an exit
+        interface (the destination is then treated as on-link and resolved
+        by ARP, relying on proxy ARP at the next router, as on IOS).
+        """
         # Remove any existing static route for the same network
         self._routes = [
             r for r in self._routes
@@ -117,9 +127,10 @@ class RoutingTable:
         self._routes.append(RouteEntry(
             network=network,
             next_hop=next_hop,
-            outgoing_interface=interface,
+            outgoing_interface=exit_interface or interface,
             source=RouteSource.STATIC,
             metric=metric,
+            exit_interface=exit_interface,
         ))
 
     def remove_static_route(self, network: IPv4Network) -> bool:
@@ -188,6 +199,13 @@ class RoutingTable:
         """
         connected = [r for r in self._routes if r.source == RouteSource.CONNECTED]
         for route in self.static_routes:
+            if route.exit_interface is not None:
+                # Installed while the exit interface is up with an address.
+                route.outgoing_interface = route.exit_interface
+                route.active = any(
+                    c.outgoing_interface == route.exit_interface for c in connected
+                )
+                continue
             if route.next_hop is None:
                 continue
             matches = [c for c in connected if route.next_hop in c.network]

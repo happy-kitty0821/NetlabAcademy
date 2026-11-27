@@ -224,15 +224,24 @@ class Router:
         if arp.operation == ARPMessage.ARP_REQUEST and arp.target_ip == own_ip:
             # Reply to ARP request for our IP
             self._send_arp_reply(event, arp, iface)
+        elif (arp.operation == ARPMessage.ARP_REQUEST
+              and arp.target_ip not in iface.ip_config.network):
+            # Proxy ARP (on by default in IOS): answer for an off-link address
+            # we can route out of a *different* interface, so a neighbour
+            # using an exit-interface static route can reach it.
+            route = self._routing_table.lookup(arp.target_ip)
+            if route is not None and route.outgoing_interface != iface_name:
+                self._send_arp_reply(event, arp, iface, sender_ip=arp.target_ip)
 
         elif arp.operation == ARPMessage.ARP_REPLY:
             # Unblock pending packets
             self._unblock_pending(arp.sender_ip, arp.sender_mac)
             self._unblock_pending_pings(arp.sender_ip, arp.sender_mac)
 
-    def _send_arp_reply(self, event: FrameArrival, request: ARPMessage, iface) -> None:
+    def _send_arp_reply(self, event: FrameArrival, request: ARPMessage, iface,
+                        sender_ip: Optional[IPv4Address] = None) -> None:
         own_mac = iface.mac
-        own_ip = iface.ip_config.address
+        own_ip = sender_ip if sender_ip is not None else iface.ip_config.address
         t = event.time + 1
 
         reply = ARPMessage(
