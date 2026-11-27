@@ -224,7 +224,7 @@ class TestShowSpanningTreeSummary:
         )
 
     def test_show_spanning_tree_summary_active_matches_port_count(self) -> None:
-        """Active port count in summary must equal number of physical interfaces."""
+        """Like IOS, the summary counts only ports that are up (one cable here)."""
         s = self._make_session("sw1")
         out = s.execute("show spanning-tree summary")
         lines = out.splitlines()
@@ -235,9 +235,9 @@ class TestShowSpanningTreeSummary:
         assert vlan_line is not None, f"Expected VLAN0001 data line in summary:\n{out}"
         parts = vlan_line.split()
         active_count = int(parts[5])
-        # SW1 has 4 physical interfaces
-        assert active_count == 4, (
-            f"Expected 4 active ports, got {active_count}.\nLine: {vlan_line!r}"
+        # SW1 has 4 physical interfaces but only Gi0/1 is cabled
+        assert active_count == 1, (
+            f"Expected 1 active port, got {active_count}.\nLine: {vlan_line!r}"
         )
 
 
@@ -355,13 +355,10 @@ class TestAccessPortInSTP:
 class TestSTPSummaryForwardingNonzeroOnRoot:
     def test_stp_summary_forwarding_nonzero_on_root(self) -> None:
         """
-        A switch that is root bridge must report all ports forwarding in
-        show spanning-tree summary (forwarding count > 0).
+        A root bridge reports its up ports as forwarding in
+        show spanning-tree summary (unplugged ports are not counted).
         """
-        # Build a single switch — it is always root (no peers)
-        topo, sw_id = _build_switch_topology(
-            ["Gi0/0", "Gi0/1", "Gi0/2"], switch_id="sw1"
-        )
+        topo, _, _ = _build_two_switch_topology()
         sim = Simulation(topo, seed=42)
         s = CLISession(device_id="sw1", simulation=sim)
         s.execute("enable")

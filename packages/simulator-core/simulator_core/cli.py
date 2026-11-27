@@ -2260,7 +2260,10 @@ class CLISession:
                 return "% Incomplete command."
             level = tokens[4].lower()
             if level == "primary":
-                switch.stp.set_root_primary(vlan_id)
+                try:
+                    switch.stp.set_root_primary(vlan_id)
+                except ValueError as exc:
+                    return f"% {exc}"
             elif level == "secondary":
                 switch.stp.set_root_secondary(vlan_id)
             else:
@@ -2359,12 +2362,15 @@ class CLISession:
         switch = self._get_switch()
         if switch is None:
             return "% show spanning-tree is only available on switch devices."
+        return switch.stp.show_spanning_tree(vlan_id, active_ports=self._stp_up_ports())
+
+    def _stp_up_ports(self) -> set[str]:
+        """Switch ports that are up (IOS lists only these in STP output)."""
         device = self.simulation.topology.devices[self.device_id]
-        up_ports = {
+        return {
             n for n, i in device.interfaces.items()
             if i.is_physical_switchport and i.oper_state == InterfaceState.UP
         }
-        return switch.stp.show_spanning_tree(vlan_id, active_ports=up_ports)
 
     def _cmd_show_stp_vlan_dispatch(self, tokens: list[str]) -> str:
         """show spanning-tree vlan <id>"""
@@ -2381,7 +2387,7 @@ class CLISession:
         switch = self._get_switch()
         if switch is None:
             return "% show spanning-tree is only available on switch devices."
-        return switch.stp.show_spanning_tree_brief()
+        return switch.stp.show_spanning_tree_brief(active_ports=self._stp_up_ports())
 
     # ── Show interfaces trunk / status ────────────────────────────────────────
 
@@ -3693,6 +3699,10 @@ class CLISession:
             f"hostname {device.hostname}",
             "!",
         ]
+        switch = self._get_switch()
+        if switch is not None:
+            lines += _stp_global_lines(switch.stp)
+            lines.append("!")
         for name, iface in device.interfaces.items():
             # Skip SVIs on devices that don't support them (e.g. L2-only switches).
             # They should not exist — but if one was created before the capability
@@ -3700,7 +3710,7 @@ class CLISession:
             if iface.is_svi and not device.supports_svi:
                 continue
             lines.append("!")
-            lines += _iface_config_lines(device, name, iface)
+            lines += _iface_config_lines(device, name, iface, switch.stp if switch else None)
         router = self._get_router()
         if router is not None and router.routing_table.static_routes:
             lines.append("!")
@@ -3735,7 +3745,8 @@ class CLISession:
             "Current configuration:",
             "!",
         ]
-        lines += _iface_config_lines(device, matches[0], iface)
+        switch = self._get_switch()
+        lines += _iface_config_lines(device, matches[0], iface, switch.stp if switch else None)
         lines += ["end"]
         return "\n".join(lines)
 
@@ -3871,7 +3882,50 @@ _IFACE_TYPE_FULL = {
 _IFACE_NAME_RE = re.compile(r"^([A-Za-z][A-Za-z-]*)\s*(\d[\d/.:]*)$")
 
 
-def _iface_config_lines(device, name: str, iface) -> list[str]:
+def _stp_global_lines(stp) -> list[str]:
+    """Global spanning-tree lines of the running-config, in IOS order."""
+    lines = [f"spanning-tree mode {stp.mode.value}", "spanning-tree extend system-id"]
+    if getattr(stp, "_portfast_default", False):
+        lines.append("spanning-tree portfast default")
+    for vlan_id, priority in stp.configured_priorities().items():
+        lines.append(f"spanning-tree vlan {vlan_id} priority {priority}")
+    return lines
+
+
+def _stp_iface_lines(stp, name: str) -> list[str]:
+    """Per-interface spanning-tree lines (only non-default settings)."""
+    ports = [(inst.vlan_id, inst.port_states[name])
+             for inst in sorted(stp.all_instances(), key=lambda i: i.vlan_id)
+             if name in inst.port_states]
+    if not ports:
+        return []
+    lines: list[str] = []
+    first = ports[0][1]
+    if first.portfast:
+        lines.append(" spanning-tree portfast")
+    if first.bpduguard:
+        lines.append(" spanning-tree bpduguard enable")
+    if first.bpdufilter:
+        lines.append(" spanning-tree bpdufilter enable")
+    if first.guard in ("root", "loop"):
+        lines.append(f" spanning-tree guard {first.guard}")
+    prios = {vid: (p.port_id.priority if p.port_id else 128) for vid, p in ports}
+    costs = {vid: p.path_cost for vid, p in ports if p.cost_configured}
+    # One value on every VLAN -> the short form; otherwise per-VLAN lines.
+    if len(set(prios.values())) == 1:
+        prio = next(iter(prios.values()))
+        if prio != 128:
+            lines.append(f" spanning-tree port-priority {prio}")
+    else:
+        lines += [f" spanning-tree vlan {v} port-priority {p}" for v, p in prios.items() if p != 128]
+    if costs and len(costs) == len(ports) and len(set(costs.values())) == 1:
+        lines.append(f" spanning-tree cost {next(iter(costs.values()))}")
+    else:
+        lines += [f" spanning-tree vlan {v} cost {c}" for v, c in costs.items()]
+    return lines
+
+
+def _iface_config_lines(device, name: str, iface, stp=None) -> list[str]:
     """
     Running-configuration block for one interface, in IOS order.
 
@@ -3907,6 +3961,8 @@ def _iface_config_lines(device, name: str, iface) -> list[str]:
         elif iface.switchport_mode == "access" and iface.vlan != 1:
             lines.append(f" switchport access vlan {iface.vlan}")
             lines.append(" switchport mode access")
+    if is_switchport and stp is not None:
+        lines += _stp_iface_lines(stp, name)
     if iface.admin_state == InterfaceState.DOWN:
         lines.append(" shutdown")
     lines.append("!")

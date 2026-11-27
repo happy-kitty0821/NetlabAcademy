@@ -269,6 +269,9 @@ class Switch:
 
         # Register all physical interfaces with STP instances.
         self._register_stp_ports()
+        # Re-run the network-wide election whenever STP settings change.
+        if simulation is not None:
+            self._stp.on_change = simulation._trigger_stp
 
         # CDP manager
         hostname = device.hostname if hasattr(device, "hostname") else device.id

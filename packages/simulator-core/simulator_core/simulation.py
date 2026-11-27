@@ -391,6 +391,10 @@ class Simulation:
         if not self._switches:
             return
         all_stps = {dev_id: sw.stp for dev_id, sw in self._switches.items()}
+        # Elect from scratch: stale root path costs from the previous tree
+        # (a removed link, a lowered priority) must not leak into this one.
+        for stp in all_stps.values():
+            stp.reset_election()
         MAX_ITER = 32
         for _iteration in range(MAX_ITER):
             before = self._stp_snapshot()
@@ -446,6 +450,8 @@ class Simulation:
         self._log_interface_transitions()
         for router in self._routers.values():
             router.update_connected_routes()
+        # A port going up or down changes the spanning tree too.
+        self._trigger_stp()
 
     def _compute_oper_states(self) -> None:
         """
@@ -544,8 +550,7 @@ class Simulation:
         self._topology.add_link(link)
         # Keep it across Wipe (reset restores the snapshot)
         self._topology_snapshot.add_link(copy.deepcopy(link))
-        self.refresh_interface_states()
-        self._trigger_stp()
+        self.refresh_interface_states()   # also re-runs STP
 
     def remove_link(self, link_id: str) -> None:
         """
@@ -556,8 +561,7 @@ class Simulation:
         """
         self._topology.remove_link(link_id)
         self._topology_snapshot.remove_link(link_id)
-        self.refresh_interface_states()
-        self._trigger_stp()
+        self.refresh_interface_states()   # also re-runs STP
 
     def start_hello_timers(self, start_tick: int = 0) -> None:
         """

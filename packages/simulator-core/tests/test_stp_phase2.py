@@ -185,24 +185,16 @@ class TestAddLinkTriggersReelection:
 
     def test_root_before_link_is_deterministic(self) -> None:
         """
-        Before any link, run_stp still runs globally.  The centralized
-        algorithm picks a winner from all switches in all_stps (even without
-        a physical link).  This tests that the state is at least consistent:
-        exactly one root is elected from the global bridge-ID comparison.
+        Before any link, the two switches cannot hear each other, so (as on
+        real IOS) each one is the root of its own spanning tree.
         """
         topo, _ = self._build_no_link()
         sim = _build_sim(topo)
         inst1 = sim.get_switch("sw1").stp.get_instance(1)
         inst2 = sim.get_switch("sw2").stp.get_instance(1)
-        # Both must agree on the same root_bridge_id (global election)
-        assert inst1.root_bridge_id == inst2.root_bridge_id, (
-            "Even without a link, both switches must agree on a root_bridge_id "
+        assert inst1.is_root and inst2.is_root, (
+            "Unconnected switches must each be their own root "
             f"(SW1={inst1.root_bridge_id}, SW2={inst2.root_bridge_id})"
-        )
-        # Exactly one of them is root
-        assert inst1.is_root or inst2.is_root, "At least one must be root"
-        assert not (inst1.is_root and inst2.is_root), (
-            "Both claim root before add_link — election failed"
         )
 
     def test_one_root_after_add_link(self) -> None:
@@ -531,47 +523,31 @@ class TestReconvergenceAfterLinkFailure:
         if not inst2.is_root:
             assert root_port is not None, "SW2 (non-root) must have a root port"
 
-    def test_alternate_becomes_root_after_link_removal(self) -> None:
+    def test_segment_between_non_roots_goes_to_lower_bridge_id(self) -> None:
+        """
+        SW2 and SW3 both reach the root at cost 19; on their shared link the
+        lower bridge ID (SW2) is designated and SW3 blocks (IOS tie-break).
+        """
         sim = _build_sim(self._build_triangle())
         inst2 = sim.get_switch("sw2").stp.get_instance(1)
-        if inst2.is_root:
-            pytest.skip("SW2 happened to be root — no meaningful re-election needed")
+        inst3 = sim.get_switch("sw3").stp.get_instance(1)
+        assert inst2.port_states["Gi0/1"].role == PortRole.DESIGNATED
+        assert inst3.port_states["Gi0/1"].role == PortRole.ALTERNATE
 
-        rp, ap = self._find_sw2_root_and_alternate_ports(sim)
-        if rp is None:
-            pytest.skip("SW2 has no root port in this topology — skipping")
+    def test_alternate_becomes_root_after_link_removal(self) -> None:
+        sim = _build_sim(self._build_triangle())
+        inst3 = sim.get_switch("sw3").stp.get_instance(1)
+        assert inst3.root_port_name == "Gi0/0"
+        assert inst3.port_states["Gi0/1"].role == PortRole.ALTERNATE
 
-        # Find the link connecting to SW2's root port
-        link_to_remove = sim.topology.get_link("sw2", rp)
-        assert link_to_remove is not None, (
-            f"Could not find link on SW2.{rp}"
+        # Cut SW3's root-port link: its alternate port takes over.
+        sim.remove_link("l13")
+        inst3 = sim.get_switch("sw3").stp.get_instance(1)
+        assert not inst3.is_root
+        assert inst3.root_port_name == "Gi0/1", (
+            f"SW3's alternate port should become its root port, got {inst3.root_port_name}"
         )
-
-        # Remove it and trigger STP recalculation
-        sim.remove_link(link_to_remove.id)
-        # remove_link already calls _trigger_stp; call run_stp once more for safety
-        sim.run_stp()
-
-        inst2_after = sim.get_switch("sw2").stp.get_instance(1)
-
-        # Acceptable outcomes:
-        # 1. SW2 is now root (all paths to previous root gone)
-        # 2. SW2's former alternate port is now a root (or designated) port
-        sw2_is_root = inst2_after.is_root
-        ap_now_root_or_designated = False
-        if ap is not None:
-            ap_state = inst2_after.port_states.get(ap)
-            if ap_state is not None:
-                ap_now_root_or_designated = ap_state.role in (
-                    PortRole.ROOT, PortRole.DESIGNATED
-                )
-
-        assert sw2_is_root or ap_now_root_or_designated, (
-            f"After root-port link removal, SW2's former alternate port {ap!r} "
-            f"should be ROOT/DESIGNATED or SW2 should be root. "
-            f"is_root={sw2_is_root}, ap_role="
-            + (str(inst2_after.port_states[ap].role) if ap and ap in inst2_after.port_states else "N/A")
-        )
+        assert inst3.root_path_cost == 8   # two GigabitEthernet hops (cost 4 each)
 
     def test_remaining_switches_agree_on_root_after_failure(self) -> None:
         sim = _build_sim(self._build_triangle())
