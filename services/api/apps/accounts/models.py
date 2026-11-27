@@ -51,11 +51,17 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """
-    Platform user.
+    Platform user, persisted in the database.
 
     Login identifier: email (not username).
-    Role is stored directly on the user for simplicity at this stage;
-    object-level permissions are enforced in views and serializers.
+    Role is stored directly on the user (one role per user) and is the input
+    to every authorization check; see ``apps.accounts.permissions``.
+    Object-level permissions are enforced in views and serializers.
+
+    ``status`` is the source of truth for whether the account may sign in:
+    ``is_active`` (what Django and SimpleJWT check) is derived from it on
+    every save, so suspending or archiving a user also invalidates their
+    existing access tokens on the next request.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -86,6 +92,18 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self) -> str:
         return self.email
+
+    def save(self, *args, **kwargs):
+        # Only ACTIVE accounts can authenticate (invited, suspended and
+        # archived accounts cannot).
+        self.is_active = self.status == AccountStatus.ACTIVE
+        if kwargs.get("update_fields") is not None and "status" in kwargs["update_fields"]:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"is_active"}
+        super().save(*args, **kwargs)
+
+    def has_role(self, *roles: str) -> bool:
+        """True when the user's role is one of *roles*."""
+        return self.role in roles
 
     @property
     def full_name(self) -> str:

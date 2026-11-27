@@ -8,8 +8,16 @@ import {
   Network, Settings, Users, ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth-context";
+import type { Role } from "@/types/api";
 
-interface NavItem { label: string; href: string; icon: React.ElementType; }
+interface NavItem {
+  label: string;
+  href: string;
+  icon: React.ElementType;
+  /** Roles that see this link; omitted = everyone signed in. */
+  roles?: Role[];
+}
 
 const NAV: NavItem[] = [
   { label: "Dashboard", href: "/dashboard",     icon: LayoutDashboard },
@@ -19,14 +27,18 @@ const NAV: NavItem[] = [
 ];
 
 const BOTTOM_NAV: NavItem[] = [
-  { label: "Devices",  href: "/admin/devices", icon: Network },
-  { label: "Users",    href: "/admin/users",   icon: Users },
+  { label: "Devices",  href: "/admin/devices", icon: Network, roles: ["admin"] },
+  { label: "Users",    href: "/admin/users",   icon: Users,   roles: ["admin"] },
   { label: "Settings", href: "/settings",      icon: Settings },
 ];
 
 export function Sidebar() {
   const pathname    = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const { user } = useAuth();
+  // UI convenience only: the API enforces roles server-side.
+  const visible = (item: NavItem) =>
+    !item.roles || (user !== null && item.roles.includes(user.role));
 
   return (
     <aside
@@ -60,7 +72,7 @@ export function Sidebar() {
       {/* Primary nav */}
       <nav aria-label="Main navigation" className="flex-1 overflow-y-auto py-3 px-2">
         <ul role="list" className="space-y-0.5">
-          {NAV.map((item) => (
+          {NAV.filter(visible).map((item) => (
             <li key={item.href}>
               <NavLink item={item} pathname={pathname} collapsed={collapsed} />
             </li>
@@ -71,7 +83,7 @@ export function Sidebar() {
       {/* Bottom nav */}
       <div className="border-t border-[#d0d7de] py-3 px-2">
         <ul role="list" className="space-y-0.5">
-          {BOTTOM_NAV.map((item) => (
+          {BOTTOM_NAV.filter(visible).map((item) => (
             <li key={item.href}>
               <NavLink item={item} pathname={pathname} collapsed={collapsed} />
             </li>
