@@ -179,6 +179,11 @@ class EthernetFrame:
     bpdu_payload:
         BPDU carried by this frame.  Set only for STP BPDU frames; ``None``
         for all other frame types.
+    vlan_tag:
+        802.1Q VLAN ID carried in the frame's tag, or ``None`` for an
+        untagged frame.  Switches set it when a frame leaves a trunk port on
+        a non-native VLAN and read it when classifying a frame that arrives
+        on a trunk.  End hosts and routers never send tagged frames.
     """
 
     # Required fields (no defaults) must come before optional fields.
@@ -189,6 +194,7 @@ class EthernetFrame:
     payload: Optional[EthernetPayload] = None
     bpdu_payload: Optional["BPDU"] = None
     cdp_payload: Optional["CDPEntry"] = None
+    vlan_tag: Optional[int] = None
 
     ETHERTYPE_IPV4: int = 0x0800
     ETHERTYPE_ARP: int = 0x0806
