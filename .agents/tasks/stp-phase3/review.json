@@ -1,0 +1,36 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "severity": "MED",
+      "phase": 3,
+      "description": "Generation read bug in _schedule_next_hello: the method re-reads the generation from _hello_generation instead of using the validated generation from the event. A topology-event bump between a hello firing and its reschedule causes _schedule_next_hello to schedule under the new generation, creating a second active chain alongside the original.",
+      "suggestion": "Pass the validated generation as an explicit parameter from _handle_bpdu_hello to _schedule_next_hello rather than re-reading it from the dict."
+    },
+    {
+      "severity": "MED",
+      "phase": 6,
+      "description": "RootGuard fires after recalculate_from_bpdus has already committed the superior root to inst.root_bridge_id. The guard clears best_bpdu and sets ROOT_INCONSISTENT but does not revert inst.root_bridge_id, leaving the instance with an incorrect root until the next hello or max-age cycle.",
+      "suggestion": "Move the RootGuard check to before received_better is accepted (before best_bpdu is stored and recalculate_from_bpdus is called), or call recalculate_from_bpdus a second time after clearing best_bpdu."
+    },
+    {
+      "severity": "MED",
+      "phase": 6,
+      "description": "ROOT_INCONSISTENT has no automatic recovery path. recalculate_from_bpdus skips ROOT_INCONSISTENT ports, and _check_max_age_expiry does not reset them to DISCARDING when best_bpdu is None. The recovery test manually sets ps.state = DISCARDING, confirming the production path is absent.",
+      "suggestion": "In _check_max_age_expiry, when a ROOT_INCONSISTENT port has best_bpdu=None and last_bpdu_tick is older than max_age, reset the port to DISCARDING so recalculate_from_bpdus can restore it to DESIGNATED."
+    },
+    {
+      "severity": "LOW",
+      "phase": 5,
+      "description": "Stale docstring in is_port_learning_or_forwarding: still reads 'timer-driven LEARNING state is not simulated' and 'ports go directly to FORWARDING in the current educational model', which contradicts the Phase 5 implementation.",
+      "suggestion": "Update the docstring to reflect that LEARNING state is now implemented and timer-driven via ForwardDelayEvent."
+    },
+    {
+      "severity": "LOW",
+      "phase": 1,
+      "description": "test_vlan10_blocked_when_trunk_discarding_for_vlan10 only checks is_port_forwarding returns False (a state assertion), not that _forward() correctly uses frame_vlan to drop the frame. The test name implies a forwarding-gate check that is absent. The actual forwarding-gate test is test_vlan10_not_permitted_because_vlan1_forwarding.",
+      "suggestion": "Rename or extend the first test to actually call _forward() with frame_vlan=10 and assert no FrameTransmit is produced, or remove it as redundant."
+    }
+  ],
+  "reviewDoc": "c:\\Users\\User\\Documents\\NetlabAcademy\\.agents\\tasks\\stp-phase3\\review.md"
+}
