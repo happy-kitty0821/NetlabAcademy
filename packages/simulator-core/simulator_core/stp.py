@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import Callable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +179,7 @@ class STPPortState:
 
     # Port cost (auto-computed from speed, or manually set)
     path_cost: int = 19          # Default for 100 Mbps (IOS default)
+    cost_configured: bool = False  # set by "spanning-tree [vlan N] cost"
     port_id:   Optional[PortID] = None
 
     # Port-fast
@@ -259,6 +260,13 @@ class STPInstance:
 # STP manager (lives on the Switch device object)
 # ---------------------------------------------------------------------------
 
+def _port_id(port: Optional["STPPortState"]) -> "PortID":
+    """A port's ID for comparisons (IOS default priority 128 when unset)."""
+    if port is None or port.port_id is None:
+        return PortID(priority=128, number=0)
+    return port.port_id
+
+
 class STPManager:
     """
     STP/RSTP/PVST+ manager for a switch.
@@ -292,8 +300,20 @@ class STPManager:
         self._stp_enabled: bool = True
         self._portfast_default: bool = False    # portfast default on access ports
 
+        # Called after any change that affects the spanning tree (priority,
+        # port cost or priority, PortFast, mode).  The simulation sets it to
+        # re-run the network-wide election; a stand-alone manager has none.
+        self.on_change: Optional[Callable[[], None]] = None
+
         # Initialize default instance for VLAN 1
         self._get_or_create_instance(1)
+
+    def _changed(self) -> bool:
+        """Ask the simulation to re-run the election.  False if stand-alone."""
+        if self.on_change is None:
+            return False
+        self.on_change()
+        return True
 
     # ------------------------------------------------------------------
     # Configuration API
@@ -305,7 +325,12 @@ class STPManager:
 
     @mode.setter
     def mode(self, value: STPMode) -> None:
+        changed = value != self._mode
         self._mode = value
+        for inst in self._instances.values():
+            inst.mode = value
+        if changed:
+            self._changed()
 
     @property
     def enabled(self) -> bool:
@@ -337,11 +362,47 @@ class STPManager:
             sys_id_ext=vlan_id,
             mac=self._mac,
         )
-        self._recalculate_instance(inst)
+        # The root can only be known network-wide; a stand-alone manager
+        # (unit tests) falls back to treating itself as root.
+        if not self._changed():
+            self._recalculate_instance(inst)
 
-    def set_root_primary(self, vlan_id: int) -> None:
-        """Set this switch as the primary root (priority 24576)."""
-        self.set_bridge_priority(vlan_id, 24576)
+    def configured_priorities(self) -> dict[int, int]:
+        """VLAN -> bridge priority, for VLANs whose priority is not the default."""
+        return {
+            vid: inst.bridge_id.priority
+            for vid, inst in sorted(self._instances.items())
+            if inst.bridge_id is not None and inst.bridge_id.priority != self._global_priority
+        }
+
+    def root_primary_priority(self, vlan_id: int) -> int:
+        """
+        Priority that ``spanning-tree vlan N root primary`` would set (IOS rule).
+
+        24576 if that makes this switch the root; otherwise 4096 below the
+        current root's priority.  Raises ValueError when even priority 0
+        cannot win (the root already has priority 0 and a lower MAC).
+        """
+        inst = self._get_or_create_instance(vlan_id)
+        root = inst.root_bridge_id
+        own = inst.bridge_id
+        if root is None or own is None or root == own:
+            # Already root: IOS still lowers the priority to 24576.
+            return min(24576, own.priority if own else 24576)
+        if BridgeID(24576, vlan_id, self._mac) < root:
+            return 24576
+        target = (root.priority // 4096) * 4096 - 4096
+        if target >= 0 and BridgeID(target, vlan_id, self._mac) < root:
+            return target
+        if target + 4096 >= 0 and BridgeID(target + 4096, vlan_id, self._mac) < root:
+            return target + 4096
+        raise ValueError(f"Failed to make the bridge root for vlan {vlan_id}")
+
+    def set_root_primary(self, vlan_id: int) -> int:
+        """Make this switch the root (IOS rule, see root_primary_priority)."""
+        priority = self.root_primary_priority(vlan_id)
+        self.set_bridge_priority(vlan_id, priority)
+        return priority
 
     def set_root_secondary(self, vlan_id: int) -> None:
         """Set this switch as the secondary root (priority 28672)."""
@@ -354,6 +415,7 @@ class STPManager:
         inst = self._get_or_create_instance(vlan_id)
         port = self._get_or_create_port(inst, iface_name)
         port.port_id = PortID(priority=priority, number=port.port_id.number if port.port_id else 0)
+        self._changed()
 
     def set_port_cost(self, iface_name: str, vlan_id: int, cost: int) -> None:
         """Manually set port path cost."""
@@ -362,6 +424,8 @@ class STPManager:
         inst = self._get_or_create_instance(vlan_id)
         port = self._get_or_create_port(inst, iface_name)
         port.path_cost = cost
+        port.cost_configured = True
+        self._changed()
 
     def set_portfast(self, iface_name: str, enabled: bool) -> None:
         """Enable or disable PortFast on an interface (all VLANs)."""
@@ -371,6 +435,7 @@ class STPManager:
             if enabled:
                 port.state = PortState.FORWARDING
                 port.role  = PortRole.EDGE
+        self._changed()
 
     def set_bpduguard(self, iface_name: str, enabled: bool) -> None:
         for inst in self._instances.values():
@@ -638,12 +703,12 @@ class STPManager:
 
         vlan_id = inst.vlan_id
 
-        # Collect all participating bridge IDs (this switch + connected switches)
+        # Only switches this one can reach over up links take part (a
+        # switch cut off from the rest of the network elects its own root).
+        reachable = self._reachable_switches(topology, all_switches)
         all_bids: list[BridgeID] = [inst.bridge_id]
-        for peer_id, peer_stp in all_switches.items():
-            if peer_id == self._device_id:
-                continue
-            peer_inst = peer_stp.get_instance(vlan_id)
+        for peer_id in reachable:
+            peer_inst = all_switches[peer_id].get_instance(vlan_id)
             if peer_inst and peer_inst.bridge_id:
                 all_bids.append(peer_inst.bridge_id)
 
@@ -651,6 +716,16 @@ class STPManager:
         root_bid = min(all_bids)
         inst.root_bridge_id = root_bid
         is_root = (root_bid == inst.bridge_id)
+
+        def peer_of(port_name: str):
+            """(peer STPInstance, peer port state) across an up link, or None."""
+            peer = self._find_connected_switch_port(port_name, topology)
+            if peer is None or peer[0] not in all_switches:
+                return None
+            peer_inst = all_switches[peer[0]].get_instance(vlan_id)
+            if peer_inst is None:
+                return None
+            return peer_inst, peer_inst.port_states.get(peer[1])
 
         if is_root:
             inst.root_path_cost = 0
@@ -662,68 +737,92 @@ class STPManager:
                 else:
                     port.role  = PortRole.DESIGNATED
                 port.state = PortState.FORWARDING
-        else:
-            # Find root port: port connected to a switch with lowest bid closer to root
-            best_cost = 999999
-            best_port = None
-            for port_name, port_state in inst.port_states.items():
-                # Skip administratively down interfaces — they cannot be root ports.
-                if self._is_port_admin_down(port_name, topology):
-                    continue
-                # Look for a connected switch peer
-                peer_id = self._find_connected_switch(port_name, topology)
-                if peer_id and peer_id in all_switches:
-                    peer_inst = all_switches[peer_id].get_instance(vlan_id)
-                    if peer_inst and peer_inst.root_bridge_id == root_bid:
-                        total_cost = peer_inst.root_path_cost + port_state.path_cost
-                        if total_cost < best_cost:
-                            best_cost = total_cost
-                            best_port = port_name
-                    elif peer_inst and peer_inst.bridge_id == root_bid:
-                        # Direct connection to root
-                        total_cost = port_state.path_cost
-                        if total_cost < best_cost:
-                            best_cost = total_cost
-                            best_port = port_name
+            return
 
-            inst.root_path_cost = best_cost if best_port else 0
-            inst.root_port_name = best_port
+        # Root port: lowest (root path cost, sender bridge ID, sender port
+        # ID, own port ID) among ports whose neighbour already agrees on the
+        # root -- the 802.1D priority vector.
+        best_key = None
+        best_port = None
+        for port_name, port_state in inst.port_states.items():
+            peer = peer_of(port_name)
+            if peer is None:
+                continue
+            peer_inst, peer_port = peer
+            if peer_inst.root_bridge_id != root_bid:
+                continue
+            key = (
+                peer_inst.root_path_cost + port_state.path_cost,
+                peer_inst.bridge_id,
+                _port_id(peer_port),
+                _port_id(port_state),
+            )
+            if best_key is None or key < best_key:
+                best_key, best_port = key, port_name
 
-            for port_name, port_state in inst.port_states.items():
-                if port_state.portfast:
-                    port_state.role  = PortRole.EDGE
-                    port_state.state = PortState.FORWARDING
-                elif port_name == best_port:
-                    port_state.role  = PortRole.ROOT
-                    port_state.state = PortState.FORWARDING
+        inst.root_path_cost = best_key[0] if best_key else 0
+        inst.root_port_name = best_port
+
+        for port_name, port_state in inst.port_states.items():
+            if port_state.portfast:
+                port_state.role  = PortRole.EDGE
+                port_state.state = PortState.FORWARDING
+                continue
+            if port_name == best_port:
+                port_state.role  = PortRole.ROOT
+                port_state.state = PortState.FORWARDING
+                continue
+            peer = peer_of(port_name)
+            if peer is None:
+                # Edge / access port, or not up -- designated
+                port_state.role  = PortRole.DESIGNATED
+                port_state.state = PortState.FORWARDING
+                continue
+            peer_inst, peer_port = peer
+            # Designated port for the segment: the side advertising the
+            # better (root path cost, bridge ID, port ID).
+            ours = (inst.root_path_cost, inst.bridge_id, _port_id(port_state))
+            theirs = (
+                peer_inst.root_path_cost if peer_inst.root_bridge_id == root_bid else 999999,
+                peer_inst.bridge_id,
+                _port_id(peer_port),
+            )
+            if ours < theirs:
+                port_state.role  = PortRole.DESIGNATED
+                port_state.state = PortState.FORWARDING
+            else:
+                # Peer has the better path -- alternate (blocking)
+                port_state.role  = PortRole.ALTERNATE
+                if self._mode == STPMode.RAPID_PVST:
+                    port_state.state = PortState.DISCARDING
                 else:
-                    # Check if this is a designated or alternate port
-                    peer_id = self._find_connected_switch(port_name, topology)
-                    if peer_id is None:
-                        # Edge / access port — designated
-                        port_state.role  = PortRole.DESIGNATED
-                        port_state.state = PortState.FORWARDING
-                    else:
-                        # Compare our path cost to root vs. peer's cost
-                        peer_inst = all_switches.get(peer_id, None)
-                        if peer_inst:
-                            pi = peer_inst.get_instance(vlan_id)
-                            peer_cost = (pi.root_path_cost if pi else 999999)
-                        else:
-                            peer_cost = 999999
+                    port_state.state = PortState.BLOCKING
 
-                        our_cost = inst.root_path_cost + port_state.path_cost
-                        if our_cost <= peer_cost:
-                            # We have better or equal path — designated
-                            port_state.role  = PortRole.DESIGNATED
-                            port_state.state = PortState.FORWARDING
-                        else:
-                            # Peer has better path — alternate (blocking)
-                            port_state.role  = PortRole.ALTERNATE
-                            if self._mode == STPMode.RAPID_PVST:
-                                port_state.state = PortState.DISCARDING
-                            else:
-                                port_state.state = PortState.BLOCKING
+    def reset_election(self) -> None:
+        """Forget the last election (each switch believes it is the root)."""
+        for inst in self._instances.values():
+            inst.root_bridge_id = inst.bridge_id
+            inst.root_path_cost = 0
+            inst.root_port_name = None
+
+    def _reachable_switches(self, topology, all_switches: dict[str, "STPManager"]) -> set[str]:
+        """Other switches reachable from this one over up switch-to-switch links."""
+        seen = {self._device_id}
+        queue = [self._device_id]
+        while queue:
+            current = all_switches.get(queue.pop())
+            if current is None:
+                continue
+            device = topology.devices.get(current._device_id)
+            if device is None:
+                continue
+            for name in device.interfaces:
+                peer = current._find_connected_switch_port(name, topology)
+                if peer and peer[0] not in seen and peer[0] in all_switches:
+                    seen.add(peer[0])
+                    queue.append(peer[0])
+        seen.discard(self._device_id)
+        return seen
 
     def _is_port_admin_down(self, port_name: str, topology) -> bool:
         """Return True if this port's interface is administratively down."""
@@ -735,6 +834,30 @@ class STPManager:
             return False
         from simulator_core.types import InterfaceState
         return iface.admin_state == InterfaceState.DOWN
+
+    def _find_connected_switch_port(self, port_name: str, topology) -> Optional[tuple[str, str]]:
+        """
+        (switch id, its port) at the far end of *port_name*, when the link is
+        up (both ports cabled and enabled).  None for hosts, routers and
+        down or unplugged ports, which do not take part in STP.
+        """
+        from simulator_core.types import DeviceModel, InterfaceState
+        device = topology.devices.get(self._device_id)
+        iface = device.interfaces.get(port_name) if device else None
+        def down(i) -> bool:
+            return (i is None or i.oper_state != InterfaceState.UP
+                    or i.admin_state == InterfaceState.DOWN)
+        if down(iface):
+            return None
+        peer = topology.neighbours(self._device_id, port_name)
+        if peer is None:
+            return None
+        peer_device = topology.devices.get(peer[0])
+        if peer_device is None or peer_device.model != DeviceModel.SWITCH:
+            return None
+        if down(peer_device.interfaces.get(peer[1])):
+            return None
+        return peer[0], peer[1]
 
     def _find_connected_switch(self, port_name: str, topology) -> Optional[str]:
         """Return the device_id of the switch connected via port_name, or None."""
@@ -864,30 +987,45 @@ class STPManager:
             lines.append("")
         return "\n".join(lines)
 
-    def show_spanning_tree_brief(self) -> str:
-        """Generate 'show spanning-tree summary' output."""
-        mode_name = {
-            STPMode.PVST: "pvst",
-            STPMode.RAPID_PVST: "rapid-pvst",
-            STPMode.MST: "mst",
-        }.get(self._mode, "unknown")
+    def show_spanning_tree_brief(self, active_ports: Optional[set[str]] = None) -> str:
+        """
+        Generate 'show spanning-tree summary' output.
 
+        Like IOS, only ports that are up are counted; *active_ports* is that
+        set (None counts every registered port, for stand-alone use).
+        """
+        def counted(inst: STPInstance) -> list[STPPortState]:
+            return [p for n, p in inst.port_states.items()
+                    if active_ports is None or n in active_ports]
+
+        instances = sorted(self._instances.values(), key=lambda i: i.vlan_id)
+        root_for = [f"VLAN{i.vlan_id:04d}" for i in instances if i.is_root]
+        portfast = "enabled" if self._portfast_default else "disabled"
+        rule = "---------------------- -------- --------- -------- ---------- ----------"
         lines = [
-            f"Switch is in {mode_name} mode",
-            f"Root bridge for: {', '.join(f'VLAN{i.vlan_id:04d}' for i in self._instances.values() if i.is_root) or 'none'}",
+            f"Switch is in {self._mode.value} mode",
+            f"Root bridge for: {', '.join(root_for) or 'none'}",
+            "Extended system ID           is enabled",
+            f"Portfast Default             is {portfast}",
             "",
             "Name                   Blocking Listening Learning Forwarding STP Active",
-            "---------------------- -------- --------- -------- ---------- ----------",
+            rule,
         ]
-        for inst in sorted(self._instances.values(), key=lambda i: i.vlan_id):
-            blocking = sum(1 for p in inst.port_states.values() if p.is_blocking)
-            forwarding = sum(1 for p in inst.port_states.values() if p.state == PortState.FORWARDING)
-            learning = sum(1 for p in inst.port_states.values() if p.state == PortState.LEARNING)
-            active = len(inst.port_states)
-            name = f"VLAN{inst.vlan_id:04d}"
-            lines.append(
-                f"{name:<22} {blocking:<8} {0:<9} {learning:<8} {forwarding:<10} {active}"
-            )
+        totals = [0, 0, 0, 0, 0]
+        for inst in instances:
+            ports = counted(inst)
+            row = [
+                sum(1 for p in ports if p.is_blocking),
+                sum(1 for p in ports if p.state == PortState.LISTENING),
+                sum(1 for p in ports if p.state == PortState.LEARNING),
+                sum(1 for p in ports if p.state == PortState.FORWARDING),
+                len(ports),
+            ]
+            totals = [a + b for a, b in zip(totals, row)]
+            lines.append(f"{f'VLAN{inst.vlan_id:04d}':<22} {row[0]:>8} {row[1]:>9} {row[2]:>8} {row[3]:>10} {row[4]:>10}")
+        lines.append(rule)
+        label = f"{len(instances)} vlan{'s' if len(instances) != 1 else ''}"
+        lines.append(f"{label:<22} {totals[0]:>8} {totals[1]:>9} {totals[2]:>8} {totals[3]:>10} {totals[4]:>10}")
         return "\n".join(lines)
 
     def show_spanning_tree_detail(self, iface_name: str) -> str:
@@ -963,7 +1101,7 @@ class STPManager:
                 PortState.LEARNING:          "LRN",
                 PortState.LISTENING:         "LIS",
                 PortState.BLOCKING:          "BLK",
-                PortState.DISCARDING:        "DSC",
+                PortState.DISCARDING:        "BLK",   # IOS prints BLK for RSTP discarding too
                 PortState.DISABLED:          "DIS",
                 PortState.ERR_DISABLED:      "ERR",
                 PortState.ROOT_INCONSISTENT: "RIN",
