@@ -24,6 +24,19 @@ export interface User {
   profile: UserProfile | null;
 }
 
+/** A user as returned by the administrator API (/api/v1/users/). */
+export interface AdminUser {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  role: Role;
+  status: AccountStatus;
+  date_joined: string;
+  last_login: string | null;
+}
+
 export interface AuthTokens {
   access: string;
   refresh: string;
