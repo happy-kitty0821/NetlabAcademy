@@ -393,8 +393,10 @@ class Simulation:
         all_stps = {dev_id: sw.stp for dev_id, sw in self._switches.items()}
         # Elect from scratch: stale root path costs from the previous tree
         # (a removed link, a lowered priority) must not leak into this one.
+        reach_cache: dict = {}
         for stp in all_stps.values():
             stp.reset_election()
+            stp.reach_cache = reach_cache
         MAX_ITER = 32
         for _iteration in range(MAX_ITER):
             before = self._stp_snapshot()
@@ -404,6 +406,8 @@ class Simulation:
             after = self._stp_snapshot()
             if after == before:
                 break  # stable state reached
+        for stp in all_stps.values():
+            stp.reach_cache = None
 
     def _stp_snapshot(self) -> dict:
         """Snapshot relevant STP state for convergence detection."""

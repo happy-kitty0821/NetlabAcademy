@@ -272,6 +272,8 @@ class Switch:
         # Re-run the network-wide election whenever STP settings change.
         if simulation is not None:
             self._stp.on_change = simulation._trigger_stp
+        # PVST+: each VLAN's tree runs only over ports carrying that VLAN.
+        self._stp.port_vlan_filter = self._stp_port_in_vlan
 
         # CDP manager
         hostname = device.hostname if hasattr(device, "hostname") else device.id
@@ -795,6 +797,14 @@ class Switch:
     # ------------------------------------------------------------------
     # Port VLAN membership check
     # ------------------------------------------------------------------
+
+    def _stp_port_in_vlan(self, iface_name: str, vlan_id: int) -> bool:
+        """
+        A port takes part in VLAN *vlan_id*'s spanning tree when the VLAN
+        exists in the VLAN database and the port carries it (its access
+        VLAN, or allowed on its trunk).
+        """
+        return vlan_id in self._vlans and self._port_carries_vlan(iface_name, vlan_id)
 
     def _port_carries_vlan(self, iface_name: str, vlan_id: int) -> bool:
         """True if this port should carry traffic for vlan_id."""
