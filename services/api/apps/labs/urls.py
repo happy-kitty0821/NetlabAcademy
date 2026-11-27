@@ -16,6 +16,10 @@ from .views import (
     SimulationResetView,
     SimulationTraceView,
     SimulationCLIView,
+    SimulationConsoleView,
+    SimulationLinkDetailView,
+    SimulationLinksView,
+    SimulationSyslogView,
 )
 
 urlpatterns = [
@@ -30,6 +34,10 @@ urlpatterns = [
     path("simulations/<str:session_id>/trace/", SimulationTraceView.as_view(), name="sim-trace"),
     path("simulations/<str:session_id>/reset/", SimulationResetView.as_view(), name="sim-reset"),
     path("simulations/<str:session_id>/cli/", SimulationCLIView.as_view(), name="sim-cli"),
+    path("simulations/<str:session_id>/console/<str:device_id>/", SimulationConsoleView.as_view(), name="sim-console"),
+    path("simulations/<str:session_id>/syslog/", SimulationSyslogView.as_view(), name="sim-syslog"),
+    path("simulations/<str:session_id>/links/", SimulationLinksView.as_view(), name="sim-links"),
+    path("simulations/<str:session_id>/links/<str:link_id>/", SimulationLinkDetailView.as_view(), name="sim-link-detail"),
     path(
         "simulations/<str:session_id>/devices/<str:device_id>/",
         SimulationDeviceStateView.as_view(),

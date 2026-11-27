@@ -4,9 +4,12 @@
  * FlowNodes — light-theme node icons for the topology canvas.
  *
  * Clean white cards with coloured icon strokes.
- * Handles are small blue dots always visible at the 4 cardinal points.
+ * Handles are small blue dots at the 4 cardinal points. Each is a single
+ * connection point (the canvas uses loose connection mode), so a cable can
+ * be dragged from any dot to any device in either direction.
  */
 
+import { createContext, useContext } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { DeviceNode } from "@/lib/deviceTypes";
 
@@ -39,22 +42,23 @@ function NodeHandles() {
   };
   return (
     <>
-      <Handle type="source" position={Position.Top}    style={s}                    id="s-t" />
-      <Handle type="source" position={Position.Right}  style={s}                    id="s-r" />
-      <Handle type="source" position={Position.Bottom} style={s}                    id="s-b" />
-      <Handle type="source" position={Position.Left}   style={s}                    id="s-l" />
-      <Handle type="target" position={Position.Top}    style={{ ...s, opacity: 0 }} id="t-t" />
-      <Handle type="target" position={Position.Right}  style={{ ...s, opacity: 0 }} id="t-r" />
-      <Handle type="target" position={Position.Bottom} style={{ ...s, opacity: 0 }} id="t-b" />
-      <Handle type="target" position={Position.Left}   style={{ ...s, opacity: 0 }} id="t-l" />
+      <Handle type="source" position={Position.Top}    style={s} id="s-t" />
+      <Handle type="source" position={Position.Right}  style={s} id="s-r" />
+      <Handle type="source" position={Position.Bottom} style={s} id="s-b" />
+      <Handle type="source" position={Position.Left}   style={s} id="s-l" />
     </>
   );
 }
 
+/** True while the lab simulation is running (drives the node state marker). */
+export const LabRunningContext = createContext(false);
+
 // ── Card wrapper ──────────────────────────────────────────────────────────────
 function Card({ selected, children }: { selected?: boolean; children: React.ReactNode }) {
+  const running = useContext(LabRunningContext);
   return (
     <div style={{
+      position:     "relative",
       background:   C.card,
       border:       `1.5px solid ${selected ? C.selected : C.cardBorder}`,
       borderRadius: 10,
@@ -67,6 +71,15 @@ function Card({ selected, children }: { selected?: boolean; children: React.Reac
         : "0 1px 4px rgba(0,0,0,0.08)",
       transition:   "border-color 0.15s, box-shadow 0.15s",
     }}>
+      {/* Node state, as in CML: green when the lab is running */}
+      <span
+        title={running ? "Started" : "Stopped"}
+        aria-label={running ? "Started" : "Stopped"}
+        style={{
+          position: "absolute", top: 5, left: 5, width: 7, height: 7, borderRadius: 1.5,
+          background: running ? C.green : "#d0d7de", transition: "background 0.2s",
+        }}
+      />
       {children}
     </div>
   );

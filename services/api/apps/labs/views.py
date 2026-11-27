@@ -17,6 +17,7 @@ from simulator_core import ConfigurationError, TopologyError
 
 from .models import Lab
 from .serializers import (
+    LinkSpecSerializer,
     LabListSerializer,
     LabSerializer,
     PingRequestSerializer,
@@ -260,11 +261,97 @@ class SimulationCLIView(APIView):
         output = cli_session.execute(command)
         return Response({
             "output": output,
+            # Syslog messages the console prints after the command (e.g.
+            # %LINK-3-UPDOWN after "no shutdown").
+            "console": cli_session.drain_console(),
             "prompt": cli_session.prompt(),
             "mode":   cli_session.mode.name.lower(),
             "awaiting_input": cli_session.pending_input is not None,
             "input_hidden":   cli_session.input_hidden,
         })
+
+
+def _session_or_404(session_id: str):
+    try:
+        return adapter.get_session(session_id), None
+    except KeyError:
+        return None, Response(
+            {"error": {"code": "not_found", "message": "Simulation session not found."}},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class SimulationConsoleView(APIView):
+    """
+    GET /api/v1/labs/simulations/<id>/console/<device_id>/
+
+    New console messages for one device since the console last read them
+    (link changes caused by other devices, cables plugged in, ...).  The web
+    terminal polls this while it is open.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id: str, device_id: str):
+        session, error = _session_or_404(session_id)
+        if error:
+            return error
+        try:
+            cli_session = adapter.get_or_create_cli_session(session, device_id)
+        except KeyError as exc:
+            return Response({"error": {"code": "not_found", "message": str(exc)}},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({"console": cli_session.drain_console(), "prompt": cli_session.prompt()})
+
+
+class SimulationSyslogView(APIView):
+    """GET /api/v1/labs/simulations/<id>/syslog/?since=<seq> — lab-wide log."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id: str):
+        session, error = _session_or_404(session_id)
+        if error:
+            return error
+        try:
+            since = max(0, int(request.query_params.get("since", 0)))
+        except ValueError:
+            since = 0
+        return Response(adapter.get_syslog(session, since))
+
+
+class SimulationLinksView(APIView):
+    """POST /api/v1/labs/simulations/<id>/links/ — cable two devices live."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id: str):
+        session, error = _session_or_404(session_id)
+        if error:
+            return error
+        serializer = LinkSpecSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            adapter.add_live_link(session, serializer.validated_data)
+        except (TopologyError, ConfigurationError) as exc:
+            return Response({"error": {"code": "invalid_link", "message": str(exc)}},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.validated_data, status=status.HTTP_201_CREATED)
+
+
+class SimulationLinkDetailView(APIView):
+    """DELETE /api/v1/labs/simulations/<id>/links/<link_id>/ — unplug a cable."""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, session_id: str, link_id: str):
+        session, error = _session_or_404(session_id)
+        if error:
+            return error
+        if not adapter.remove_live_link(session, link_id):
+            return Response({"error": {"code": "not_found", "message": "Link not found."}},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ── Lab persistence (CRUD) ─────────────────────────────────────────────────────

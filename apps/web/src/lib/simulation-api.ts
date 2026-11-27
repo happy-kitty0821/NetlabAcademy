@@ -199,3 +199,47 @@ export const DEFAULT_TOPOLOGY: TopologyDocument = {
     },
   ],
 };
+
+// ── Live cabling and logs ─────────────────────────────────────────────────────
+
+/** One IOS-style syslog message from a device in the running lab. */
+export interface SyslogEntry {
+  seq: number;
+  tick: number;
+  device_id: string;
+  hostname: string;
+  facility: string;
+  severity: number;
+  mnemonic: string;
+  message: string;
+  text: string; // "%LINK-3-UPDOWN: Interface FastEthernet0/1, changed state to up"
+}
+
+/** Cable two devices in a running lab (ports come up, messages are logged). */
+export async function addSimulationLink(sessionId: string, link: TopologyLink): Promise<void> {
+  await apiFetch<TopologyLink>(`/labs/simulations/${sessionId}/links/`, {
+    method: "POST",
+    body: JSON.stringify(link),
+  });
+}
+
+/** Unplug a cable in a running lab. */
+export async function removeSimulationLink(sessionId: string, linkId: string): Promise<void> {
+  await apiFetch<void>(`/labs/simulations/${sessionId}/links/${encodeURIComponent(linkId)}/`, {
+    method: "DELETE",
+  });
+}
+
+/** Lab-wide syslog entries newer than `since`. */
+export async function getSyslog(
+  sessionId: string, since: number,
+): Promise<{ entries: SyslogEntry[]; last_seq: number }> {
+  return apiFetch(`/labs/simulations/${sessionId}/syslog/?since=${since}`);
+}
+
+/** Console messages for one device not yet shown on its console. */
+export async function getConsoleMessages(
+  sessionId: string, deviceId: string,
+): Promise<{ console: string[]; prompt: string }> {
+  return apiFetch(`/labs/simulations/${sessionId}/console/${encodeURIComponent(deviceId)}/`);
+}
