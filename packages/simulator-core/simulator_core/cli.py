@@ -70,6 +70,10 @@ class Cmd:
     handler: Optional[Callable[["CLISession", list[str]], str]] = None
     args_hint: str = ""
     fallback: bool = False
+    # Argument placeholder: when set, the node stands for a value (its
+    # keyword is the label shown in ? help, e.g. "WORD" or "<0-61440>") and
+    # matches any token this predicate accepts.
+    arg: Optional[Callable[[str], bool]] = None
 
     def child(self, keyword: str) -> Optional["Cmd"]:
         """Return the child with the given keyword, or None."""
@@ -90,6 +94,98 @@ def _match(token: str, keywords: list[str]) -> list[str]:
     if exact:
         return exact
     return [k for k in keywords if k.lower().startswith(tl)]
+
+
+def _step(token: str, nodes: list["Cmd"]) -> tuple[list[str], Optional["Cmd"]]:
+    """
+    Match *token* at one level of the command tree.
+
+    Returns (matching keywords, node): one keyword and its node on a match,
+    several keywords and None when ambiguous, ([], None) when nothing fits.
+    Keywords win over argument placeholders.
+    """
+    keywords = [c.keyword for c in nodes if c.arg is None]
+    found = _match(token, keywords)
+    if len(found) == 1:
+        return found, next(c for c in nodes if c.keyword == found[0] and c.arg is None)
+    if found:
+        return found, None
+    for c in nodes:
+        if c.arg is not None and c.arg(token):
+            return [c.keyword], c
+    return [], None
+
+
+def _parse_vlan_ids(text: str) -> Optional[list[int]]:
+    """'1,3-5,7' -> [1, 3, 4, 5, 7]; None unless every VLAN is 1-4094."""
+    result: set[int] = set()
+    for part in text.split(","):
+        lo, sep, hi = part.partition("-")
+        if not lo.isdigit() or (sep and not hi.isdigit()):
+            return None
+        a = int(lo)
+        b = int(hi) if sep else a
+        if not 1 <= a <= b <= 4094:
+            return None
+        result.update(range(a, b + 1))
+    return sorted(result)
+
+
+def _int_in(lo: int, hi: int) -> Callable[[str], bool]:
+    return lambda tok: tok.isdigit() and lo <= int(tok) <= hi
+
+
+_VLAN_RANGE_HELP = "vlan range, example: 1,3-5,7,9-11"
+
+
+def _vlan_arg(children: list["Cmd"], handler=None) -> "Cmd":
+    return Cmd("WORD", _VLAN_RANGE_HELP, arg=lambda t: _parse_vlan_ids(t) is not None,
+               children=children, handler=handler)
+
+
+def _stp_global_vlan_tree(negate: bool) -> "Cmd":
+    """``[no] spanning-tree vlan <list> ...`` in global configuration."""
+    if negate:
+        run = lambda s, t: s._cmd_no_stp_global_vlan(t)  # noqa: E731
+    else:
+        run = lambda s, t: s._cmd_stp_global_vlan(t)  # noqa: E731
+
+    def option(word: str, help_str: str, rng: tuple[int, int], val_help: str) -> "Cmd":
+        value = Cmd(f"<{rng[0]}-{rng[1]}>", val_help, arg=_int_in(*rng), handler=run)
+        return Cmd(word, help_str, children=[value], handler=run if negate else None)
+
+    diameter = Cmd("diameter", "Network diameter of this spanning tree", children=[
+        Cmd("<2-7>", "Maximum number of bridges between any two end nodes",
+            arg=_int_in(2, 7), handler=run)])
+    root = Cmd("root", "Configure switch as root", handler=run if negate else None, children=[
+        Cmd("primary", "Configure this switch as primary root for this spanning tree",
+            children=[diameter], handler=run),
+        Cmd("secondary", "Configure switch as secondary root",
+            children=[diameter], handler=run),
+    ])
+    options = [
+        option("forward-time", "Set the forward delay for the spanning tree", (4, 30),
+               "number of seconds for the forward delay timer"),
+        option("hello-time", "Set the hello interval for the spanning tree", (1, 10),
+               "number of seconds between generation of config BPDUs"),
+        option("max-age", "Set the max age interval for the spanning tree", (6, 40),
+               "maximum number of seconds the information in a BPDU is valid"),
+        option("priority", "Set the bridge priority for the spanning tree", (0, 61440),
+               "bridge priority in increments of 4096"),
+        root,
+    ]
+    return Cmd("vlan", "VLAN Switch Spanning Tree", children=[_vlan_arg(options, handler=run)])
+
+
+def _stp_iface_vlan_tree() -> "Cmd":
+    """``spanning-tree vlan <list> cost|port-priority <value>`` on an interface."""
+    run = lambda s, t: s._cmd_stp_iface_vlan(t)  # noqa: E731
+    return Cmd("vlan", "VLAN Switch Spanning Tree", children=[_vlan_arg([
+        Cmd("cost", "Change an interface's per VLAN spanning tree path cost", children=[
+            Cmd("<1-200000000>", "port path cost", arg=_int_in(1, 200000000), handler=run)]),
+        Cmd("port-priority", "Change an interface's spanning tree port priority", children=[
+            Cmd("<0-240>", "port priority in increments of 16", arg=_int_in(0, 240), handler=run)]),
+    ])])
 
 
 # ---------------------------------------------------------------------------
@@ -377,8 +473,15 @@ class CLISession:
         # Walk as far as we can with full matches
         for i, tok in enumerate(tokens):
             is_last = (i == len(tokens) - 1) and not ends_with_space
-            keywords = [c.keyword for c in node_list]
+            keywords = [c.keyword for c in node_list if c.arg is None]
             matches = _match(tok, keywords)
+            if not is_last and not matches:
+                # A value typed for an argument placeholder ("1-100").
+                _, arg_node = _step(tok, node_list)
+                if arg_node is not None:
+                    completed_tokens.append(tok)
+                    node_list = arg_node.children
+                    continue
 
             if is_last:
                 if len(matches) == 1:
@@ -391,7 +494,8 @@ class CLISession:
             else:
                 if len(matches) == 1:
                     completed_tokens.append(matches[0])
-                    child = next(c for c in node_list if c.keyword == matches[0])
+                    child = next(c for c in node_list
+                                 if c.keyword == matches[0] and c.arg is None)
                     node_list = child.children
                 elif len(matches) == 0:
                     # No match — return unchanged
@@ -548,9 +652,7 @@ class CLISession:
                             Cmd("mst",        "MSTP mode",
                                 handler=lambda s, t: s._cmd_stp_mode(t, "mst")),
                         ]),
-                    Cmd("vlan",    "VLAN spanning tree settings",
-                        args_hint="<vlan-id> priority|root ...",
-                        handler=lambda s, t: s._cmd_stp_global_vlan(t)),
+                    _stp_global_vlan_tree(negate=False),
                     Cmd("portfast", "Global PortFast settings",
                         children=[
                             Cmd("default", "Enable PortFast on all access ports",
@@ -599,6 +701,8 @@ class CLISession:
                 ]),
             Cmd("no",         "Negate a command or set its defaults",
                 children=[
+                    Cmd("spanning-tree", "Spanning Tree Subsystem",
+                        children=[_stp_global_vlan_tree(negate=True)]),
                     Cmd("vlan", "Delete a VLAN",
                         args_hint="<vlan-id>",
                         handler=lambda s, t: s._cmd_no_vlan(t)),
@@ -815,9 +919,7 @@ class CLISession:
                     Cmd("port-priority", "Port priority",
                         args_hint="<0-240>",
                         handler=lambda s, t: s._cmd_stp_port_priority_iface(t)),
-                    Cmd("vlan",        "VLAN-specific STP settings",
-                        args_hint="<vlan-id> cost|port-priority <value>",
-                        handler=lambda s, t: s._cmd_stp_iface_vlan(t)),
+                    _stp_iface_vlan_tree(),
                 ]),
             Cmd("channel-group", "Assign this interface to a port-channel",
                 args_hint="<1-6> mode <on|active|passive|desirable|auto>",
@@ -991,9 +1093,8 @@ class CLISession:
                         handler=lambda s, t: s._cmd_show_stp_summary(t)),
                     Cmd("detail",  "Detailed STP state",
                         handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
-                    Cmd("vlan",    "Per-VLAN spanning tree state",
-                        args_hint="<vlan-id>",
-                        handler=lambda s, t: s._cmd_show_stp_vlan_dispatch(t)),
+                    Cmd("vlan",    "VLAN Switch Spanning Trees", children=[
+                        _vlan_arg([], handler=lambda s, t: s._cmd_show_stp_vlan_dispatch(t))]),
                     Cmd("active",  "Active ports in spanning tree",
                         handler=lambda s, t: s._cmd_show_stp_summary(t)),
                 ],
@@ -1052,8 +1153,7 @@ class CLISession:
         parent_fallback: Optional[Cmd] = None
 
         for depth, tok in enumerate(tokens):
-            keywords = [c.keyword for c in node_list]
-            matches = _match(tok.lower(), keywords)
+            matches, cmd_node = _step(tok, node_list)
 
             if len(matches) == 0:
                 if depth > 0 and parent_fallback is not None:
@@ -1064,12 +1164,10 @@ class CLISession:
                 bad = " ".join(tokens[:depth] + [tok])
                 return _invalid_at(bad, tok)
 
-            if len(matches) > 1:
+            if cmd_node is None:
                 return _ambiguous(tok, matches)
 
-            keyword = matches[0]
-            matched_path.append(keyword)
-            cmd_node = next(c for c in node_list if c.keyword == keyword)
+            matched_path.append(cmd_node.keyword)
 
             remaining = tokens[depth + 1:]
 
@@ -1125,31 +1223,36 @@ class CLISession:
             # IOS: "sh?" lists the keywords that start with "sh" at that
             # position (word help), not the arguments of the command.
             for tok in tokens[:-1]:
-                found = _match(tok.lower(), [c.keyword for c in node_list])
-                if len(found) != 1:
+                _, node = _step(tok, node_list)
+                if node is None:
                     return "% Unrecognized command"
-                node_list = next(c for c in node_list if c.keyword == found[0]).children
+                node_list = node.children
             partial = tokens[-1].lower()
-            words = [c.keyword for c in node_list if c.keyword.lower().startswith(partial)]
+            words = [c.keyword for c in node_list
+                     if c.arg is None and c.keyword.lower().startswith(partial)]
             return "  ".join(words) if words else "% Unrecognized command"
 
         # Walk tree to find current context
         for depth, tok in enumerate(tokens):
-            keywords = [c.keyword for c in node_list]
-            matches = _match(tok.lower(), keywords)
+            matches, cmd_node = _step(tok, node_list)
 
             if len(matches) == 0:
+                if any(c.arg is not None for c in node_list):
+                    return _invalid_at(" ".join(tokens[:depth + 1]), tok)
                 return f"% No help available for {tok!r}"
-            if len(matches) > 1:
+            if cmd_node is None:
                 return _format_help([c for c in node_list if c.keyword in matches])
 
-            keyword = matches[0]
-            cmd_node = next(c for c in node_list if c.keyword == keyword)
-
             if depth == len(tokens) - 1:
-                # Last token — show children of this node
+                # Last token — show children of this node, and <cr> when the
+                # command is already complete here.
                 if cmd_node.children:
-                    return _format_help(cmd_node.children)
+                    help_text = _format_help(cmd_node.children)
+                    if cmd_node.handler is not None:
+                        help_text += "\n  <cr>"
+                    return help_text
+                if cmd_node.arg is not None:
+                    return "  <cr>"
                 if cmd_node.args_hint:
                     return f"  {cmd_node.args_hint:<30} {cmd_node.help_str}"
                 return f"  <cr>{'':26} {cmd_node.help_str}"
@@ -2226,30 +2329,24 @@ class CLISession:
         return ""
 
     def _cmd_stp_iface_vlan(self, tokens: list[str]) -> str:
-        # tokens: ['spanning-tree', 'vlan', '<id>', 'cost|port-priority', '<val>']
-        if len(tokens) < 5:
-            return "% Incomplete command."
+        """spanning-tree vlan <list> cost|port-priority <value> (interface)"""
+        # tokens: ['spanning-tree', 'vlan', '<list>', 'cost|port-priority', '<val>']
         switch = self._get_switch()
         if switch is None:
             return "% spanning-tree commands only on switch devices."
+        vlans = _parse_vlan_ids(tokens[2])
+        sub, value = tokens[3].lower(), int(tokens[4])
+        stp = switch.stp
         try:
-            vlan_id = int(tokens[2])
-        except ValueError:
-            return f"% Invalid VLAN ID: {tokens[2]!r}"
-        sub = tokens[3].lower()
-        if sub == "cost":
-            try:
-                switch.stp.set_port_cost(self.current_iface or "", vlan_id, int(tokens[4]))
-            except ValueError as exc:
-                return f"% {exc}"
-        elif sub == "port-priority":
-            try:
-                switch.stp.set_port_priority(self.current_iface or "", vlan_id, int(tokens[4]))
-            except ValueError as exc:
-                return f"% {exc}"
+            with stp.deferred_changes():
+                for vlan_id in vlans:
+                    if "cost".startswith(sub):
+                        stp.set_port_cost(self.current_iface or "", vlan_id, value)
+                    else:
+                        stp.set_port_priority(self.current_iface or "", vlan_id, value)
+        except ValueError as exc:
+            return f"% {exc}"
         return ""
-
-    # ── Global STP commands ────────────────────────────────────────────────────
 
     def _cmd_stp_mode(self, tokens: list[str], mode_str: str) -> str:
         switch = self._get_switch()
@@ -2264,60 +2361,87 @@ class CLISession:
         switch.stp.mode = mode_map.get(mode_str, STPMode.RAPID_PVST)
         return ""
 
+    _PRIORITY_ERROR = (
+        "% Bridge Priority must be in increments of 4096.\n"
+        "% Allowed values are: \n"
+        "  0     4096  8192  12288 16384 20480 24576 28672\n"
+        "  32768 36864 40960 45056 49152 53248 57344 61440"
+    )
+
     def _cmd_stp_global_vlan(self, tokens: list[str]) -> str:
         """
-        spanning-tree vlan <id> priority <value>
-        spanning-tree vlan <id> root primary|secondary
-        spanning-tree vlan <id> hello-time|forward-time|max-age <value>
+        spanning-tree vlan <list>
+        spanning-tree vlan <list> priority <0-61440>
+        spanning-tree vlan <list> root primary|secondary [diameter <2-7>]
+        spanning-tree vlan <list> hello-time|forward-time|max-age <value>
+
+        <list> is an IOS VLAN range such as 1-100 or 1,3-5,7.
         """
-        if len(tokens) < 4:
-            return "% Incomplete command."
         switch = self._get_switch()
         if switch is None:
             return "% spanning-tree commands only on switch devices."
-        try:
-            vlan_id = int(tokens[2])
-        except ValueError:
-            return f"% Invalid VLAN ID: {tokens[2]!r}"
-        sub = tokens[3].lower()
-        if sub == "priority":
-            if len(tokens) < 5:
-                return "% Incomplete command."
-            try:
+        vlans = _parse_vlan_ids(tokens[2])
+        if len(tokens) == 3:
+            return ""          # STP already runs on every VLAN
+        stp = switch.stp
+        sub = _match(tokens[3], ["priority", "root", "hello-time", "forward-time", "max-age"])[0]
+        errors: list[str] = []
+        with stp.deferred_changes():
+            if sub == "priority":
                 priority = int(tokens[4])
-                switch.stp.set_bridge_priority(vlan_id, priority)
-            except ValueError as exc:
-                return f"% {exc}"
-        elif sub == "root":
-            if len(tokens) < 5:
-                return "% Incomplete command."
-            level = tokens[4].lower()
-            if level == "primary":
-                try:
-                    switch.stp.set_root_primary(vlan_id)
-                except ValueError as exc:
-                    return f"% {exc}"
-            elif level == "secondary":
-                switch.stp.set_root_secondary(vlan_id)
+                if priority % 4096:
+                    return self._PRIORITY_ERROR
+                for vlan_id in vlans:
+                    stp.store_bridge_priority(vlan_id, priority)
+            elif sub == "root":
+                primary = "primary".startswith(tokens[4].lower())
+                for vlan_id in vlans:
+                    if primary:
+                        # Only VLANs with a tree can be measured against their root.
+                        if stp.get_instance(vlan_id) is None and vlan_id not in switch.vlans:
+                            stp.store_bridge_priority(vlan_id, 24576)
+                            continue
+                        try:
+                            stp.set_root_primary(vlan_id)
+                        except ValueError as exc:
+                            errors.append(f"% {exc}")
+                    else:
+                        stp.store_bridge_priority(vlan_id, 28672)
             else:
-                return f"% Unknown root option: {level!r}"
-        elif sub in ("hello-time", "forward-time", "max-age"):
-            if len(tokens) < 5:
-                return "% Incomplete command."
-            try:
-                val = int(tokens[4])
-            except ValueError:
-                return f"% Invalid value: {tokens[4]!r}"
-            inst = switch.stp.get_instance(vlan_id)
-            if inst:
-                if sub == "hello-time":
-                    inst.timers.hello_time = val
-                elif sub == "forward-time":
-                    inst.timers.forward_delay = val
-                elif sub == "max-age":
-                    inst.timers.max_age = val
-        else:
-            return f"% Unknown spanning-tree vlan option: {sub!r}"
+                value = int(tokens[4])
+                attr = {"hello-time": "hello_time", "forward-time": "forward_delay",
+                        "max-age": "max_age"}[sub]
+                for vlan_id in vlans:
+                    inst = stp.get_instance(vlan_id)
+                    if inst is not None:
+                        setattr(inst.timers, attr, value)
+        return "\n".join(errors)
+
+    def _cmd_no_stp_global_vlan(self, tokens: list[str]) -> str:
+        """
+        no spanning-tree vlan <list> priority|root  -- back to priority 32768
+        no spanning-tree vlan <list> hello-time|forward-time|max-age
+        """
+        # tokens: ['no', 'spanning-tree', 'vlan', '<list>', ...]
+        switch = self._get_switch()
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        vlans = _parse_vlan_ids(tokens[3])
+        if len(tokens) == 4:
+            return "% Disabling spanning tree for a VLAN is not supported by the simulator."
+        stp = switch.stp
+        sub = _match(tokens[4], ["priority", "root", "hello-time", "forward-time", "max-age"])[0]
+        defaults = {"hello-time": ("hello_time", 2), "forward-time": ("forward_delay", 15),
+                    "max-age": ("max_age", 20)}
+        with stp.deferred_changes():
+            for vlan_id in vlans:
+                if sub in ("priority", "root"):
+                    stp.store_bridge_priority(vlan_id, 32768)
+                else:
+                    inst = stp.get_instance(vlan_id)
+                    if inst is not None:
+                        attr, value = defaults[sub]
+                        setattr(inst.timers, attr, value)
         return ""
 
     def _cmd_stp_portfast_default(self, tokens: list[str]) -> str:
@@ -2406,15 +2530,21 @@ class CLISession:
         }
 
     def _cmd_show_stp_vlan_dispatch(self, tokens: list[str]) -> str:
-        """show spanning-tree vlan <id>"""
-        # tokens: ['show', 'spanning-tree', 'vlan', '<id>']
-        if len(tokens) < 4:
-            return "% Incomplete command."
-        try:
-            vlan_id = int(tokens[3])
-        except ValueError:
-            return f"% Invalid VLAN ID: {tokens[3]!r}"
-        return self._cmd_show_stp_vlan(tokens, vlan_id)
+        """show spanning-tree vlan <list>"""
+        # tokens: ['show', 'spanning-tree', 'vlan', '<list>']
+        switch = self._get_switch()
+        if switch is None:
+            return "% show spanning-tree is only available on switch devices."
+        vlans = _parse_vlan_ids(tokens[3])
+        if len(vlans) == 1:
+            return self._cmd_show_stp_vlan(tokens, vlans[0])
+        up = self._stp_up_ports()
+        shown = [switch.stp.show_spanning_tree(v, active_ports=up) for v in vlans
+                 if switch.stp.get_instance(v) is not None]
+        shown = [out for out in shown if not out.startswith("Spanning tree instance")]
+        if not shown:
+            return f"Spanning tree instance(s) for vlan {tokens[3]} does not exist."
+        return "\n".join(shown)
 
     def _cmd_show_stp_summary(self, tokens: list[str]) -> str:
         switch = self._get_switch()
@@ -3921,8 +4051,12 @@ def _stp_global_lines(stp) -> list[str]:
     lines = [f"spanning-tree mode {stp.mode.value}", "spanning-tree extend system-id"]
     if getattr(stp, "_portfast_default", False):
         lines.append("spanning-tree portfast default")
+    by_priority: dict[int, list[int]] = {}
     for vlan_id, priority in stp.configured_priorities().items():
-        lines.append(f"spanning-tree vlan {vlan_id} priority {priority}")
+        by_priority.setdefault(priority, []).append(vlan_id)
+    # IOS prints one line per priority, VLANs as a range list, in VLAN order.
+    for priority, vlans in sorted(by_priority.items(), key=lambda kv: kv[1][0]):
+        lines.append(f"spanning-tree vlan {CLISession._format_vlan_list(vlans)} priority {priority}")
     return lines
 
 
@@ -4205,13 +4339,21 @@ def _expand_iface_range(spec: str, iface_names: list[str]) -> tuple[list[str], O
 # ---------------------------------------------------------------------------
 
 def _format_help(cmds: list[Cmd]) -> str:
+    """
+    IOS ? layout: keywords padded to the longest one, then the help text.
+    Nodes that still describe their arguments with ``args_hint`` show it
+    in a middle column.
+    """
+    if not cmds:
+        return ""
+    width = max(len(c.keyword) for c in cmds)
+    hint_width = max((len(c.args_hint) for c in cmds), default=0)
     lines = []
     for c in cmds:
-        hint = c.args_hint if c.args_hint else ("<cr>" if not c.children else "")
-        if hint:
-            lines.append(f"  {c.keyword:<20} {hint:<20} {c.help_str}")
+        if hint_width:
+            lines.append(f"  {c.keyword:<{width}}  {c.args_hint:<{hint_width}}  {c.help_str}".rstrip())
         else:
-            lines.append(f"  {c.keyword:<20}                      {c.help_str}")
+            lines.append(f"  {c.keyword:<{width}}  {c.help_str}".rstrip())
     return "\n".join(lines)
 
 

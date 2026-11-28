@@ -98,18 +98,18 @@ export function normalizeEdges(nodes: DeviceNode[], edges: Edge[]): Edge[] {
       ifaceB = targetPorts.find((p) => !used.has(p));
     }
     const next: CableData = { ...d, ifaceA, ifaceB, labelA: ifaceA ?? "", labelB: ifaceB ?? "", active: true };
-    // Nodes now have one handle per side ("s-t/r/b/l"); older cables point
-    // at the removed target handles ("t-*").
-    const targetHandle = edge.targetHandle?.startsWith("t-") ? `s-${edge.targetHandle.slice(2)}` : edge.targetHandle;
+    // Links attach to the device centre (CML style), so cables carry no
+    // handle ids; older saved cables name per-side handles that no longer
+    // exist ("s-r", "t-l", ...) and would not be drawn.
     const same =
       edge.type === "lab" && d.ifaceA === next.ifaceA && d.ifaceB === next.ifaceB &&
       d.labelA === next.labelA && d.labelB === next.labelB && d.active === true &&
-      targetHandle === edge.targetHandle;
+      !edge.sourceHandle && !edge.targetHandle;
     if (same) {
       out.push(edge);
     } else {
       changed = true;
-      out.push({ ...edge, type: "lab", targetHandle, data: next });
+      out.push({ ...edge, type: "lab", sourceHandle: null, targetHandle: null, data: next });
     }
   }
   return changed ? out : edges;

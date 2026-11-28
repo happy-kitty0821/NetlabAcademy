@@ -30,6 +30,7 @@ No host I/O, no sockets, no subprocess.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Callable, Optional
@@ -292,6 +293,14 @@ class STPManager:
         self._mac = mac
         self._mode = STPMode.RAPID_PVST
         self._global_priority = 32768    # default bridge priority
+        # Configured per-VLAN bridge priorities.  Kept apart from the
+        # instances so "spanning-tree vlan 1-4094 priority N" does not build
+        # thousands of trees: a VLAN created later picks its priority up here.
+        self._vlan_priority: dict[int, int] = {}
+        # While > 0, configuration changes are collected and the election
+        # runs once when the outermost deferred_changes() block ends.
+        self._defer_depth = 0
+        self._pending_change = False
 
         # Per-VLAN STP instances: vlan_id → STPInstance
         self._instances: dict[int, STPInstance] = {}
@@ -330,10 +339,27 @@ class STPManager:
 
     def _changed(self) -> bool:
         """Ask the simulation to re-run the election.  False if stand-alone."""
+        if self._defer_depth:
+            self._pending_change = True
+            return True
         if self.on_change is None:
             return False
         self.on_change()
         return True
+
+    @contextmanager
+    def deferred_changes(self):
+        """Apply several settings (a VLAN range) with a single re-election."""
+        self._defer_depth += 1
+        try:
+            yield
+        finally:
+            self._defer_depth -= 1
+            if not self._defer_depth and self._pending_change:
+                self._pending_change = False
+                if not self._changed():
+                    for inst in self._instances.values():
+                        self._recalculate_instance(inst)
 
     # ------------------------------------------------------------------
     # Configuration API
@@ -376,6 +402,7 @@ class STPManager:
             )
         if not (0 <= priority <= 61440):
             raise ValueError(f"Bridge priority must be 0-61440, got {priority}.")
+        self._remember_priority(vlan_id, priority)
         inst = self._get_or_create_instance(vlan_id)
         inst.bridge_id = BridgeID(
             priority=priority,
@@ -387,13 +414,32 @@ class STPManager:
         if not self._changed():
             self._recalculate_instance(inst)
 
+    def _remember_priority(self, vlan_id: int, priority: int) -> None:
+        if priority == self._global_priority:
+            self._vlan_priority.pop(vlan_id, None)
+        else:
+            self._vlan_priority[vlan_id] = priority
+
+    def store_bridge_priority(self, vlan_id: int, priority: int) -> None:
+        """
+        Set a VLAN's bridge priority, creating no instance for a VLAN that
+        has none yet (it is applied when the VLAN's instance is created).
+        """
+        if vlan_id in self._instances or priority % 4096 or not 0 <= priority <= 61440:
+            # Existing instance, or an invalid value (set_bridge_priority raises).
+            self.set_bridge_priority(vlan_id, priority)
+        else:
+            self._remember_priority(vlan_id, priority)
+
     def configured_priorities(self) -> dict[int, int]:
         """VLAN -> bridge priority, for VLANs whose priority is not the default."""
-        return {
-            vid: inst.bridge_id.priority
-            for vid, inst in sorted(self._instances.items())
-            if inst.bridge_id is not None and inst.bridge_id.priority != self._global_priority
-        }
+        result = dict(self._vlan_priority)
+        for vid, inst in self._instances.items():
+            if inst.bridge_id is not None and inst.bridge_id.priority != self._global_priority:
+                result[vid] = inst.bridge_id.priority
+            elif vid in result and inst.bridge_id is not None:
+                del result[vid]
+        return dict(sorted(result.items()))
 
     def root_primary_priority(self, vlan_id: int) -> int:
         """
@@ -927,7 +973,7 @@ class STPManager:
     def _get_or_create_instance(self, vlan_id: int) -> STPInstance:
         if vlan_id not in self._instances:
             bid = BridgeID(
-                priority=self._global_priority,
+                priority=self._vlan_priority.get(vlan_id, self._global_priority),
                 sys_id_ext=vlan_id,
                 mac=self._mac,
             )

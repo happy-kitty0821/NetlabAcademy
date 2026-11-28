@@ -178,15 +178,37 @@ code, kbd, pre, .mono { font-family: var(--font-mono); font-size: 0.875em; }
   box-shadow: none !important;
 }
 
-/* Handles */
-.react-flow__handle {
-  opacity: 1 !important;
-  z-index: 10;
+/* Handles — device nodes have no visible ports (CML style).  A small
+   connector appears on the tile's right edge while the node is hovered or
+   selected; links attach to the tile centre. */
+.react-flow__handle { z-index: 10; }
+
+.lab-connector.react-flow__handle {
+  width: 14px; height: 14px; min-width: 14px; min-height: 14px;
+  background: #ffffff;
+  border: 1.5px solid #0969da;
+  border-radius: 50%;
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 0.12s, transform 0.12s;
 }
-.react-flow__handle:hover {
-  transform:  scale(1.6) !important;
-  cursor:     crosshair  !important;
-  transition: transform 0.1s;
+.lab-connector.react-flow__handle::after {
+  /* "+" mark */
+  content: "";
+  position: absolute; inset: 2.5px;
+  background:
+    linear-gradient(#0969da, #0969da) center / 7px 1.5px no-repeat,
+    linear-gradient(#0969da, #0969da) center / 1.5px 7px no-repeat;
+}
+.react-flow__node:hover .lab-connector,
+.react-flow__node.selected .lab-connector { opacity: 1; }
+.lab-connector.react-flow__handle:hover { transform: translate(50%, -50%) scale(1.15); }
+
+/* While a link is being dragged, outline the device it would connect to. */
+.lab-node-tile:has(.react-flow__handle.connectingto) {
+  outline: 2px dashed #0969da;
+  outline-offset: 4px;
+  border-radius: 12px;
 }
 
 /* Controls */

@@ -7,11 +7,11 @@ import {
   Background,
   Controls,
   BackgroundVariant,
-  addEdge,
   useNodesState,
   useEdgesState,
   SelectionMode,
   ConnectionMode,
+  ConnectionLineType,
   type Connection,
   type Edge,
   type Node,
@@ -252,8 +252,7 @@ export default function WorkspacePage() {
   const syslogSeqRef = useRef(0);
 
   // Cable being created: the link dialog picks a port at each end.
-  const [pendingLink, setPendingLink] = useState<{ source: string; target: string;
-    sourceHandle?: string | null; targetHandle?: string | null } | null>(null);
+  const [pendingLink, setPendingLink] = useState<{ source: string; target: string } | null>(null);
   const [linkBusy,  setLinkBusy]  = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
 
@@ -295,8 +294,8 @@ export default function WorkspacePage() {
   const onConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target || conn.source === conn.target) return;
     setLinkError(null);
-    setPendingLink({ source: conn.source, target: conn.target,
-                     sourceHandle: conn.sourceHandle, targetHandle: conn.targetHandle });
+    // Links attach to device centres, so the handles used are not kept.
+    setPendingLink({ source: conn.source, target: conn.target });
   }, []);
 
   const confirmLink = useCallback(async (ifaceA: string, ifaceB: string) => {
@@ -317,11 +316,13 @@ export default function WorkspacePage() {
       }
       setLinkBusy(false);
     }
-    setEdges((eds) => addEdge({
+    // Appended directly: addEdge() would drop a second cable between the
+    // same two devices as a "duplicate", but each cable is its own link.
+    setEdges((eds) => [...eds, {
       id, source: pendingLink.source, target: pendingLink.target,
-      sourceHandle: pendingLink.sourceHandle, targetHandle: pendingLink.targetHandle,
+      sourceHandle: null, targetHandle: null,
       type: "lab", data: { ifaceA, ifaceB, labelA: ifaceA, labelB: ifaceB, active: true },
-    }, eds));
+    }]);
     setPendingLink(null);
   }, [pendingLink, running, sessionId, setEdges]);
 
@@ -510,6 +511,8 @@ export default function WorkspacePage() {
             nodesConnectable={true}
             connectionMode={ConnectionMode.Loose}
             connectionRadius={40}
+            connectionLineType={ConnectionLineType.Straight}
+            connectionLineStyle={{ stroke: "#0969da", strokeWidth: 2, strokeDasharray: "6 4" }}
             elementsSelectable={true}
             selectNodesOnDrag={false}
             selectionOnDrag={false}
