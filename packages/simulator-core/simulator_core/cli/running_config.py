@@ -19,6 +19,8 @@ def _switch_global_lines(switch) -> list[str]:
     lines += [f"errdisable recovery cause {n}" for n in names if n in switch.errdisable_recovery]
     if switch.errdisable_interval != 300:
         lines.append(f"errdisable recovery interval {switch.errdisable_interval}")
+    if switch.load_balance != "src-mac":
+        lines.append(f"port-channel load-balance {switch.load_balance}")
     if switch.mac_aging_time != 300:
         lines.append(f"mac address-table aging-time {switch.mac_aging_time}")
     for (mac, vlan), port in sorted(switch.static_macs.items(), key=lambda kv: (kv[0][1], kv[0][0])):
@@ -143,6 +145,8 @@ def _iface_config_lines(device, name: str, iface, stp=None, psec=None) -> list[s
             lines.append(" switchport nonegotiate")
     if is_switchport and psec is not None:
         lines += _port_security_lines(psec)
+    if is_switchport and iface.channel_group is not None:
+        lines.append(f" channel-group {iface.channel_group} mode {iface.channel_mode}")
     if is_switchport and stp is not None:
         lines += _stp_iface_lines(stp, name)
     if iface.admin_state == InterfaceState.DOWN:

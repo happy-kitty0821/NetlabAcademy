@@ -126,6 +126,8 @@ def _switch_port_status(iface, vlans=None) -> str:
         return "disabled"
     if getattr(iface, "err_disabled", None):
         return "err-disabled"
+    if getattr(iface, "channel_group", None) is not None and iface.ec_state == "s":
+        return "suspended"
     if vlans is not None and iface.is_access and iface.vlan not in vlans:
         return "inactive"
     if iface.oper_state == InterfaceState.UP:

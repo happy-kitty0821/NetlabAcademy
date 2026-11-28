@@ -263,6 +263,7 @@ class VlanCommands:
             for name, iface in device.interfaces.items()
             if iface.is_trunk
             and iface.is_physical_switchport  # exclude SVIs and loopbacks
+            and not iface.in_bundle           # a bundle shows as its port-channel
         ]
 
         if not trunk_ifaces:
@@ -392,6 +393,7 @@ class VlanCommands:
                 if device.interfaces[n].is_physical_switchport
                 and device.interfaces[n].is_access
                 and device.interfaces[n].vlan == vlan_id
+                and not device.interfaces[n].in_bundle
             ]
             rows.append((vlan_id, switch.vlans[vlan_id] or f"VLAN{vlan_id:04d}", "active", ports))
         for vlan_id, name, _ in self._LEGACY_VLANS:

@@ -5,6 +5,11 @@ interface, VLAN and line configuration) and of ``show``.
 
 from __future__ import annotations
 
+from simulator_core.cli.etherchannel import (
+    _channel_group_tree,
+    _load_balance_tree,
+    _no_interface_tree,
+)
 from simulator_core.cli.engine import Cmd, _PRIVILEGED_SHOW, _vlan_arg
 from simulator_core.cli.stp import _stp_global_vlan_tree, _stp_iface_vlan_tree
 from simulator_core.cli.switching import _errdisable_tree, _mac_table_tree, _port_security_tree
@@ -130,6 +135,7 @@ class CommandTrees:
     def _global_tree(self) -> list[Cmd]:
         return [
             _errdisable_tree(negate=False),
+            _load_balance_tree(negate=False),
             _mac_table_tree(negate=False),
             Cmd("hostname",   "Set system's network name",
                 args_hint="<hostname>",
@@ -196,6 +202,8 @@ class CommandTrees:
                 children=[
                     Cmd("spanning-tree", "Spanning Tree Subsystem",
                         children=[_stp_global_vlan_tree(negate=True)]),
+                    _no_interface_tree(),
+                    _load_balance_tree(negate=True),
                     _errdisable_tree(negate=True),
                     _mac_table_tree(negate=True),
                     Cmd("vlan", "Delete a VLAN",
@@ -308,6 +316,8 @@ class CommandTrees:
                         ],
                         fallback=True,
                         handler=lambda s, t: s._cmd_no_switchport(t)),
+                    Cmd("channel-group", "Etherchannel/port bundling configuration",
+                        handler=lambda s, t: s._cmd_no_channel_group(t)),
                     Cmd("spanning-tree", "Spanning Tree Subsystem",
                         children=[
                             Cmd("portfast", "Disable PortFast on this interface",
@@ -433,9 +443,7 @@ class CommandTrees:
                         handler=lambda s, t: s._cmd_stp_port_priority_iface(t)),
                     _stp_iface_vlan_tree(),
                 ]),
-            Cmd("channel-group", "Assign this interface to a port-channel",
-                args_hint="<1-6> mode <on|active|passive|desirable|auto>",
-                handler=lambda s, t: s._cmd_channel_group(t)),
+            _channel_group_tree(),
             Cmd("channel-protocol", "EtherChannel protocol (lacp/pagp)",
                 args_hint="<lacp|pagp>",
                 handler=lambda s, t: ""),
@@ -619,14 +627,24 @@ class CommandTrees:
                 Cmd("detect", "Error disable detection",
                     handler=lambda s, t: s._cmd_show_errdisable_detect(t)),
             ]),
+            Cmd("lacp", "Port channel/lacp information", children=[
+                Cmd("neighbor", "Display LACP neighbor information",
+                    handler=lambda s, t: s._cmd_show_lacp_neighbor(t)),
+            ]),
+            Cmd("pagp", "Port channel/pagp information", children=[
+                Cmd("neighbor", "Display PAgP neighbor information",
+                    handler=lambda s, t: s._cmd_show_pagp_neighbor(t)),
+            ]),
             Cmd("etherchannel", "EtherChannel information",
                 children=[
                     Cmd("summary",      "EtherChannel summary",
                         handler=lambda s, t: s._cmd_show_etherchannel_summary(t)),
                     Cmd("detail",       "EtherChannel detail",
                         handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
-                    Cmd("port-channel", "Port-channel detail",
-                        handler=lambda s, t: s._cmd_show_etherchannel_detail(t)),
+                    Cmd("port-channel", "Port-channel information",
+                        handler=lambda s, t: s._cmd_show_etherchannel_port_channel(t)),
+                    Cmd("load-balance", "Load-balance/frame-distribution scheme among ports in port-channel",
+                        handler=lambda s, t: s._cmd_show_etherchannel_load_balance(t)),
                     Cmd("neighbors",    "LACP/PAgP neighbor information",
                         handler=lambda s, t: s._cmd_show_etherchannel_neighbors(t)),
                     Cmd("protocol",     "EtherChannel protocol",

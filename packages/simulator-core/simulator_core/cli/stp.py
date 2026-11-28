@@ -268,6 +268,7 @@ class StpCommands:
         return {
             n for n, i in device.interfaces.items()
             if i.is_physical_switchport and i.oper_state == InterfaceState.UP
+            and not i.in_bundle
         }
 
     def _cmd_show_stp_vlan_dispatch(self, tokens: list[str]) -> str:

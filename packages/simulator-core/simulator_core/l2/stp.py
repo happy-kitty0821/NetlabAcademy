@@ -938,13 +938,32 @@ class STPManager:
                     or i.admin_state == InterfaceState.DOWN)
         if down(iface):
             return None
+        if iface.is_port_channel:
+            # A port-channel faces the port-channel its bundled members
+            # lead to; it is one port for spanning tree.
+            gid = iface.name[2:]
+            for name, member in device.interfaces.items():
+                if str(member.channel_group) != gid or member.ec_state != "P":
+                    continue
+                peer = topology.neighbours(self._device_id, name)
+                peer_device = topology.devices.get(peer[0]) if peer else None
+                peer_member = peer_device.interfaces.get(peer[1]) if peer_device else None
+                if (peer_member is not None and peer_member.ec_state == "P"
+                        and peer_device.model == DeviceModel.SWITCH):
+                    po = f"Po{peer_member.channel_group}"
+                    if not down(peer_device.interfaces.get(po)):
+                        return peer[0], po
+            return None
+        if iface.in_bundle:
+            return None             # represented by its port-channel
         peer = topology.neighbours(self._device_id, port_name)
         if peer is None:
             return None
         peer_device = topology.devices.get(peer[0])
         if peer_device is None or peer_device.model != DeviceModel.SWITCH:
             return None
-        if down(peer_device.interfaces.get(peer[1])):
+        peer_iface = peer_device.interfaces.get(peer[1])
+        if down(peer_iface) or peer_iface.in_bundle:
             return None
         return peer[0], peer[1]
 
@@ -997,6 +1016,11 @@ class STPManager:
                                            path_cost=ref_port.path_cost,
                                            port_id=ref_port.port_id)
         return self._instances[vlan_id]
+
+    def unregister_port(self, iface_name: str) -> None:
+        """Forget a port in every instance (a deleted port-channel)."""
+        for inst in self._instances.values():
+            inst.port_states.pop(iface_name, None)
 
     def register_port(
         self,
