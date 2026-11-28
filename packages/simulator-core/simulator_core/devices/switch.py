@@ -391,9 +391,8 @@ class Switch:
         if vlan_id not in self._vlans:
             raise ValueError(f"VLAN {vlan_id} does not exist")
         del self._vlans[vlan_id]
-        for iface in self._device.interfaces.values():
-            if iface.vlan == vlan_id:
-                iface.vlan = 1
+        # IOS keeps "switchport access vlan N" on the member ports: they go
+        # inactive (carry no traffic) until VLAN N is created again.
         self._notify_stp_change()
 
     def set_port_vlan(self, iface_name: str, vlan_id: int) -> None:
@@ -758,6 +757,18 @@ class Switch:
                 return
             vlan = iface.vlan
 
+        # A VLAN missing from the VLAN database is inactive: an access port
+        # left in a deleted VLAN, or a tagged VLAN this switch does not have.
+        if vlan not in self._vlans:
+            self._sim._record(FrameDropped(
+                time=arrive_time, seq=self._sim.next_seq(),
+                device_id=self.device_id,
+                interface_name=ingress_iface,
+                frame=frame,
+                reason=f"VLAN {vlan} is not in the VLAN database (inactive)",
+            ))
+            return
+
         # STP check: drop frames if port is not forwarding for this VLAN
         if not self._stp.is_port_forwarding(ingress_iface, vlan):
             # Port is in LEARNING state: allow MAC learning but block forwarding.
@@ -811,6 +822,8 @@ class Switch:
         iface = self._device.interfaces.get(iface_name)
         if iface is None or not iface.is_physical_switchport:
             return False
+        if vlan_id not in self._vlans:
+            return False      # deleted / never created: inactive
         if iface.is_access:
             return iface.vlan == vlan_id
         elif iface.is_trunk:

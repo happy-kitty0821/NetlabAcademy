@@ -2297,11 +2297,18 @@ class CLISession:
         iface = self._get_current_iface()
         if iface is None:
             return "% No interface selected."
+        if not 1 <= vlan_id <= 4094:
+            return _invalid_at(" ".join(tokens[:4]), tokens[3])
+        message = ""
+        if vlan_id not in switch.vlans:
+            # Catalyst IOS creates the VLAN rather than refusing.
+            switch.create_vlan(vlan_id)
+            message = f"% Access VLAN does not exist. Creating vlan {vlan_id}"
         try:
             switch.set_port_vlan(self.current_iface, vlan_id)
         except ValueError as exc:
             return f"% {exc}"
-        return ""
+        return message
 
     def _cmd_no_switchport(self, tokens: list[str]) -> str:
         """
@@ -2687,6 +2694,7 @@ class CLISession:
         from simulator_core.types import InterfaceState
         from simulator_core.port_types import detect_port_type, format_speed
 
+        switch = self._get_switch()
         lines = [
             "Port      Name               Status       Vlan       Duplex  Speed Type",
         ]
@@ -2694,7 +2702,7 @@ class CLISession:
             iface = device.interfaces[name]
             if not iface.is_physical_switchport:
                 continue
-            status = _switch_port_status(iface)
+            status = _switch_port_status(iface, switch.vlans if switch else None)
             mode = iface.oper_switchport_mode
             if mode == "trunk":
                 vlan_field = "trunk"
@@ -3570,7 +3578,10 @@ class CLISession:
             if not iface.is_physical_switchport:
                 blocks.append(f"Name: {name}\nSwitchport: Disabled")
                 continue
-            vname = lambda v: switch.vlans.get(v) or ("default" if v == 1 else f"VLAN{v:04d}")  # noqa: E731
+            def vname(v: int) -> str:
+                if v not in switch.vlans:
+                    return "Inactive"
+                return switch.vlans[v] or ("default" if v == 1 else f"VLAN{v:04d}")
             admin = {"trunk": "trunk", "dynamic_auto": "dynamic auto",
                      "dynamic_desirable": "dynamic desirable"}.get(
                          iface.switchport_mode, "static access")
@@ -3618,7 +3629,8 @@ class CLISession:
         speed_kbps = iface.speed_kbps or port_type.speed_kbps or 0
         header = f"{_long_name(iface_name)} is {status}, line protocol is {proto}"
         if device.model == DeviceModel.SWITCH and iface.is_physical_switchport:
-            header += f" ({_switch_port_status(iface)})"
+            switch = self._get_switch()
+            header += f" ({_switch_port_status(iface, switch.vlans if switch else None)})"
         lines = [header]
         mac = _cisco_mac(iface.mac)
         lines.append(f"  Hardware is {_hardware_name(iface_name)}, address is {mac} (bia {mac})")
@@ -4278,10 +4290,15 @@ def _media_type(name: str) -> str:
     return "10/100BaseTX"
 
 
-def _switch_port_status(iface) -> str:
-    """show interfaces status word: connected / notconnect / disabled."""
+def _switch_port_status(iface, vlans=None) -> str:
+    """
+    show interfaces status word: connected / notconnect / disabled, or
+    inactive for an access port whose VLAN is not in the VLAN database.
+    """
     if iface.admin_state == InterfaceState.DOWN:
         return "disabled"
+    if vlans is not None and iface.is_access and iface.vlan not in vlans:
+        return "inactive"
     if iface.oper_state == InterfaceState.UP:
         return "connected"
     return "notconnect"

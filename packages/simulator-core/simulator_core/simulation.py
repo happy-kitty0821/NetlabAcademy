@@ -145,6 +145,8 @@ class Simulation:
         # Last known (admin, oper) state per (device_id, interface) for
         # detecting transitions; empty until the first computation.
         self._iface_states: dict[tuple[str, str], tuple] = {}
+        # Switch links currently reported with a native VLAN mismatch.
+        self._native_mismatches: set[tuple] = set()
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -237,6 +239,7 @@ class Simulation:
         self._stp_initialized = False
         self._syslog.clear()
         self._iface_states.clear()
+        self._native_mismatches.clear()
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -452,10 +455,52 @@ class Simulation:
         """
         self._compute_oper_states()
         self._log_interface_transitions()
+        self._log_native_vlan_mismatches()
         for router in self._routers.values():
             router.update_connected_routes()
         # A port going up or down changes the spanning tree too.
         self._trigger_stp()
+
+    def _log_native_vlan_mismatches(self) -> None:
+        """
+        CDP on IOS compares the native VLAN at both ends of a link and logs
+        ``%CDP-4-NATIVE_VLAN_MISMATCH`` on each switch.  A trunk's native
+        VLAN is its untagged VLAN; an access port's is its access VLAN.
+
+        Logged once when a mismatch appears (IOS repeats it every minute
+        while it lasts); fixing either end clears it.
+        """
+        from simulator_core.naming import long_name
+        current: set[tuple] = set()
+        for link in self._topology.links:
+            (da, ia), (db, ib) = link.endpoint_a, link.endpoint_b
+            ends = []
+            for dev_id, name in ((da, ia), (db, ib)):
+                if dev_id not in self._switches:
+                    break
+                iface = self._topology.devices[dev_id].interfaces.get(name)
+                cdp = self._get_cdp_manager(dev_id)
+                if (iface is None or iface.oper_state != InterfaceState.UP
+                        or cdp is None or not cdp.is_enabled
+                        or not getattr(iface, "_cdp_enabled", True)):
+                    break
+                native = iface.trunk_native_vlan if iface.is_trunk else iface.vlan
+                ends.append((dev_id, name, native))
+            if len(ends) != 2 or ends[0][2] == ends[1][2]:
+                continue
+            key = (link.id, ends[0][2], ends[1][2])
+            current.add(key)
+            if key in self._native_mismatches:
+                continue
+            for (dev_id, name, native), (peer_id, peer_name, peer_native) in (
+                    (ends[0], ends[1]), (ends[1], ends[0])):
+                peer_host = self._topology.devices[peer_id].hostname
+                self.log_event(
+                    dev_id, "CDP", 4, "NATIVE_VLAN_MISMATCH",
+                    f"Native VLAN mismatch discovered on {long_name(name)} ({native}), "
+                    f"with {peer_host} {long_name(peer_name)} ({peer_native}).",
+                )
+        self._native_mismatches = current
 
     def _compute_oper_states(self) -> None:
         """
@@ -565,6 +610,9 @@ class Simulation:
             vlan_id = int(svi.name[4:])
         except ValueError:
             return InterfaceState.DOWN
+        switch = self._switches.get(device.id)
+        if switch is not None and vlan_id not in switch.vlans:
+            return InterfaceState.DOWN    # the VLAN itself does not exist
         for port in device.interfaces.values():
             if port.is_svi or port.is_loopback or port.is_subinterface:
                 continue
