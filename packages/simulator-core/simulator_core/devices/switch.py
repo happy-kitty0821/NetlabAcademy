@@ -418,9 +418,9 @@ class Switch:
     def ports_in_vlan(self, vlan_id: int) -> list[str]:
         result = []
         for name, iface in self._device.interfaces.items():
-            if iface.switchport_mode == "access" and iface.vlan == vlan_id:
+            if iface.is_access and iface.vlan == vlan_id:
                 result.append(name)
-            elif iface.switchport_mode == "trunk":
+            elif iface.is_trunk:
                 allowed = iface.trunk_allowed_vlans
                 if allowed is None or vlan_id in allowed:
                     result.append(name)
@@ -496,7 +496,7 @@ class Switch:
     def get_active_trunk_vlans(self, iface_name: str) -> list[int]:
         """Return sorted list of VLANs active on a trunk port."""
         iface = self._device.interfaces.get(iface_name)
-        if iface is None or iface.switchport_mode != "trunk":
+        if iface is None or not iface.is_trunk:
             return []
         allowed = iface.trunk_allowed_vlans
         if allowed is None:
@@ -728,7 +728,7 @@ class Switch:
             return  # BPDUs are not forwarded as user frames
 
         # Classify the frame into a VLAN (802.1Q ingress rules).
-        if iface.switchport_mode == "trunk":
+        if iface.is_trunk:
             # Tagged frames belong to the VLAN in their tag; untagged frames
             # belong to the trunk's native VLAN.  A VLAN not allowed on this
             # trunk is dropped at ingress.
@@ -811,9 +811,9 @@ class Switch:
         iface = self._device.interfaces.get(iface_name)
         if iface is None or not iface.is_physical_switchport:
             return False
-        if iface.switchport_mode == "access":
+        if iface.is_access:
             return iface.vlan == vlan_id
-        elif iface.switchport_mode == "trunk":
+        elif iface.is_trunk:
             return self._is_vlan_allowed_on_trunk(iface_name, vlan_id)
         return False
 
@@ -848,7 +848,7 @@ class Switch:
             if iface is not None:
                 if frame_vlan is not None:
                     stp_vlan = frame_vlan
-                elif iface.switchport_mode == "access":
+                elif iface.is_access:
                     stp_vlan = iface.vlan
                 else:
                     stp_vlan = iface.trunk_native_vlan
@@ -870,7 +870,7 @@ class Switch:
             return frame
         iface = self._device.interfaces.get(egress_iface)
         tag: Optional[int] = None
-        if (iface is not None and iface.switchport_mode == "trunk"
+        if (iface is not None and iface.is_trunk
                 and frame_vlan is not None
                 and frame_vlan != iface.trunk_native_vlan):
             tag = frame_vlan
