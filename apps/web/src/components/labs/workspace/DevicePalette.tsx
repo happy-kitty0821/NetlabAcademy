@@ -4,53 +4,11 @@ import { useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { DEFAULT_DEVICE_CATALOG } from "@/lib/deviceTypes";
 import type { DeviceCatalogEntry } from "@/lib/deviceTypes";
+import { DeviceTile, type DeviceKind } from "@/components/labs/FlowNodes";
 
 function DeviceIcon({ entry }: { entry: DeviceCatalogEntry }) {
-  const sw = "#1a7f37", rt = "#9a6700", host = "#0969da";
-  const bg = "#f6f8fa", sc = "#0d1117";
-
-  if (entry.icon === "switch-l2") return (
-    <svg width="28" height="18" viewBox="0 0 52 30" fill="none" aria-hidden="true">
-      <rect x="1" y="4" width="50" height="22" rx="3" fill={bg} stroke={sw} strokeWidth="1.5" />
-      <line x1="6" y1="18" x2="13" y2="18" stroke={sw} strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M10 15 L13 18 L10 21" stroke={sw} strokeWidth="1.5" fill="none" strokeLinecap="round" />
-      <line x1="46" y1="18" x2="39" y2="18" stroke={sw} strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M42 15 L39 18 L42 21" stroke={sw} strokeWidth="1.5" fill="none" strokeLinecap="round" />
-    </svg>
-  );
-  if (entry.icon === "router") return (
-    <svg width="22" height="22" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <circle cx="24" cy="24" r="21" fill={bg} stroke={rt} strokeWidth="1.5" />
-      <line x1="24" y1="8" x2="24" y2="14" stroke={rt} strokeWidth="2" strokeLinecap="round" />
-      <path d="M20 11 L24 8 L28 11" stroke={rt} strokeWidth="2" fill="none" strokeLinecap="round" />
-      <line x1="40" y1="24" x2="34" y2="24" stroke={rt} strokeWidth="2" strokeLinecap="round" />
-      <path d="M37 20 L40 24 L37 28" stroke={rt} strokeWidth="2" fill="none" strokeLinecap="round" />
-      <line x1="8" y1="24" x2="14" y2="24" stroke={rt} strokeWidth="2" strokeLinecap="round" />
-      <path d="M11 20 L8 24 L11 28" stroke={rt} strokeWidth="2" fill="none" strokeLinecap="round" />
-    </svg>
-  );
-  if (entry.icon === "laptop") return (
-    <svg width="24" height="20" viewBox="0 0 44 36" fill="none" aria-hidden="true">
-      <rect x="4" y="2" width="36" height="24" rx="2" fill={bg} stroke={host} strokeWidth="1.5" />
-      <rect x="7" y="5" width="30" height="18" rx="1" fill={sc} />
-      <rect x="1" y="26" width="42" height="6" rx="2" fill={bg} stroke={host} strokeWidth="1.5" />
-    </svg>
-  );
-  if (entry.icon === "server") return (
-    <svg width="20" height="26" viewBox="0 0 36 44" fill="none" aria-hidden="true">
-      {[0, 1, 2].map((i) => (
-        <rect key={i} x="2" y={2 + i * 14} width="32" height="12" rx="2" fill={bg} stroke={host} strokeWidth="1.5" />
-      ))}
-    </svg>
-  );
-  return (
-    <svg width="26" height="22" viewBox="0 0 44 38" fill="none" aria-hidden="true">
-      <rect x="2" y="1" width="40" height="26" rx="2.5" fill={bg} stroke={host} strokeWidth="1.5" />
-      <rect x="5" y="4" width="34" height="20" rx="1" fill={sc} />
-      <rect x="18" y="27" width="8" height="4" fill={bg} stroke={host} strokeWidth="1.2" />
-      <rect x="11" y="31" width="22" height="4" rx="1.5" fill={bg} stroke={host} strokeWidth="1.2" />
-    </svg>
-  );
+  // Same tile as on the canvas, smaller.
+  return <DeviceTile kind={entry.icon as DeviceKind} size={26} />;
 }
 
 const CATEGORIES = [

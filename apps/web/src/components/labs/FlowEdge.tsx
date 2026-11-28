@@ -1,26 +1,29 @@
 "use client";
 
 /**
- * FlowEdge — EVE-NG style cable with interface labels.
+ * FlowEdge — CML-style link between two devices.
  *
- * Each cable renders as:
- *  - A thick colored line (green = active Ethernet, gray = unconnected)
- *  - A thin offset shadow for depth
- *  - Interface name label at each endpoint (e.g. "eth0", "Gi0/1")
- *    positioned 22% along the path from each device, above the cable
+ * Links are straight lines between the centres of the two device tiles
+ * (not between fixed ports), drawn from tile edge to tile edge.  Several
+ * cables between the same two devices are spread apart so each stays
+ * visible and clickable.  The interface at each end is labelled just
+ * outside the device it belongs to.
  *
- * The interface labels are placed using EdgeLabelRenderer so they are
- * rendered in HTML (not SVG), which means they can use proper fonts
- * and are not clipped by the SVG viewport.
+ * Colour follows the lab: grey while stopped, green while running, blue
+ * when selected.
  */
 
+import { useContext } from "react";
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getStraightPath,
+  useInternalNode,
+  useStore,
   type Edge,
   type EdgeProps,
+  type InternalNode,
 } from "@xyflow/react";
+import { LabRunningContext, NODE_TILE } from "./FlowNodes";
 
 export interface EdgeData extends Record<string, unknown> {
   labelA?: string;
@@ -30,118 +33,99 @@ export interface EdgeData extends Record<string, unknown> {
 
 export type LabEdgeType = Edge<EdgeData>;
 
-export function LabEdge({
-  id,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  data,
-  selected,
-}: EdgeProps<LabEdgeType>) {
+const PARALLEL_GAP = 12;   // px between cables joining the same two devices
+const LABEL_GAP = 16;      // px from the tile edge to the interface label
+
+/** Centre of a node's icon tile (the tile sits at the top, centred). */
+function tileCentre(node: InternalNode): { x: number; y: number } {
+  const { x, y } = node.internals.positionAbsolute;
+  return { x: x + (node.measured.width ?? NODE_TILE) / 2, y: y + NODE_TILE / 2 };
+}
+
+/** Index of this edge among the cables joining the same pair, and how many. */
+function useParallel(id: string, source: string, target: string): [number, number] {
+  return useStore((s) => {
+    const same = s.edges.filter((e) =>
+      (e.source === source && e.target === target) || (e.source === target && e.target === source));
+    return [Math.max(0, same.findIndex((e) => e.id === id)), same.length] as [number, number];
+  }, (a, b) => a[0] === b[0] && a[1] === b[1]);
+}
+
+function PortLabel({ x, y, text, color }: { x: number; y: number; text: string; color: string }) {
+  return (
+    <div
+      className="nodrag nopan"
+      style={{
+        position: "absolute",
+        transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+        pointerEvents: "none",
+        fontSize: 10, lineHeight: "14px", fontWeight: 600,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        color, background: "rgba(255,255,255,0.92)",
+        padding: "0 4px", borderRadius: 3, border: "1px solid #d0d7de",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+export function LabEdge({ id, source, target, data, selected }: EdgeProps<LabEdgeType>) {
+  const running = useContext(LabRunningContext);
+  const sourceNode = useInternalNode(source);
+  const targetNode = useInternalNode(target);
+  const [index, count] = useParallel(id, source, target);
+  if (!sourceNode || !targetNode) return null;
+
+  // Keep the parallel offset stable whichever way round the cable was drawn.
+  const flip = source > target ? -1 : 1;
+  const a = tileCentre(sourceNode);
+  const b = tileCentre(targetNode);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const offset = (index - (count - 1) / 2) * PARALLEL_GAP * flip;
+  const ox = -uy * offset;
+  const oy = ux * offset;
+
+  // Distance from a tile centre to its edge along this direction (square tile).
+  const toEdge = (NODE_TILE / 2 + 2) / Math.max(Math.abs(ux), Math.abs(uy), 1e-6);
+  const room = len - 2 * toEdge;
+  if (room <= 0) return null;   // tiles overlap: nothing to draw
+
+  const sx = a.x + ox + ux * toEdge;
+  const sy = a.y + oy + uy * toEdge;
+  const tx = b.x + ox - ux * toEdge;
+  const ty = b.y + oy - uy * toEdge;
+  const path = `M ${sx},${sy} L ${tx},${ty}`;
+
+  // Labels sit just outside each tile; on a short link, at 25% / 75%.
+  const along = room > 2 * (LABEL_GAP + 34) ? LABEL_GAP + 14 : room * 0.25;
   const labelA = data?.labelA ?? "";
   const labelB = data?.labelB ?? "";
-  const active = data?.active ?? true;
 
-  const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-
-  // Colors — light theme
-  const cableColor = selected
-    ? "#0969da"   // selected: blue
-    : active
-    ? "#1a7f37"   // active: green
-    : "#9198a1";  // inactive: grey
-
-  const shadowColor = "rgba(0,0,0,0.5)";
-
-  // Position label A at 20% along the line from source
-  const labelAx = sourceX + (targetX - sourceX) * 0.2;
-  const labelAy = sourceY + (targetY - sourceY) * 0.2;
-
-  // Position label B at 20% from target (i.e. 80% from source)
-  const labelBx = sourceX + (targetX - sourceX) * 0.8;
-  const labelBy = sourceY + (targetY - sourceY) * 0.8;
-
-  // Perpendicular offset direction (push labels away from the cable)
-  const dx = targetX - sourceX;
-  const dy = targetY - sourceY;
-  const len = Math.sqrt(dx * dx + dy * dy) || 1;
-  // Normal vector (rotate 90°)
-  const nx = -dy / len;
-  const ny = dx / len;
-  const LABEL_OFFSET = 12;
+  const color = selected ? "#0969da" : running ? "#2da44e" : "#6e7781";
+  const labelColor = selected ? "#0969da" : "#1f2328";
 
   return (
     <>
-      {/* Shadow (slightly offset, dark, behind) */}
-      <BaseEdge
-        id={`${id}-shadow`}
-        path={edgePath}
-        style={{
-          stroke: shadowColor,
-          strokeWidth: 5,
-          strokeLinecap: "round",
-          transform: "translate(1px, 1px)",
-        }}
-      />
-
-      {/* Main cable */}
       <BaseEdge
         id={id}
-        path={edgePath}
+        path={path}
+        interactionWidth={16}
         style={{
-          stroke: cableColor,
-          strokeWidth: 2.5,
+          stroke: color,
+          strokeWidth: selected ? 3 : 2,
           strokeLinecap: "round",
           transition: "stroke 0.2s",
-          filter: selected ? "drop-shadow(0 0 3px rgba(9,105,218,0.5))" : "none",
         }}
       />
-
-      {/* Interface labels via HTML overlay */}
       <EdgeLabelRenderer>
-        {labelA && (
-          <div
-            style={{
-              position: "absolute",
-              transform: `translate(-50%, -50%) translate(${labelAx + nx * LABEL_OFFSET}px, ${labelAy + ny * LABEL_OFFSET}px)`,
-              pointerEvents: "none",
-            }}
-            className="nodrag nopan"
-          >
-            <span style={{
-              fontSize: 9, fontFamily: "ui-monospace, monospace", fontWeight: 600,
-              color: selected ? "#0969da" : active ? "#1a7f37" : "#656d76",
-              background: "#ffffff",
-              padding: "1px 4px", borderRadius: 3,
-              border: "1px solid #d0d7de",
-              whiteSpace: "nowrap", letterSpacing: "0.03em",
-            }}>
-              {labelA}
-            </span>
-          </div>
-        )}
-        {labelB && (
-          <div
-            style={{
-              position: "absolute",
-              transform: `translate(-50%, -50%) translate(${labelBx + nx * LABEL_OFFSET}px, ${labelBy + ny * LABEL_OFFSET}px)`,
-              pointerEvents: "none",
-            }}
-            className="nodrag nopan"
-          >
-            <span style={{
-              fontSize: 9, fontFamily: "ui-monospace, monospace", fontWeight: 600,
-              color: selected ? "#0969da" : active ? "#1a7f37" : "#656d76",
-              background: "#ffffff",
-              padding: "1px 4px", borderRadius: 3,
-              border: "1px solid #d0d7de",
-              whiteSpace: "nowrap", letterSpacing: "0.03em",
-            }}>
-              {labelB}
-            </span>
-          </div>
-        )}
+        {labelA && <PortLabel x={sx + ux * along} y={sy + uy * along} text={labelA} color={labelColor} />}
+        {labelB && <PortLabel x={tx - ux * along} y={ty - uy * along} text={labelB} color={labelColor} />}
       </EdgeLabelRenderer>
     </>
   );
