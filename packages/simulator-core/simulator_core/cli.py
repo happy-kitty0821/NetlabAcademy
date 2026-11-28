@@ -702,6 +702,11 @@ class CLISession:
                     Cmd("description","Remove description",
                         handler=lambda s, t: s._cmd_no_description(t)),
                     Cmd("switchport", "Reset switchport to default VLAN",
+                        children=[
+                            Cmd("nonegotiate", "Re-enable DTP negotiation",
+                                handler=lambda s, t: s._cmd_switchport_nonegotiate(t, False)),
+                        ],
+                        fallback=True,
                         handler=lambda s, t: s._cmd_no_switchport(t)),
                     Cmd("cdp",       "Disable CDP on this interface",
                         children=[
@@ -766,8 +771,8 @@ class CLISession:
                             Cmd("pruning", "Prune VLANs from trunk (no-op in sim)",
                                 handler=lambda s, t: ""),
                         ]),
-                    Cmd("nonegotiate", "Disable DTP negotiation",
-                        handler=lambda s, t: ""),
+                    Cmd("nonegotiate", "Device will not engage in negotiation protocol on this interface",
+                        handler=lambda s, t: s._cmd_switchport_nonegotiate(t, True)),
                     Cmd("port-security", "Enable port security",
                         handler=lambda s, t: s._cmd_switchport_port_security(t)),
                 ]),
@@ -1999,8 +2004,28 @@ class CLISession:
         if err:
             return err
         iface = self._get_current_iface()
-        if iface:
-            iface.switchport_mode = f"dynamic_{mode}"
+        if iface is None:
+            return "% No interface selected."
+        if iface.dtp_nonegotiate:
+            return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."
+        iface.switchport_mode = f"dynamic_{mode}"
+        switch = self._get_switch()
+        if switch:
+            for vlan_id in switch.vlans:
+                switch.stp.ensure_vlan(vlan_id)
+        return ""
+
+    def _cmd_switchport_nonegotiate(self, tokens: list[str], enabled: bool) -> str:
+        """[no] switchport nonegotiate -- stop (or resume) sending DTP frames."""
+        err = self._require_physical_switchport()
+        if err:
+            return err
+        iface = self._get_current_iface()
+        if iface is None:
+            return "% No interface selected."
+        if enabled and iface.switchport_mode.startswith("dynamic_"):
+            return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."
+        iface.dtp_nonegotiate = enabled
         return ""
 
     def _cmd_switchport_trunk_native_vlan(self, tokens: list[str]) -> str:
@@ -2111,17 +2136,25 @@ class CLISession:
         return ""
 
     def _cmd_no_switchport(self, tokens: list[str]) -> str:
+        """
+        ``no switchport <setting>`` puts just that setting back to its
+        default; a bare ``no switchport`` resets the port's mode and VLAN.
+        """
         iface = self._get_current_iface()
-        if iface:
+        if iface is None:
+            return ""
+        words = [t.lower() for t in tokens[2:]]
+        if words and "access".startswith(words[0]):
+            iface.vlan = 1
+        elif words and "trunk".startswith(words[0]) and len(words) > 1:
+            if "native".startswith(words[1]):
+                iface.trunk_native_vlan = 1
+            elif "allowed".startswith(words[1]):
+                iface.trunk_allowed_vlans = None
+        else:
             iface.vlan = 1
             iface.switchport_mode = "access"
-        return ""
-
-    def _cmd_no_switchport(self, tokens: list[str]) -> str:
-        iface = self._get_current_iface()
-        if iface:
-            iface.vlan = 1
-            iface.switchport_mode = "access"
+            iface.dtp_nonegotiate = False
         return ""
 
     # ── STP per-interface commands ────────────────────────────────────────────
@@ -2406,7 +2439,7 @@ class CLISession:
         trunk_ifaces = [
             (name, iface)
             for name, iface in device.interfaces.items()
-            if iface.switchport_mode == "trunk"
+            if iface.is_trunk
             and iface.is_physical_switchport  # exclude SVIs and loopbacks
         ]
 
@@ -2418,7 +2451,7 @@ class CLISession:
         ]
         for name, iface in trunk_ifaces:
             status = "trunking" if iface.admin_state == InterfaceState.UP else "not-trunking"
-            mode_abbr = "on"
+            mode_abbr = _dtp_mode_word(iface)
             lines.append(
                 f"{name:<11} {mode_abbr:<12} {iface.trunk_encapsulation:<14} {status:<13} {iface.trunk_native_vlan}"
             )
@@ -2467,7 +2500,7 @@ class CLISession:
             if not iface.is_physical_switchport:
                 continue
             status = _switch_port_status(iface)
-            mode = iface.switchport_mode
+            mode = iface.oper_switchport_mode
             if mode == "trunk":
                 vlan_field = "trunk"
             elif mode == "access":
@@ -3343,16 +3376,17 @@ class CLISession:
                 blocks.append(f"Name: {name}\nSwitchport: Disabled")
                 continue
             vname = lambda v: switch.vlans.get(v) or ("default" if v == 1 else f"VLAN{v:04d}")  # noqa: E731
-            if iface.switchport_mode == "trunk":
-                admin = "trunk"
-                oper = "trunk" if iface.oper_state == InterfaceState.UP else "down"
-                encap = "dot1q"
-                negotiation = "On"
+            admin = {"trunk": "trunk", "dynamic_auto": "dynamic auto",
+                     "dynamic_desirable": "dynamic desirable"}.get(
+                         iface.switchport_mode, "static access")
+            if iface.oper_state != InterfaceState.UP:
+                oper = "down"
             else:
-                admin = "static access"
-                oper = "static access" if iface.oper_state == InterfaceState.UP else "down"
-                encap = "native"
-                negotiation = "Off"
+                oper = "trunk" if iface.is_trunk else "static access"
+            encap = "dot1q" if iface.is_trunk else "native"
+            # DTP runs on trunk and dynamic ports unless nonegotiate is set.
+            negotiation = ("On" if iface.switchport_mode != "access"
+                           and not iface.dtp_nonegotiate else "Off")
             allowed = ("ALL" if iface.trunk_allowed_vlans is None
                        else self._format_vlan_list(sorted(iface.trunk_allowed_vlans)))
             blocks.append("\n".join([
@@ -3768,7 +3802,7 @@ class CLISession:
             ports = [
                 n for n in _display_order(device)
                 if device.interfaces[n].is_physical_switchport
-                and device.interfaces[n].switchport_mode == "access"
+                and device.interfaces[n].is_access
                 and device.interfaces[n].vlan == vlan_id
             ]
             rows.append((vlan_id, switch.vlans[vlan_id] or f"VLAN{vlan_id:04d}", "active", ports))
@@ -3951,22 +3985,38 @@ def _iface_config_lines(device, name: str, iface, stp=None) -> list[str]:
     elif not is_switchport and device.model != DeviceModel.HOST:
         lines.append(" no ip address")
     if is_switchport:
-        if iface.switchport_mode == "trunk":
+        mode = iface.switchport_mode
+        if iface.vlan != 1 and mode != "trunk":
+            lines.append(f" switchport access vlan {iface.vlan}")
+        if mode != "access":
             if iface.trunk_native_vlan != 1:
                 lines.append(f" switchport trunk native vlan {iface.trunk_native_vlan}")
             if iface.trunk_allowed_vlans is not None:
                 allowed = CLISession._format_vlan_list(sorted(iface.trunk_allowed_vlans))
                 lines.append(f" switchport trunk allowed vlan {allowed}")
+        if mode == "trunk":
             lines.append(" switchport mode trunk")
-        elif iface.switchport_mode == "access" and iface.vlan != 1:
-            lines.append(f" switchport access vlan {iface.vlan}")
+        elif mode.startswith("dynamic_"):
+            lines.append(f" switchport mode dynamic {mode[len('dynamic_'):]}")
+        elif mode == "access" and (iface.vlan != 1 or iface.dtp_nonegotiate):
             lines.append(" switchport mode access")
+        if iface.dtp_nonegotiate:
+            lines.append(" switchport nonegotiate")
     if is_switchport and stp is not None:
         lines += _stp_iface_lines(stp, name)
     if iface.admin_state == InterfaceState.DOWN:
         lines.append(" shutdown")
     lines.append("!")
     return lines
+
+
+def _dtp_mode_word(iface) -> str:
+    """The Mode column of ``show interfaces trunk``."""
+    if iface.switchport_mode == "dynamic_desirable":
+        return "desirable"
+    if iface.switchport_mode == "dynamic_auto":
+        return "auto"
+    return "nonegotiate" if iface.dtp_nonegotiate else "on"
 
 
 def _mask_prefix(mask_int: int) -> Optional[int]:

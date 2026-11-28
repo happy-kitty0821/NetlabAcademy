@@ -92,6 +92,12 @@ class Interface:
     trunk_native_vlan: int = 1
     trunk_allowed_vlans: Optional[list] = None   # None = all; list of ints
     trunk_encapsulation: str = "dot1q"           # "dot1q" | "isl" (ISL not simulated)
+    # DTP: ``switchport nonegotiate`` stops the port sending DTP frames, so
+    # a dynamic neighbour will not form a trunk with it.
+    dtp_nonegotiate: bool = False
+    # Outcome of DTP for a dynamic port (set by the simulation): True while
+    # the port has negotiated a trunk, False while it runs as access.
+    dtp_trunking: bool = field(default=False, repr=False)
 
     # ── STP per-interface settings ────────────────────────────────────────────
     stp_portfast: bool = False
@@ -116,6 +122,30 @@ class Interface:
             # Auto-set speed from port type if not explicitly configured
             if self.speed_kbps is None:
                 self.speed_kbps = self._port_type_detected.speed_kbps
+
+    # ── Switchport operational mode ───────────────────────────────────────────
+
+    @property
+    def oper_switchport_mode(self) -> str:
+        """
+        The mode the port actually runs in: ``switchport_mode`` is the
+        administrative mode, and a dynamic port runs as a trunk or as an
+        access port depending on what DTP negotiated.
+        """
+        mode = self.switchport_mode
+        if mode.startswith("dynamic_"):
+            return "trunk" if self.dtp_trunking else "access"
+        return mode
+
+    @property
+    def is_trunk(self) -> bool:
+        """True while the port operates as an 802.1Q trunk."""
+        return self.oper_switchport_mode == "trunk"
+
+    @property
+    def is_access(self) -> bool:
+        """True while the port operates as an access port."""
+        return self.oper_switchport_mode == "access"
 
     # ── Interface type classification ─────────────────────────────────────────
 

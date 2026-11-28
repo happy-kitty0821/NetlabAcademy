@@ -475,6 +475,9 @@ class Simulation:
                 if iface.is_svi or iface.is_loopback or iface.is_subinterface:
                     continue
                 iface.oper_state = self._physical_oper_state(device.id, iface)
+        # Trunk negotiation depends on which ports are up, and SVIs depend on
+        # which ports trunk, so DTP runs between the two passes.
+        self._negotiate_dtp()
         for device in topo.devices.values():
             for iface in device.interfaces.values():
                 if iface.admin_state == InterfaceState.DOWN:
@@ -490,6 +493,53 @@ class Simulation:
                     )
                 elif iface.is_svi:
                     iface.oper_state = self._svi_oper_state(device, iface)
+
+    # ------------------------------------------------------------------
+    # DTP (Dynamic Trunking Protocol)
+    # ------------------------------------------------------------------
+
+    def _negotiate_dtp(self) -> None:
+        """
+        Settle every dynamic switchport as a trunk or an access port.
+
+        IOS rules, by the two ends' administrative modes:
+
+        ===================  =====  =====  =========  =====  ==================
+        local vs peer        auto  desir  trunk      access trunk+nonegotiate
+        ===================  =====  =====  =========  =====  ==================
+        dynamic auto         acc    trunk  trunk      acc    acc
+        dynamic desirable    trunk  trunk  trunk      acc    acc
+        ===================  =====  =====  =========  =====  ==================
+
+        A port that is down, or cabled to anything but a switchport (a
+        router, a PC), runs as access: nobody answers its DTP frames.
+        """
+        from simulator_core.types import DeviceModel
+        for device in self._topology.devices.values():
+            if device.model != DeviceModel.SWITCH:
+                continue
+            for name, iface in device.interfaces.items():
+                if not iface.switchport_mode.startswith("dynamic_"):
+                    iface.dtp_trunking = False
+                    continue
+                peer = self._dtp_peer(device.id, name, iface)
+                iface.dtp_trunking = peer is not None and _dtp_forms_trunk(iface, peer)
+
+    def _dtp_peer(self, device_id: str, name: str, iface):
+        """The switchport across an up link from *iface*, or None."""
+        from simulator_core.types import DeviceModel
+        if not iface.is_physical_switchport or iface.oper_state != InterfaceState.UP:
+            return None
+        peer = self._topology.neighbours(device_id, name)
+        if peer is None:
+            return None
+        peer_dev = self._topology.devices.get(peer[0])
+        if peer_dev is None or peer_dev.model != DeviceModel.SWITCH:
+            return None
+        peer_iface = peer_dev.interfaces.get(peer[1])
+        if peer_iface is None or not peer_iface.is_physical_switchport:
+            return None
+        return peer_iface
 
     def _physical_oper_state(self, device_id: str, iface) -> InterfaceState:
         if iface.admin_state == InterfaceState.DOWN:
@@ -520,9 +570,9 @@ class Simulation:
                 continue
             if port.oper_state != InterfaceState.UP:
                 continue
-            if port.switchport_mode == "access" and port.vlan == vlan_id:
+            if port.is_access and port.vlan == vlan_id:
                 return InterfaceState.UP
-            if port.switchport_mode == "trunk" and (
+            if port.is_trunk and (
                 port.trunk_allowed_vlans is None or vlan_id in port.trunk_allowed_vlans
             ):
                 return InterfaceState.UP
@@ -1303,3 +1353,18 @@ class Simulation:
         if host is not None:
             return getattr(host, "cdp_manager", None)
         return None
+
+
+def _dtp_forms_trunk(local, peer) -> bool:
+    """
+    Does dynamic port *local* become a trunk with *peer*?  Only a peer that
+    sends DTP frames (not access, not ``nonegotiate``) can bring it up, and
+    two ``dynamic auto`` ports both wait for the other, so they stay access.
+    """
+    if peer.dtp_nonegotiate:
+        return False
+    if peer.switchport_mode in ("trunk", "dynamic_desirable"):
+        return True
+    if peer.switchport_mode == "dynamic_auto":
+        return local.switchport_mode == "dynamic_desirable"
+    return False
