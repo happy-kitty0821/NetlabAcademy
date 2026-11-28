@@ -14,7 +14,7 @@ routers and PCs from an IOS-style console, all in the browser.
 ![React](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)
 <!-- LOC-BADGE:START -->
-![Lines of code](https://img.shields.io/badge/lines_of_code-27.3k-0969da?style=flat-square)
+![Lines of code](https://img.shields.io/badge/lines_of_code-27.9k-0969da?style=flat-square)
 <!-- LOC-BADGE:END -->
 [![Lines of code workflow](https://github.com/happy-kitty0821/NetlabAcademy/actions/workflows/lines-of-code.yml/badge.svg)](https://github.com/happy-kitty0821/NetlabAcademy/actions/workflows/lines-of-code.yml)
 
@@ -206,17 +206,17 @@ locally.
 <!-- LOC:START -->
 | Language | Files | Code | Comments | Blank | Share of code |
 | :-- | --: | --: | --: | --: | :-- |
-| Python | 125 | 18,900 | 5,326 | 3,813 | `██████████████░░░░░░` 69.3% |
-| TSX | 45 | 6,194 | 392 | 649 | `█████░░░░░░░░░░░░░░░` 22.7% |
-| Markdown | 5 | 975 | 0 | 287 | `█░░░░░░░░░░░░░░░░░░░` 3.6% |
-| TypeScript | 11 | 894 | 175 | 130 | `█░░░░░░░░░░░░░░░░░░░` 3.3% |
+| Python | 127 | 19,542 | 5,396 | 3,924 | `██████████████░░░░░░` 70.0% |
+| TSX | 45 | 6,194 | 392 | 649 | `████░░░░░░░░░░░░░░░░` 22.2% |
+| Markdown | 5 | 975 | 0 | 287 | `█░░░░░░░░░░░░░░░░░░░` 3.5% |
+| TypeScript | 11 | 894 | 175 | 130 | `█░░░░░░░░░░░░░░░░░░░` 3.2% |
 | CSS | 1 | 164 | 28 | 32 | `░░░░░░░░░░░░░░░░░░░░` 0.6% |
 | JSON | 2 | 60 | 0 | 0 | `░░░░░░░░░░░░░░░░░░░░` 0.2% |
 | YAML | 1 | 36 | 3 | 8 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | TOML | 1 | 26 | 0 | 6 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | JavaScript | 2 | 16 | 0 | 5 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | INI | 1 | 4 | 0 | 0 | `░░░░░░░░░░░░░░░░░░░░` 0.0% |
-| **Total** | **194** | **27,269** | **5,924** | **4,930** | |
+| **Total** | **196** | **27,911** | **5,994** | **5,041** | |
 <sub>Counted by <code>.github/scripts/loc.py</code> on every push to <code>main</code> (git-tracked files; lockfiles, migrations and this README excluded). Last updated 2026-11-28.</sub>
 <!-- LOC:END -->
 
