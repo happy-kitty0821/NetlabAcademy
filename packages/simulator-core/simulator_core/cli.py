@@ -231,6 +231,39 @@ def _mac_table_tree(negate: bool) -> "Cmd":
     ])
 
 
+def _port_security_tree(negate: bool) -> "Cmd":
+    """``[no] switchport port-security ...`` on an interface."""
+    run = lambda s, t: s._cmd_port_security(t, negate)  # noqa: E731
+    neg = run if negate else None      # "no" forms may stop before the value
+
+    def mac_arg() -> "Cmd":
+        return Cmd("H.H.H", "48 bit mac address",
+                   arg=lambda t: _parse_mac(t) is not None, handler=run)
+
+    return Cmd("port-security", "Security related command", handler=run, children=[
+        Cmd("aging", "Port-security aging commands", children=[
+            Cmd("time", "Port-security aging time", handler=neg, children=[
+                Cmd("<1-1440>", "Aging time in minutes. Enter a value between 1 and 1440",
+                    arg=_int_in(1, 1440), handler=run)]),
+            Cmd("type", "Port-security aging type", handler=neg, children=[
+                Cmd("absolute", "Absolute aging (default)", handler=run),
+                Cmd("inactivity", "Aging based on inactivity time period", handler=run)]),
+        ]),
+        Cmd("mac-address", "Secure mac address", children=[
+            Cmd("sticky", "Configure dynamic secure addresses as sticky", handler=run,
+                children=[mac_arg()]),
+            mac_arg(),
+        ]),
+        Cmd("maximum", "Max secure addresses", handler=neg, children=[
+            Cmd("<1-132>", "Maximum addresses", arg=_int_in(1, 132), handler=run)]),
+        Cmd("violation", "Security violation mode", handler=neg, children=[
+            Cmd("protect", "Security violation protect mode", handler=run),
+            Cmd("restrict", "Security violation restrict mode", handler=run),
+            Cmd("shutdown", "Security violation shutdown mode", handler=run),
+        ]),
+    ])
+
+
 def _parse_mac(text: str) -> Optional[str]:
     """'0000.1111.2222', '00:00:11:11:22:22' or '0000-1111-2222' -> colon form."""
     digits = re.sub(r"[.:-]", "", text.lower())
@@ -685,6 +718,8 @@ class CLISession:
                 handler=lambda s, t: s._logout()),
             Cmd("clear",     "Reset functions",
                 children=[
+                    Cmd("port-security", "Deletes secure addresses",
+                        handler=lambda s, t: s._cmd_clear_port_security(t)),
                     Cmd("arp",  "Delete entries from the ARP table",
                         handler=lambda s, t: ""),
                     Cmd("mac",  "MAC forwarding table",
@@ -878,6 +913,7 @@ class CLISession:
                         children=[
                             Cmd("nonegotiate", "Re-enable DTP negotiation",
                                 handler=lambda s, t: s._cmd_switchport_nonegotiate(t, False)),
+                            _port_security_tree(negate=True),
                         ],
                         fallback=True,
                         handler=lambda s, t: s._cmd_no_switchport(t)),
@@ -963,8 +999,7 @@ class CLISession:
                         ]),
                     Cmd("nonegotiate", "Device will not engage in negotiation protocol on this interface",
                         handler=lambda s, t: s._cmd_switchport_nonegotiate(t, True)),
-                    Cmd("port-security", "Enable port security",
-                        handler=lambda s, t: s._cmd_switchport_port_security(t)),
+                    _port_security_tree(negate=False),
                 ]),
             Cmd("spanning-tree", "Spanning tree configuration",
                 children=[
@@ -1185,6 +1220,8 @@ class CLISession:
                         handler=lambda s, t: s._cmd_show_stp_summary(t)),
                 ],
                 handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
+            Cmd("port-security", "Show secure port information",
+                handler=lambda s, t: s._cmd_show_port_security(t)),
             Cmd("errdisable", "Error disable", children=[
                 Cmd("recovery", "Error disable recovery",
                     handler=lambda s, t: s._cmd_show_errdisable_recovery(t)),
@@ -2370,14 +2407,199 @@ class CLISession:
             iface.trunk_encapsulation = encap
         return ""
 
-    def _cmd_switchport_port_security(self, tokens: list[str]) -> str:
-        """Basic port security (store config; enforcement not yet simulated)."""
+    def _cmd_port_security(self, tokens: list[str], negate: bool) -> str:
+        """[no] switchport port-security [maximum|violation|mac-address|aging ...]"""
+        from simulator_core.port_security import (
+            SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY, SecureAddress,
+        )
         err = self._require_physical_switchport()
         if err:
             return err
+        switch = self._get_switch()
         iface = self._get_current_iface()
-        if iface:
-            iface._port_security_enabled = True  # type: ignore[attr-defined]
+        if switch is None or iface is None:
+            return "% port-security is only available on switch ports."
+        name = self.current_iface
+        words = tokens[tokens.index(next(t for t in tokens
+                                         if "port-security".startswith(t.lower())
+                                         and t.lower().startswith("port"))) + 1:]
+        if not negate and iface.switchport_mode.startswith("dynamic_"):
+            return f"Command rejected: {_long_name(name)} is a dynamic port."
+        ps = switch.port_security(name)
+
+        def kw(word: str, options: list[str]) -> str:
+            found = _match(word, options)
+            return found[0] if len(found) == 1 else word.lower()
+
+        if not words:                                       # enable / disable
+            ps.enabled = not negate
+            if negate:
+                ps.remove_kind(SECURE_DYNAMIC)
+            return ""
+        first = kw(words[0], ["aging", "mac-address", "maximum", "violation"])
+        rest = words[1:]
+        if first == "maximum":
+            ps.maximum = 1 if negate or not rest else int(rest[0])
+        elif first == "violation":
+            ps.violation = "shutdown" if negate or not rest else \
+                kw(rest[0], ["protect", "restrict", "shutdown"])
+        elif first == "aging":
+            what = kw(rest[0], ["time", "type"]) if rest else ""
+            if what == "time":
+                ps.aging_time = 0 if negate or len(rest) < 2 else int(rest[1])
+            elif what == "type":
+                ps.aging_type = "absolute" if negate or len(rest) < 2 else \
+                    kw(rest[1], ["absolute", "inactivity"])
+        elif first == "mac-address":
+            sticky = bool(rest) and kw(rest[0], ["sticky"]) == "sticky" and _parse_mac(rest[0]) is None
+            mac_text = (rest[1] if sticky and len(rest) > 1 else
+                        None if sticky else rest[0] if rest else None)
+            if mac_text is None:                            # [no] ... mac-address sticky
+                if negate:
+                    ps.sticky = False
+                    ps.convert(SECURE_STICKY, SECURE_DYNAMIC)
+                else:
+                    ps.sticky = True
+                    ps.convert(SECURE_DYNAMIC, SECURE_STICKY)
+                return ""
+            mac = _parse_mac(mac_text)
+            vlan = switch._psec_vlan(name)
+            key = (mac, vlan)
+            if negate:
+                ps.addresses.pop(key, None)
+                return ""
+            if key not in ps.addresses:
+                if switch.secure_address_owner(mac, vlan, exclude=name) is not None:
+                    return f"Found duplicate mac-address {_cisco_mac(mac)}."
+                if len(ps.addresses) >= ps.maximum:
+                    return (f"Total secure mac-addresses on interface {_long_name(name)} "
+                            f"has reached maximum limit.")
+            now = self.simulation.lab_time
+            ps.addresses[key] = SecureAddress(
+                kind=SECURE_STICKY if sticky else SECURE_CONFIGURED,
+                learned_at=now, last_seen=now)
+        return ""
+
+    def _cmd_show_port_security(self, tokens: list[str]) -> str:
+        """show port-security [interface <name> | address]"""
+        from simulator_core.port_security import SYSTEM_ADDRESS_LIMIT
+        switch = self._get_switch()
+        if switch is None:
+            return "% show port-security is only available on switch devices."
+        device = self.simulation.topology.devices[self.device_id]
+        args = tokens[2:]
+        secure = switch.secure_ports()
+        extra = sum(max(0, len(ps.addresses) - 1) for ps in secure.values())
+        footer = [
+            f"Total Addresses in System (excluding one mac per port)     : {extra}",
+            f"Max Addresses limit in System (excluding one mac per port) : {SYSTEM_ADDRESS_LIMIT}",
+        ]
+        if args and "interface".startswith(args[0].lower()):
+            joined = _join_iface_tokens(args, 1)
+            if len(joined) < 2:
+                return "% Incomplete command."
+            found = _match_iface(joined[1], list(device.interfaces))
+            if len(found) != 1:
+                return _invalid_at(" ".join(tokens), args[1])
+            return self._port_security_detail(switch, found[0])
+        if args and "address".startswith(args[0].lower()):
+            lines = [
+                "               Secure Mac Address Table",
+                "-" * 77,
+                "Vlan    Mac Address       Type                          Ports   Remaining Age",
+                "                                                                   (mins)    ",
+                "----    -----------       ----                          -----   -------------",
+            ]
+            now = self.simulation.lab_time
+            for port in sorted(secure, key=_natural_key):
+                ps = secure[port]
+                for (mac, vlan), a in sorted(ps.addresses.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+                    age = "-"
+                    if ps.aging_time and a.kind == "SecureDynamic":
+                        since = a.learned_at if ps.aging_type == "absolute" else a.last_seen
+                        age = str(max(0, int((ps.aging_time * 60 - (now - since)) // 60)))
+                    lines.append(f"{vlan:>4}    {_cisco_mac(mac)}    {a.kind:<30}{port:<8}{age:>6}")
+            return "\n".join(lines + ["-" * 77] + footer)
+        if args:
+            return _invalid_at(" ".join(tokens[:3]), args[0])
+        lines = [
+            "Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action",
+            "                (Count)       (Count)          (Count)",
+            "-" * 75,
+        ]
+        for port in sorted(secure, key=_natural_key):
+            ps = secure[port]
+            lines.append(f"{port:>11}{ps.maximum:>15}{len(ps.addresses):>13}"
+                         f"{ps.violation_count:>19}{ps.violation.capitalize():>17}")
+        return "\n".join(lines + ["-" * 75] + footer)
+
+    def _port_security_detail(self, switch, port: str) -> str:
+        from simulator_core.types import InterfaceState
+        iface = self.simulation.topology.devices[self.device_id].interfaces[port]
+        ps = switch.port_security_config(port)
+        enabled = bool(ps and ps.enabled)
+        if not enabled:
+            status = "Secure-down"
+        elif iface.err_disabled == "psecure-violation":
+            status = "Secure-shutdown"
+        elif iface.oper_state == InterfaceState.UP:
+            status = "Secure-up"
+        else:
+            status = "Secure-down"
+        if ps is None:
+            from simulator_core.port_security import PortSecurity
+            ps = PortSecurity()
+        last = (f"{_cisco_mac(ps.last_source[0])}:{ps.last_source[1]}"
+                if ps.last_source else "0000.0000.0000:0")
+        return "\n".join([
+            f"Port Security              : {'Enabled' if enabled else 'Disabled'}",
+            f"Port Status                : {status}",
+            f"Violation Mode             : {ps.violation.capitalize()}",
+            f"Aging Time                 : {ps.aging_time} mins",
+            f"Aging Type                 : {ps.aging_type.capitalize()}",
+            "SecureStatic Address Aging : Disabled",
+            f"Maximum MAC Addresses      : {ps.maximum}",
+            f"Total MAC Addresses        : {len(ps.addresses)}",
+            f"Configured MAC Addresses   : {ps.count('SecureConfigured')}",
+            f"Sticky MAC Addresses       : {ps.count('SecureSticky')}",
+            f"Last Source Address:Vlan   : {last}",
+            f"Security Violation Count   : {ps.violation_count}",
+        ])
+
+    def _cmd_clear_port_security(self, tokens: list[str]) -> str:
+        """clear port-security {all|configured|dynamic|sticky} [address M | interface I]"""
+        from simulator_core.port_security import SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY
+        switch = self._get_switch()
+        if switch is None:
+            return _invalid_at(" ".join(tokens[:2]), tokens[1])
+        args = tokens[2:]
+        if not args:
+            return "% Incomplete command."
+        kinds = {"all": {SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY},
+                 "configured": {SECURE_CONFIGURED}, "dynamic": {SECURE_DYNAMIC},
+                 "sticky": {SECURE_STICKY}}
+        found = _match(args[0], list(kinds))
+        if len(found) != 1:
+            return _invalid_at(" ".join(tokens[:3]), args[0])
+        port = mac = None
+        if len(args) > 1:
+            key = args[1].lower()
+            if len(args) < 3:
+                return "% Incomplete command."
+            if "address".startswith(key):
+                mac = _parse_mac(args[2])
+                if mac is None:
+                    return _invalid_at(" ".join(tokens), args[2])
+            elif "interface".startswith(key):
+                device = self.simulation.topology.devices[self.device_id]
+                joined = _join_iface_tokens(args[1:], 1)
+                hit = _match_iface(joined[1], list(device.interfaces))
+                if len(hit) != 1:
+                    return _invalid_at(" ".join(tokens), args[2])
+                port = hit[0]
+            else:
+                return _invalid_at(" ".join(tokens[:4]), args[1])
+        switch.clear_port_security(kinds[found[0]], port=port, mac=mac)
         return ""
 
     def _parse_vlan_list(self, s: str) -> Optional[list]:
@@ -4235,7 +4457,8 @@ class CLISession:
             if iface.is_svi and not device.supports_svi:
                 continue
             lines.append("!")
-            lines += _iface_config_lines(device, name, iface, switch.stp if switch else None)
+            lines += _iface_config_lines(device, name, iface, switch.stp if switch else None,
+                                         switch.port_security_config(name) if switch else None)
         router = self._get_router()
         if router is not None and router.routing_table.static_routes:
             lines.append("!")
@@ -4271,7 +4494,8 @@ class CLISession:
             "!",
         ]
         switch = self._get_switch()
-        lines += _iface_config_lines(device, matches[0], iface, switch.stp if switch else None)
+        lines += _iface_config_lines(device, matches[0], iface, switch.stp if switch else None,
+                                     switch.port_security_config(matches[0]) if switch else None)
         lines += ["end"]
         return "\n".join(lines)
 
@@ -4469,7 +4693,30 @@ def _stp_iface_lines(stp, name: str) -> list[str]:
     return lines
 
 
-def _iface_config_lines(device, name: str, iface, stp=None) -> list[str]:
+def _port_security_lines(ps) -> list[str]:
+    """Interface port-security lines (non-default settings), IOS order."""
+    lines = []
+    if ps.enabled:
+        lines.append(" switchport port-security")
+    if ps.maximum != 1:
+        lines.append(f" switchport port-security maximum {ps.maximum}")
+    if ps.violation != "shutdown":
+        lines.append(f" switchport port-security violation {ps.violation}")
+    if ps.aging_time:
+        lines.append(f" switchport port-security aging time {ps.aging_time}")
+    if ps.aging_type != "absolute":
+        lines.append(f" switchport port-security aging type {ps.aging_type}")
+    if ps.sticky:
+        lines.append(" switchport port-security mac-address sticky")
+    ordered = sorted(ps.addresses.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+    lines += [f" switchport port-security mac-address sticky {_cisco_mac(mac)}"
+              for (mac, _), a in ordered if a.kind == "SecureSticky"]
+    lines += [f" switchport port-security mac-address {_cisco_mac(mac)}"
+              for (mac, _), a in ordered if a.kind == "SecureConfigured"]
+    return lines
+
+
+def _iface_config_lines(device, name: str, iface, stp=None, psec=None) -> list[str]:
     """
     Running-configuration block for one interface, in IOS order.
 
@@ -4508,10 +4755,13 @@ def _iface_config_lines(device, name: str, iface, stp=None) -> list[str]:
             lines.append(" switchport mode trunk")
         elif mode.startswith("dynamic_"):
             lines.append(f" switchport mode dynamic {mode[len('dynamic_'):]}")
-        elif mode == "access" and (iface.vlan != 1 or iface.dtp_nonegotiate):
+        elif mode == "access" and (iface.vlan != 1 or iface.dtp_nonegotiate
+                                   or (psec is not None and psec.enabled)):
             lines.append(" switchport mode access")
         if iface.dtp_nonegotiate:
             lines.append(" switchport nonegotiate")
+    if is_switchport and psec is not None:
+        lines += _port_security_lines(psec)
     if is_switchport and stp is not None:
         lines += _stp_iface_lines(stp, name)
     if iface.admin_state == InterfaceState.DOWN:

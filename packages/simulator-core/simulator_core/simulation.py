@@ -179,6 +179,7 @@ class Simulation:
         self._lab_time += seconds
         for switch in self._switches.values():
             switch.age_mac_table(self._lab_time)
+            switch.age_port_security(self._lab_time)
         self._recover_err_disabled()
 
     # ------------------------------------------------------------------
