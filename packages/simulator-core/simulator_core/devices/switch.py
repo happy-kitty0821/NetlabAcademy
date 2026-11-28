@@ -39,189 +39,16 @@ from simulator_core.l2.stp import STPManager, STPMode, PortState
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
 from simulator_core.l2.cdp import CDPManager
+from simulator_core.l2.etherchannel import (  # noqa: F401  (re-exported)
+    DEFAULT_LOAD_BALANCE, EtherChannelMode, EtherChannelProtocol, PortChannelGroup,
+    copy_l2_config, l2_config, protocols_compatible,
+)
 from simulator_core.l2.port_security import (
     SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY, PortSecurity, SecureAddress,
 )
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
-
-
-# ---------------------------------------------------------------------------
-# EtherChannel protocol types
-# ---------------------------------------------------------------------------
-
-class EtherChannelProtocol(Enum):
-    """EtherChannel negotiation protocol."""
-    NONE    = "none"      # static "on" — no negotiation
-    LACP    = "lacp"      # IEEE 802.3ad
-    PAGP    = "pagp"      # Cisco PAgP
-
-
-class EtherChannelMode(Enum):
-    """Port mode within the protocol."""
-    ON          = "on"           # static, always bundle
-    ACTIVE      = "active"       # LACP: initiates negotiation
-    PASSIVE     = "passive"      # LACP: responds only
-    DESIRABLE   = "desirable"    # PAgP: initiates negotiation
-    AUTO        = "auto"         # PAgP: responds only
-    OFF         = "off"          # disabled
-
-
-# Protocol compatibility matrix
-# Returns True if the two modes can form a bundle
-_LACP_COMPATIBLE = {
-    (EtherChannelMode.ACTIVE,  EtherChannelMode.ACTIVE):  True,
-    (EtherChannelMode.ACTIVE,  EtherChannelMode.PASSIVE): True,
-    (EtherChannelMode.PASSIVE, EtherChannelMode.ACTIVE):  True,
-    (EtherChannelMode.PASSIVE, EtherChannelMode.PASSIVE): False,  # both passive = no bundle
-}
-
-_PAGP_COMPATIBLE = {
-    (EtherChannelMode.DESIRABLE, EtherChannelMode.DESIRABLE): True,
-    (EtherChannelMode.DESIRABLE, EtherChannelMode.AUTO):       True,
-    (EtherChannelMode.AUTO,      EtherChannelMode.DESIRABLE):  True,
-    (EtherChannelMode.AUTO,      EtherChannelMode.AUTO):       False,  # both auto = no bundle
-}
-
-
-def protocols_compatible(mode_a: str, mode_b: str) -> tuple[bool, str]:
-    """
-    Check if two EtherChannel modes are compatible.
-    Returns (is_compatible, reason_if_not).
-    """
-    try:
-        ma = EtherChannelMode(mode_a)
-        mb = EtherChannelMode(mode_b)
-    except ValueError:
-        return False, f"Unknown mode(s): {mode_a!r}, {mode_b!r}"
-
-    # Static "on" — only compatible with another "on"
-    if ma == EtherChannelMode.ON and mb == EtherChannelMode.ON:
-        return True, ""
-    if ma == EtherChannelMode.ON or mb == EtherChannelMode.ON:
-        return False, "Static 'on' requires both sides to use 'on' (no negotiation protocol)."
-
-    # LACP modes
-    lacp_modes = {EtherChannelMode.ACTIVE, EtherChannelMode.PASSIVE}
-    pagp_modes  = {EtherChannelMode.DESIRABLE, EtherChannelMode.AUTO}
-
-    if ma in lacp_modes and mb in lacp_modes:
-        ok = _LACP_COMPATIBLE.get((ma, mb), False)
-        if not ok:
-            return False, (
-                f"LACP: both sides are '{mode_a}/{mode_b}'. "
-                "At least one side must be 'active' to initiate negotiation."
-            )
-        return True, ""
-
-    if ma in pagp_modes and mb in pagp_modes:
-        ok = _PAGP_COMPATIBLE.get((ma, mb), False)
-        if not ok:
-            return False, (
-                f"PAgP: both sides are '{mode_a}/{mode_b}'. "
-                "At least one side must be 'desirable' to initiate negotiation."
-            )
-        return True, ""
-
-    # Mixed protocols
-    return False, (
-        f"Protocol mismatch: cannot mix LACP modes ({mode_a!r}) with "
-        f"PAgP modes ({mode_b!r}). Both sides must use the same protocol."
-    )
-
-
-# ---------------------------------------------------------------------------
-# EtherChannel bundle
-# ---------------------------------------------------------------------------
-
-class PortChannelGroup:
-    """
-    Represents a port-channel (EtherChannel) bundle.
-
-    Members are physical interface names; the logical port-channel
-    interface is 'Port-channel<id>'.
-
-    Protocol state:
-      negotiated_up  — True when the bundle is operationally up based on
-                       protocol negotiation rules (or static "on").
-    """
-
-    def __init__(self, group_id: int) -> None:
-        self.group_id: int = group_id
-        self.name: str = f"Port-channel{group_id}"
-        self.members: list[str] = []
-        self.protocol: str = "on"
-        self.admin_state: str = "up"
-        # Peer protocol mode — set by CLI or discovered via topology
-        self._peer_protocol: Optional[str] = None
-
-    @property
-    def lacp_protocol(self) -> EtherChannelProtocol:
-        """Classify which protocol family this group uses."""
-        if self.protocol in ("active", "passive"):
-            return EtherChannelProtocol.LACP
-        if self.protocol in ("desirable", "auto"):
-            return EtherChannelProtocol.PAGP
-        return EtherChannelProtocol.NONE
-
-    @property
-    def is_operationally_up(self) -> bool:
-        """
-        True if the bundle can carry traffic.
-
-        For 'on': always up (no negotiation).
-        For LACP/PAgP: depends on compatibility with peer.
-        Without a known peer, we assume up (educational default).
-        """
-        if self.protocol == "on":
-            return True
-        if self.protocol == "off":
-            return False
-        if self._peer_protocol is None:
-            # No peer known — treat as up for educational purposes
-            return True
-        compatible, _ = protocols_compatible(self.protocol, self._peer_protocol)
-        return compatible
-
-    @property
-    def status_flags(self) -> str:
-        """Return Cisco-style status flags for show etherchannel summary."""
-        if not self.members:
-            return "SD"  # S=Layer2, D=down
-        if self.is_operationally_up:
-            return "SU"  # S=Layer2, U=in-use
-        return "SD"
-
-    @property
-    def member_flags(self) -> str:
-        """Flags shown next to member port names."""
-        if self.is_operationally_up:
-            return "P"  # P=bundled
-        return "s"  # s=suspended
-
-    def add_member(self, iface_name: str) -> None:
-        if iface_name not in self.members:
-            self.members.append(iface_name)
-
-    def remove_member(self, iface_name: str) -> None:
-        if iface_name in self.members:
-            self.members.remove(iface_name)
-
-    def select_egress(self, src_mac: str, dst_mac: str) -> Optional[str]:
-        """
-        Load-balance across active member links using XOR of MAC bytes.
-        Returns the selected member interface name or None.
-        """
-        if not self.is_operationally_up:
-            return None
-        active = [m for m in self.members if m]
-        if not active:
-            return None
-        h = int(hashlib.md5((src_mac + dst_mac).encode()).hexdigest(), 16)
-        return active[h % len(active)]
-        h = int(hashlib.md5((src_mac + dst_mac).encode()).hexdigest(), 16)
-        return active[h % len(active)]
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +95,8 @@ class Switch:
 
         # EtherChannel groups: group_id → PortChannelGroup
         self._port_channels: dict[int, PortChannelGroup] = {}
+        # port-channel load-balance <method>
+        self.load_balance: str = DEFAULT_LOAD_BALANCE
 
         # Reverse mapping: member iface → group_id
         self._member_to_pc: dict[str, int] = {}
@@ -714,41 +543,93 @@ class Switch:
     # EtherChannel management
     # ------------------------------------------------------------------
 
+    def ensure_port_channel(self, group_id: int, template=None) -> tuple[PortChannelGroup, bool]:
+        """
+        The port-channel *group_id*, created (with its ``PoN`` interface)
+        if needed.  A new ``PoN`` copies the layer 2 settings of *template*
+        (the first member).  Returns (group, interface_was_created).
+        """
+        pc = self._port_channels.get(group_id)
+        if pc is None:
+            pc = PortChannelGroup(group_id)
+            pc.created_at = self._sim.lab_time if self._sim is not None else 0.0
+            self._port_channels[group_id] = pc
+        if pc.short in self._device.interfaces:
+            return pc, False
+        from simulator_core.l2.etherchannel import port_channel_mac
+        from simulator_core.topology import Interface
+        po = Interface(name=pc.short, mac=port_channel_mac(self.device_id, pc.short))
+        if template is not None:
+            copy_l2_config(template, po)
+        self._device.add_interface(po)
+        pc.synced = l2_config(po)
+        self.register_interface_with_stp(pc.short)
+        return pc, True
+
     def add_port_channel(self, group_id: int, iface_name: str,
                          protocol: str = "on") -> PortChannelGroup:
-        """Add a physical interface to a port-channel group."""
-        if group_id not in self._port_channels:
-            self._port_channels[group_id] = PortChannelGroup(group_id)
-        pc = self._port_channels[group_id]
+        """
+        channel-group <id> mode <protocol> on *iface_name*.  A port joining
+        an existing port-channel takes on its configuration (IOS); the first
+        port of a new one gives it its own.
+        """
+        iface = self._device.interfaces[iface_name]
+        old = self._member_to_pc.get(iface_name)
+        if old is not None and old != group_id:
+            self.remove_port_channel_member(iface_name)
+        pc, created = self.ensure_port_channel(group_id, template=iface)
+        if not created:
+            copy_l2_config(self._device.interfaces[pc.short], iface)
         pc.protocol = protocol
         pc.add_member(iface_name)
         self._member_to_pc[iface_name] = group_id
+        iface.channel_group = group_id
+        iface.channel_mode = protocol
         return pc
 
     def remove_port_channel_member(self, iface_name: str) -> None:
-        """Remove a physical interface from its port-channel."""
+        """no channel-group: the port leaves its port-channel (which stays)."""
         gid = self._member_to_pc.pop(iface_name, None)
         if gid is not None and gid in self._port_channels:
             self._port_channels[gid].remove_member(iface_name)
-            if not self._port_channels[gid].members:
-                del self._port_channels[gid]
+        iface = self._device.interfaces.get(iface_name)
+        if iface is not None:
+            iface.channel_group = iface.channel_mode = iface.ec_state = None
+
+    def remove_port_channel(self, group_id: int) -> bool:
+        """no interface port-channel N: delete the bundle and its interface."""
+        pc = self._port_channels.pop(group_id, None)
+        if pc is None:
+            return False
+        for m in list(pc.members):
+            self._member_to_pc.pop(m, None)
+            iface = self._device.interfaces.get(m)
+            if iface is not None:
+                iface.channel_group = iface.channel_mode = iface.ec_state = None
+        self._device.interfaces.pop(pc.short, None)
+        self._stp.unregister_port(pc.short)
+        self.flush_port_macs(pc.short)
+        return True
 
     def get_port_channel_for(self, iface_name: str) -> Optional[PortChannelGroup]:
         gid = self._member_to_pc.get(iface_name)
         return self._port_channels.get(gid) if gid is not None else None
 
-    def _get_logical_egress(self, iface_name: str,
-                            src_mac: str, dst_mac: str) -> list[str]:
+    def _get_logical_egress(self, iface_name: str, src_mac: str, dst_mac: str,
+                            frame: Optional[EthernetFrame] = None) -> list[str]:
         """
-        Resolve the actual physical interface(s) to use for egress.
-        If the interface is a port-channel member, load-balance across
-        active members; otherwise return the interface itself.
+        The physical port(s) a frame sent out of *iface_name* uses: for a
+        port-channel, one bundled member picked by the load-balance hash.
         """
-        # Check if this interface is itself a port-channel (logical)
-        for pc in self._port_channels.values():
-            if pc.name == iface_name:
-                selected = pc.select_egress(src_mac, dst_mac)
-                return [selected] if selected else []
+        if iface_name.lower().startswith("po"):
+            for pc in self._port_channels.values():
+                if pc.short == iface_name:
+                    packet = frame.payload if frame is not None else None
+                    src_ip = str(getattr(packet, "src", "")) or None
+                    dst_ip = str(getattr(packet, "dst", "")) or None
+                    selected = pc.select_egress(src_mac, dst_mac, self.load_balance,
+                                                src_ip, dst_ip)
+                    return [selected] if selected else []
         return [iface_name]
 
     # ------------------------------------------------------------------
@@ -936,6 +817,21 @@ class Switch:
             self._process_bpdu(ingress_iface, frame)
             return  # BPDUs are not forwarded as user frames
 
+        # EtherChannel: a bundled member's frames arrive on its port-channel;
+        # a suspended or down member carries nothing.
+        if iface.channel_group is not None and iface.ec_state != "I":
+            if iface.ec_state != "P":
+                self._sim._record(FrameDropped(
+                    time=arrive_time, seq=self._sim.next_seq(),
+                    device_id=self.device_id,
+                    interface_name=ingress_iface,
+                    frame=frame,
+                    reason="EtherChannel member not bundled",
+                ))
+                return
+            ingress_iface = f"Po{iface.channel_group}"
+            iface = self._device.interfaces[ingress_iface]
+
         # Classify the frame into a VLAN (802.1Q ingress rules).
         if iface.is_trunk:
             # Tagged frames belong to the VLAN in their tag; untagged frames
@@ -1096,7 +992,7 @@ class Switch:
                 if not self._stp.is_port_forwarding(egress_iface, stp_vlan):
                     return  # Drop — egress port is STP discarding/blocking
         # Resolve EtherChannel if needed
-        physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac)
+        physical_ports = self._get_logical_egress(egress_iface, src_mac, dst_mac, frame)
         for port in physical_ports:
             self._send_on_port(time, self._encapsulate_for_egress(frame, port, frame_vlan), port)
 
@@ -1142,9 +1038,11 @@ class Switch:
 
     def _flood_in_vlan(self, time: int, frame: EthernetFrame,
                        ingress_iface: str, vlan: int) -> None:
-        for iface_name in self._device.interfaces:
+        for iface_name, port in self._device.interfaces.items():
             if iface_name == ingress_iface:
                 continue
+            if port.in_bundle:
+                continue        # reached through its port-channel
             if not self._port_carries_vlan(iface_name, vlan):
                 continue
             if not self._stp.is_port_forwarding(iface_name, vlan):

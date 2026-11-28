@@ -468,7 +468,9 @@ class SystemCommands:
             lines += _stp_global_lines(switch.stp)
             lines += _switch_global_lines(switch)
             lines.append("!")
-        for name, iface in device.interfaces.items():
+        # IOS lists port-channel interfaces before the physical ports.
+        ordered = sorted(device.interfaces.items(), key=lambda kv: not kv[1].is_port_channel)
+        for name, iface in ordered:
             # Skip SVIs on devices that don't support them (e.g. L2-only switches).
             # They should not exist — but if one was created before the capability
             # check was enforced, exclude it from the running-config.

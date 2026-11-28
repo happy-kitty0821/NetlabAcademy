@@ -53,6 +53,10 @@ class InterfaceCommands:
             return self._cmd_enter_svi(tokens)
         if "loopback".startswith(sub):
             return self._cmd_enter_loopback(tokens)
+        pc = re.match(r"^([a-z-]+?)(\d*)$", sub)
+        if pc and len(pc.group(1)) >= 2 and "port-channel".startswith(pc.group(1)):
+            number = pc.group(2) or (tokens[2] if len(tokens) > 2 else "")
+            return self._enter_port_channel(number)
 
         tokens = _join_iface_tokens(tokens, 1)
         iface_name = tokens[1]

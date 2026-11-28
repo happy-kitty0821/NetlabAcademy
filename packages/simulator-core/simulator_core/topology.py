@@ -105,6 +105,13 @@ class Interface:
     err_disabled: Optional[str] = None
     err_disabled_at: float = field(default=0.0, repr=False)
 
+    # EtherChannel: "channel-group N mode <mode>" on a member port, and the
+    # bundling state l2/etherchannel.py decided for it: "P" bundled,
+    # "I" stand-alone, "s" suspended, "D" down.
+    channel_group: Optional[int] = None
+    channel_mode: Optional[str] = None
+    ec_state: Optional[str] = field(default=None, repr=False)
+
     # ── STP per-interface settings ────────────────────────────────────────────
     stp_portfast: bool = False
     stp_bpduguard: bool = False
@@ -154,6 +161,17 @@ class Interface:
         return self.oper_switchport_mode == "access"
 
     # ── Interface type classification ─────────────────────────────────────────
+
+    @property
+    def is_port_channel(self) -> bool:
+        """True for an EtherChannel logical interface (``Po1``)."""
+        return self.name.lower().startswith("po")
+
+    @property
+    def in_bundle(self) -> bool:
+        """A channel member that is not working on its own (bundled,
+        suspended or down): its traffic goes through the port-channel."""
+        return self.channel_group is not None and self.ec_state != "I"
 
     @property
     def is_svi(self) -> bool:

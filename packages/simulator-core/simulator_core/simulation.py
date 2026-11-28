@@ -37,7 +37,7 @@ from simulator_core.events import (
 from simulator_core.exceptions import SimulationLimitError
 from simulator_core.scheduler import EventScheduler
 from simulator_core.topology import Topology
-from simulator_core.l2 import dtp, errdisable, native_vlan
+from simulator_core.l2 import dtp, errdisable, etherchannel, native_vlan
 from simulator_core.types import InterfaceState, PROPAGATION_DELAY
 from dataclasses import dataclass as _dataclass
 
@@ -500,8 +500,10 @@ class Simulation:
         VLAN, or changing a port's VLAN membership.
         """
         self._compute_oper_states()
-        if self._apply_bpdu_guard():
-            self._compute_oper_states()      # the guarded ports are now down
+        guarded = self._apply_bpdu_guard()
+        guarded = etherchannel.apply_guard(self) or guarded
+        if guarded:
+            self._compute_oper_states()      # the disabled ports are now down
         self._flush_down_port_macs()
         self._log_interface_transitions()
         self._log_native_vlan_mismatches()
@@ -541,6 +543,8 @@ class Simulation:
         # Trunk negotiation depends on which ports are up, and SVIs depend on
         # which ports trunk, so DTP runs between the two passes.
         self._negotiate_dtp()
+        # Bundles depend on which members are up and how they trunk.
+        etherchannel.negotiate(self)
         for device in topo.devices.values():
             for iface in device.interfaces.values():
                 if iface.admin_state == InterfaceState.DOWN:

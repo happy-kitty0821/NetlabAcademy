@@ -407,7 +407,7 @@ class TestEtherChannelCLI:
         s.execute("channel-group 1 mode active")
         s.execute("end")
         out = s.execute("show etherchannel summary")
-        assert "Port-channel1" in out
+        assert "Po1(S" in out          # IOS lists the bundle as Po1(SU)/(SD)
         assert "Gi0/2" in out
 
     def test_show_etherchannel_detail(self) -> None:
@@ -417,7 +417,7 @@ class TestEtherChannelCLI:
         s.execute("channel-group 1 mode active")
         s.execute("end")
         out = s.execute("show etherchannel detail")
-        assert "Port-channel1" in out
+        assert "Port-channel: Po1" in out
         assert "LACP" in out
 
     def test_invalid_channel_group_id(self) -> None:
