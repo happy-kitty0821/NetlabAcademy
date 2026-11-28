@@ -205,7 +205,9 @@ function DeviceNodeView({ kind, label, sub, subTone, selected }: {
 
 function hostSub(data: DeviceNode["data"]): { sub: string; subTone?: "warn" } {
   const ip = data.ip ? String(data.ip) : "";
-  return ip.includes("/") ? { sub: ip } : { sub: "no IP", subTone: "warn" };
+  // An unaddressed PC is fine (it can be set from its console), so this is
+  // a plain note, not a warning.
+  return ip.includes("/") ? { sub: ip } : { sub: "no IP" };
 }
 
 // ── Exported node components ──────────────────────────────────────────────────

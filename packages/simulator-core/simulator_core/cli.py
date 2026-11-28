@@ -510,10 +510,13 @@ class CLISession:
 
     def _tree(self) -> list[Cmd]:
         """Return the command list for the current mode."""
-        if self.mode == CLIMode.USER_EXEC:
-            return self._user_tree()
-        if self.mode == CLIMode.PRIV_EXEC:
-            return self._priv_tree()
+        if self.mode in (CLIMode.USER_EXEC, CLIMode.PRIV_EXEC):
+            tree = self._user_tree() if self.mode == CLIMode.USER_EXEC else self._priv_tree()
+            if self._is_host():
+                tree = tree + [Cmd("ipconfig", "Show or set this PC's IP configuration",
+                                   args_hint="[<ip> <mask> [<gateway>]]",
+                                   handler=lambda s, t: s._cmd_ipconfig(t))]
+            return tree
         if self.mode == CLIMode.GLOBAL_CONFIG:
             return self._global_tree()
         if self.mode == CLIMode.IFACE_CONFIG:
@@ -1773,6 +1776,68 @@ class CLISession:
                 + "\n% Loopback interfaces do not support switchport commands."
             )
         return None
+
+    def _is_host(self) -> bool:
+        from simulator_core.types import DeviceModel
+        device = self.simulation.topology.devices.get(self.device_id)
+        return device is not None and device.model == DeviceModel.HOST
+
+    def _cmd_ipconfig(self, tokens: list[str]) -> str:
+        """
+        ipconfig                              -- show the PC's address
+        ipconfig <ip> <mask>|/<len> [<gw>]    -- set it (Packet Tracer syntax)
+        """
+        device = self.simulation.topology.devices[self.device_id]
+        iface = next((i for i in device.interfaces.values()
+                      if not (i.is_loopback or i.is_svi or i.is_subinterface)), None)
+        if iface is None:
+            return "% This device has no network interface."
+        if len(tokens) == 1:
+            cfg = iface.ip_config
+            addr = str(cfg.address) if cfg else "0.0.0.0"
+            mask = str(IPv4Network(f"0.0.0.0/{cfg.prefix_length}").netmask) if cfg else "0.0.0.0"
+            return "\n".join([
+                "",
+                f"{iface.name} Connection:(default port)",
+                "",
+                f"   IPv4 Address....................: {addr}",
+                f"   Subnet Mask.....................: {mask}",
+                f"   Default Gateway.................: {iface.default_gateway or '0.0.0.0'}",
+                "",
+            ])
+        args = tokens[1:]
+        ip_str, sep, plen = args[0].partition("/")
+        try:
+            ip = IPv4Address(ip_str)
+        except ValueError:
+            return _invalid_at(" ".join(tokens[:2]), tokens[1])
+        if sep:
+            if not plen.isdigit() or not 0 < int(plen) <= 32:
+                return _invalid_at(" ".join(tokens[:2]), tokens[1])
+            prefix, rest = int(plen), args[1:]
+        else:
+            if len(args) < 2:
+                return "% Incomplete command.\nUsage: ipconfig <ip-address> <subnet-mask> [<default-gateway>]"
+            try:
+                prefix = _mask_prefix(int(IPv4Address(args[1])))
+            except ValueError:
+                return _invalid_at(" ".join(tokens[:3]), tokens[2])
+            if prefix is None:
+                return f"% Bad mask {args[1]} for address {ip}"
+            rest = args[2:]
+        if not _is_valid_host_address(ip):
+            return f"Not a valid host address - {ip}"
+        gateway = None
+        if rest:
+            try:
+                gateway = str(IPv4Address(rest[0]))
+            except ValueError:
+                return _invalid_at(" ".join(tokens), rest[0])
+        iface.set_ip(f"{ip}/{prefix}")
+        if gateway:
+            iface.set_gateway(gateway)
+        self._refresh_l3()
+        return ""
 
     def _cmd_ip_address(self, tokens: list[str]) -> str:
         # tokens: ['ip', 'address', '<ip>', '<mask>']
