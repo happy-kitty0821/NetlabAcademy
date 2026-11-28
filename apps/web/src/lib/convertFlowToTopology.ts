@@ -78,7 +78,7 @@ function generateInterfacesFromTemplate(
         name,
         mac_seed: nodeIdx * 10 + i,
       };
-      if (i === 0 && ip) iface.ip = ip.trim();
+      if (i === 0 && ip?.includes("/")) iface.ip = ip.trim();
       if (i === 0 && gateway) iface.gateway = gateway.trim();
       return iface;
     });
@@ -92,7 +92,7 @@ function generateInterfacesFromTemplate(
       name,
       mac_seed: nodeIdx * 10 + i,
     };
-    if (i === 0 && ip) iface.ip = ip.trim();
+    if (i === 0 && ip?.includes("/")) iface.ip = ip.trim();
     if (i === 0 && gateway) iface.gateway = gateway.trim();
     return iface;
   });
@@ -155,13 +155,9 @@ export function convertFlowToTopology(
     const hostname = data.hostname || `${data.model}-${idx}`;
 
     if (data.model === "host") {
-      if (!data.ip || !data.ip.trim().includes("/")) {
-        throw new TopologyValidationError(
-          `PC "${hostname}" has no IP address configured. ` +
-            `Double-click the device and set an IP (e.g. 192.168.1.1/24).`,
-        );
-      }
-
+      // A PC without an address still starts (as in CML / Packet Tracer):
+      // it comes up unaddressed and can be configured from its console
+      // ("ipconfig <ip> <mask> [<gateway>]").
       const interfaces = generateInterfacesFromTemplate(node, idx, 1);
       return {
         id: node.id,

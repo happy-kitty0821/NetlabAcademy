@@ -48,6 +48,11 @@ export type SimState = "stopped" | "starting" | "running" | "stopping";
 // Use v4 key so stale data from old sessions doesn't load
 const STORAGE_KEY = "netlab_canvas_v4";
 
+// Fitting a lab to the canvas never zooms in past 100% (as in CML): a
+// small lab stays at its real size instead of filling the screen with
+// giant devices, while a large one still zooms out to fit.
+const FIT_VIEW = { padding: 0.25, maxZoom: 1 };
+
 // Clear any old storage keys from previous versions
 const OLD_KEYS = ["netlab_canvas_v3", "netlab_canvas_v2", "netlab_topo_v2"];
 
@@ -519,13 +524,15 @@ export default function WorkspacePage() {
             panOnDrag={true}
             selectionMode={SelectionMode.Partial}
             fitView={nodes.length > 0}
-            fitViewOptions={{ padding: 0.4 }}
+            fitViewOptions={FIT_VIEW}
+            minZoom={0.2}
+            maxZoom={2}
             defaultEdgeOptions={{ type: "lab", data: { active: true } }}
             proOptions={{ hideAttribution: true }}
             style={{ background: "#ffffff" }}
           >
             <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#e8ecf0" />
-            <Controls />
+            <Controls fitViewOptions={FIT_VIEW} />
           </ReactFlow>
           </LabRunningContext.Provider>
 
