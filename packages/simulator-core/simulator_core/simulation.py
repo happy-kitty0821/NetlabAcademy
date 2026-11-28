@@ -32,6 +32,7 @@ from simulator_core.events import (
     CDPHelloEvent,
     DROP_LINK_DOWN,
     DROP_INTERFACE_ADMIN_DOWN,
+    DROP_INTERFACE_ERR_DISABLED,
 )
 from simulator_core.exceptions import SimulationLimitError
 from simulator_core.scheduler import EventScheduler
@@ -122,6 +123,11 @@ class Simulation:
 
         self._rng: random.Random = random.Random(seed)
         self._clock: int = 0
+        # Lab time in seconds.  The tick clock only moves while frames are in
+        # flight; lab time follows the wall clock (the API advances it between
+        # requests) and drives timers such as MAC aging and errdisable
+        # recovery.
+        self._lab_time: float = 0.0
         self._scheduler: EventScheduler = EventScheduler(max_depth=max_queue)
         self._trace: list[SimulationEvent] = []
 
@@ -157,6 +163,95 @@ class Simulation:
     def clock(self) -> int:
         """Current logical tick."""
         return self._clock
+
+    @property
+    def lab_time(self) -> float:
+        """Seconds of lab time since the simulation started."""
+        return self._lab_time
+
+    def advance_time(self, seconds: float) -> None:
+        """
+        Let *seconds* of lab time pass: age MAC tables and recover
+        err-disabled ports whose recovery timer has run out.
+        """
+        if seconds <= 0:
+            return
+        self._lab_time += seconds
+        for switch in self._switches.values():
+            switch.age_mac_table(self._lab_time)
+        self._recover_err_disabled()
+
+    # ------------------------------------------------------------------
+    # Err-disable
+    # ------------------------------------------------------------------
+
+    def err_disable(self, device_id: str, iface_name: str, cause: str) -> bool:
+        """
+        Put a port in the err-disabled state (it goes down until "shutdown /
+        no shutdown" or errdisable recovery).  Returns False if it already was.
+        The caller refreshes interface states.
+        """
+        device = self._topology.devices.get(device_id)
+        iface = device.interfaces.get(iface_name) if device else None
+        if iface is None or iface.err_disabled:
+            return False
+        iface.err_disabled = cause
+        iface.err_disabled_at = self._lab_time
+        self.log_event(device_id, "PM", 4, "ERR_DISABLE",
+                       f"{cause} error detected on {iface_name}, putting {iface_name} "
+                       f"in err-disable state")
+        return True
+
+    def bpdu_guard_trip(self, device_id: str, iface_name: str) -> None:
+        """A BPDU arrived on a port with BPDU guard: disable it."""
+        device = self._topology.devices.get(device_id)
+        iface = device.interfaces.get(iface_name) if device else None
+        if iface is None or iface.err_disabled:
+            return
+        self.log_event(device_id, "SPANTREE", 2, "BLOCK_BPDUGUARD",
+                       f"Received BPDU on port {iface_name} with BPDU Guard enabled. "
+                       f"Disabling port.")
+        self.err_disable(device_id, iface_name, "bpduguard")
+
+    def _apply_bpdu_guard(self) -> bool:
+        """
+        Spanning tree is computed directly, not from BPDU frames, so BPDU
+        guard is checked here: a guarded port that is up and cabled to a
+        switch port sending BPDUs is err-disabled.  Returns True if any was.
+        """
+        tripped = False
+        for dev_id, switch in self._switches.items():
+            device = self._topology.devices[dev_id]
+            for name, iface in device.interfaces.items():
+                if (not iface.is_physical_switchport or iface.err_disabled
+                        or iface.oper_state != InterfaceState.UP
+                        or not switch.bpdu_guard_enabled(name)):
+                    continue
+                peer = self._topology.neighbours(dev_id, name)
+                peer_switch = self._switches.get(peer[0]) if peer else None
+                if peer_switch is None or not peer_switch.sends_bpdus(peer[1]):
+                    continue
+                self.bpdu_guard_trip(dev_id, name)
+                tripped = True
+        return tripped
+
+    def _recover_err_disabled(self) -> None:
+        """errdisable recovery: re-enable ports whose timer has expired."""
+        recovered = False
+        for dev_id, switch in self._switches.items():
+            for name, iface in self._topology.devices[dev_id].interfaces.items():
+                cause = iface.err_disabled
+                if (cause and cause in switch.errdisable_recovery
+                        and self._lab_time - iface.err_disabled_at >= switch.errdisable_interval):
+                    self.log_event(dev_id, "PM", 4, "ERR_RECOVER",
+                                   f"Attempting to recover from {cause} err-disable state "
+                                   f"on {name}")
+                    iface.err_disabled = None
+                    recovered = True
+        if recovered:
+            # The cause may still be there (a BPDU-sending switch on a
+            # guarded port): the refresh disables the port again, as on IOS.
+            self.refresh_interface_states()
 
     @property
     def trace(self) -> list[SimulationEvent]:
@@ -223,6 +318,7 @@ class Simulation:
         the same arguments will produce the identical event trace.
         """
         self._clock = 0
+        self._lab_time = 0.0
         self._rng = random.Random(self._seed)
         self._scheduler.clear()
         self._trace.clear()
@@ -454,6 +550,9 @@ class Simulation:
         VLAN, or changing a port's VLAN membership.
         """
         self._compute_oper_states()
+        if self._apply_bpdu_guard():
+            self._compute_oper_states()      # the guarded ports are now down
+        self._flush_down_port_macs()
         self._log_interface_transitions()
         self._log_native_vlan_mismatches()
         for router in self._routers.values():
@@ -501,6 +600,12 @@ class Simulation:
                     f"with {peer_host} {long_name(peer_name)} ({peer_native}).",
                 )
         self._native_mismatches = current
+
+    def _flush_down_port_macs(self) -> None:
+        for dev_id, switch in self._switches.items():
+            for name, iface in self._topology.devices[dev_id].interfaces.items():
+                if iface.oper_state != InterfaceState.UP:
+                    switch.flush_port_macs(name)
 
     def _compute_oper_states(self) -> None:
         """
@@ -587,7 +692,7 @@ class Simulation:
         return peer_iface
 
     def _physical_oper_state(self, device_id: str, iface) -> InterfaceState:
-        if iface.admin_state == InterfaceState.DOWN:
+        if iface.admin_state == InterfaceState.DOWN or iface.err_disabled:
             return InterfaceState.DOWN
         link = self._topology.get_link(device_id, iface.name)
         if link is None or link.admin_state == InterfaceState.DOWN:
@@ -597,7 +702,8 @@ class Simulation:
             return InterfaceState.DOWN
         peer_dev = self._topology.devices.get(peer[0])
         peer_iface = peer_dev.interfaces.get(peer[1]) if peer_dev else None
-        if peer_iface is None or peer_iface.admin_state == InterfaceState.DOWN:
+        if (peer_iface is None or peer_iface.admin_state == InterfaceState.DOWN
+                or peer_iface.err_disabled):
             return InterfaceState.DOWN
         return InterfaceState.UP
 
@@ -873,6 +979,15 @@ class Simulation:
                 reason=DROP_INTERFACE_ADMIN_DOWN,
             )
             return
+        if iface.err_disabled:
+            self._drop(
+                time=event.time + PROPAGATION_DELAY,
+                device_id=device_id,
+                iface_name=iface_name,
+                frame=frame,
+                reason=DROP_INTERFACE_ERR_DISABLED,
+            )
+            return
 
         # --- Look up the link ---
         link = self._topology.get_link(device_id, iface_name)
@@ -908,6 +1023,15 @@ class Simulation:
                 iface_name=peer_iface_name,
                 frame=frame,
                 reason=DROP_INTERFACE_ADMIN_DOWN,
+            )
+            return
+        if peer_iface.err_disabled:
+            self._drop(
+                time=event.time + PROPAGATION_DELAY,
+                device_id=peer_device_id,
+                iface_name=peer_iface_name,
+                frame=frame,
+                reason=DROP_INTERFACE_ERR_DISABLED,
             )
             return
 

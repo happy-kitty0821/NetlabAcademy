@@ -99,6 +99,12 @@ class Interface:
     # the port has negotiated a trunk, False while it runs as access.
     dtp_trunking: bool = field(default=False, repr=False)
 
+    # Err-disable: the cause ("bpduguard", "psecure-violation", ...) while a
+    # protection feature holds the port down, and the lab time (seconds) it
+    # happened.  Cleared by "shutdown" or by errdisable recovery.
+    err_disabled: Optional[str] = None
+    err_disabled_at: float = field(default=0.0, repr=False)
+
     # ── STP per-interface settings ────────────────────────────────────────────
     stp_portfast: bool = False
     stp_bpduguard: bool = False

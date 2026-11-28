@@ -249,6 +249,17 @@ class Switch:
         # VLAN database: vlan_id → vlan_name
         self._vlans: dict[int, str] = {1: "default"}
 
+        # MAC table extras: when each dynamic entry was last seen (lab
+        # seconds), static entries, and the aging time (0 = never age).
+        self._mac_seen: dict[tuple[str, int], float] = {}
+        self._static_macs: dict[tuple[str, int], str] = {}
+        self.mac_aging_time: int = 300
+
+        # errdisable recovery: causes that recover automatically, and after
+        # how many seconds ("errdisable recovery cause/interval").
+        self.errdisable_recovery: set[str] = set()
+        self.errdisable_interval: int = 300
+
         # EtherChannel groups: group_id → PortChannelGroup
         self._port_channels: dict[int, PortChannelGroup] = {}
 
@@ -408,11 +419,85 @@ class Switch:
         iface = self._device.interfaces.get(iface_name)
         return iface.vlan if iface else DEFAULT_VLAN
 
-    def clear_dynamic_mac_addresses(self) -> int:
-        """clear mac address-table dynamic — returns how many were removed."""
-        removed = len(self._mac_table)
-        self._mac_table.clear()
-        return removed
+    def clear_dynamic_mac_addresses(self, address: Optional[str] = None,
+                                    interface: Optional[str] = None,
+                                    vlan: Optional[int] = None) -> int:
+        """
+        clear mac address-table dynamic [address M | interface I | vlan N]
+        — returns how many entries were removed.
+        """
+        doomed = [k for k, port in self._mac_table.items()
+                  if (address is None or k[0] == address)
+                  and (interface is None or port == interface)
+                  and (vlan is None or k[1] == vlan)]
+        for k in doomed:
+            self._mac_table.pop(k, None)
+            self._mac_seen.pop(k, None)
+        return len(doomed)
+
+    # ------------------------------------------------------------------
+    # MAC table: static entries, aging, listing
+    # ------------------------------------------------------------------
+
+    @property
+    def static_macs(self) -> dict[tuple[str, int], str]:
+        return dict(self._static_macs)
+
+    def add_static_mac(self, mac: str, vlan: int, port: str) -> None:
+        key = (mac, vlan)
+        self._static_macs[key] = port
+        # A static entry replaces any dynamic one for the same address.
+        self._mac_table.pop(key, None)
+        self._mac_seen.pop(key, None)
+
+    def remove_static_mac(self, mac: str, vlan: int, port: Optional[str] = None) -> bool:
+        key = (mac, vlan)
+        if key not in self._static_macs or (port is not None and self._static_macs[key] != port):
+            return False
+        del self._static_macs[key]
+        return True
+
+    def mac_lookup(self, mac: str, vlan: int) -> Optional[str]:
+        """Port for *mac* in *vlan*: static entries first, then learned ones."""
+        key = (mac, vlan)
+        return self._static_macs.get(key) or self._mac_table.get(key)
+
+    def mac_entries(self) -> list[tuple[int, str, str, str]]:
+        """(vlan, mac, "STATIC"|"DYNAMIC", port) for every entry."""
+        rows = [(v, m, "STATIC", p) for (m, v), p in self._static_macs.items()]
+        rows += [(v, m, "DYNAMIC", p) for (m, v), p in self._mac_table.items()
+                 if (m, v) not in self._static_macs]
+        return rows
+
+    def age_mac_table(self, now: float) -> int:
+        """Drop dynamic entries not seen for the aging time; returns how many."""
+        if self.mac_aging_time <= 0:
+            return 0
+        expired = [k for k, seen in self._mac_seen.items() if now - seen >= self.mac_aging_time]
+        for k in expired:
+            self._mac_seen.pop(k, None)
+            self._mac_table.pop(k, None)
+        return len(expired)
+
+    def flush_port_macs(self, port: str) -> None:
+        """A port going down forgets the addresses it learned (IOS)."""
+        for k in [k for k, p in self._mac_table.items() if p == port]:
+            self._mac_table.pop(k, None)
+            self._mac_seen.pop(k, None)
+
+    def bpdu_guard_enabled(self, port: str) -> bool:
+        """BPDU guard is on for *port* (interface setting or portfast default)."""
+        inst = self._stp.get_instance(1)
+        ps = inst.port_states.get(port) if inst is not None else None
+        return bool(ps is not None and ps.bpduguard)
+
+    def sends_bpdus(self, port: str) -> bool:
+        """Does this switch send BPDUs out of *port* (STP on, no BPDU filter)?"""
+        if not self._stp.enabled:
+            return False
+        inst = self._stp.get_instance(1)
+        ps = inst.port_states.get(port) if inst is not None else None
+        return not (ps is not None and ps.bpdufilter)
 
     def ports_in_vlan(self, vlan_id: int) -> list[str]:
         result = []
@@ -624,10 +709,12 @@ class Switch:
         if port_state.bpdufilter:
             return
 
-        # --- BPDUGuard: err-disable PortFast ports on BPDU receipt ---
-        if port_state.bpduguard and port_state.portfast:
+        # --- BPDUGuard: err-disable the port on BPDU receipt ---
+        if port_state.bpduguard:
             port_state.state = PortState.ERR_DISABLED
             port_state.role  = PortRole.DISABLED
+            if self._sim is not None:
+                self._sim.bpdu_guard_trip(self.device_id, ingress_iface)
             return
 
         port_state.bpdu_rx += 1
@@ -792,7 +879,7 @@ class Switch:
         if frame.dst_mac.is_broadcast:
             self._flood_in_vlan(arrive_time, frame, ingress_iface, vlan)
         else:
-            known_port = self._mac_table.get((dst_mac, vlan))
+            known_port = self.mac_lookup(dst_mac, vlan)
             if known_port is not None and known_port != ingress_iface:
                 dest_iface = self._device.interfaces.get(known_port)
                 # Verify destination port is in the same VLAN
@@ -837,6 +924,9 @@ class Switch:
     def _learn(self, time: int, mac_value: str,
                iface_name: str, vlan: int) -> None:
         key = (mac_value, vlan)
+        if key in self._static_macs:
+            return            # a static entry is never overwritten
+        self._mac_seen[key] = self._sim.lab_time
         if self._mac_table.get(key) != iface_name:
             self._mac_table[key] = iface_name
             seq = self._sim.next_seq()
@@ -1001,9 +1091,8 @@ class Switch:
     def _svi_send(self, t: int, frame: EthernetFrame, vlan: int) -> None:
         """Inject a frame originated by the SVI into the VLAN at tick *t*."""
         svi_name = f"Vlan{vlan}"
-        known = None if frame.dst_mac.is_broadcast else self._mac_table.get(
-            (frame.dst_mac.value, vlan)
-        )
+        known = None if frame.dst_mac.is_broadcast else self.mac_lookup(
+            frame.dst_mac.value, vlan)
         # _forward/_flood transmit at (time + 1), so pass t - 1.
         if known is not None and self._port_carries_vlan(known, vlan):
             self._forward(t - 1, frame, known, frame.src_mac.value,
