@@ -1,0 +1,47 @@
+# Counts lines of code per language on every push to main, shows the table
+# in the run summary, and keeps the "Lines of code" section of README.md
+# (and its badge) up to date.
+
+name: Lines of code
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lines-of-code
+  cancel-in-progress: true
+
+jobs:
+  count:
+    name: Count lines per language
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Count and update README
+        run: python .github/scripts/loc.py --update README.md --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit README if the counts changed
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "Line counts unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update lines of code [skip ci]"
+          git push
