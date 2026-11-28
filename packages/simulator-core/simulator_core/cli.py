@@ -177,6 +177,68 @@ def _stp_global_vlan_tree(negate: bool) -> "Cmd":
     return Cmd("vlan", "VLAN Switch Spanning Tree", children=[_vlan_arg(options, handler=run)])
 
 
+# Err-disable causes on a Catalyst 2960 (errdisable recovery cause ...).
+_ERRDISABLE_CAUSES = [
+    ("arp-inspection", "Enable timer to recover from arp inspection error disable state"),
+    ("bpduguard", "Enable timer to recover from BPDU Guard error"),
+    ("channel-misconfig", "Enable timer to recover from channel misconfig error"),
+    ("dhcp-rate-limit", "Enable timer to recover from dhcp-rate-limit error"),
+    ("dtp-flap", "Enable timer to recover from dtp-flap error"),
+    ("gbic-invalid", "Enable timer to recover from invalid GBIC error"),
+    ("inline-power", "Enable timer to recover from inline-power error"),
+    ("l2ptguard", "Enable timer to recover from l2protocol-tunnel error"),
+    ("link-flap", "Enable timer to recover from link-flap error"),
+    ("loopback", "Enable timer to recover from loopback error"),
+    ("mac-limit", "Enable timer to recover from mac limit disable state"),
+    ("pagp-flap", "Enable timer to recover from pagp-flap error"),
+    ("port-mode-failure", "Enable timer to recover from port mode change failure"),
+    ("psecure-violation", "Enable timer to recover from psecure violation error"),
+    ("security-violation", "Enable timer to recover from 802.1x violation error"),
+    ("sfp-config-mismatch", "Enable timer to recover from SFP config mismatch error"),
+    ("small-frame", "Enable timer to recover from small frame error"),
+    ("storm-control", "Enable timer to recover from storm-control error"),
+    ("udld", "Enable timer to recover from udld error"),
+    ("vmps", "Enable timer to recover from vmps shutdown error"),
+]
+
+
+def _errdisable_tree(negate: bool) -> "Cmd":
+    """``[no] errdisable recovery cause <cause>|all`` / ``interval <30-86400>``."""
+    cause = lambda s, t: s._cmd_errdisable_cause(t, not negate)  # noqa: E731
+    interval = lambda s, t: s._cmd_errdisable_interval(t, negate)  # noqa: E731
+    causes = [Cmd(name, help_str, handler=cause) for name, help_str in _ERRDISABLE_CAUSES]
+    causes.append(Cmd("all", "Enable timer to recover from all error causes", handler=cause))
+    return Cmd("errdisable", "Error disable", children=[
+        Cmd("recovery", "Error disable recovery", children=[
+            Cmd("cause", "Enable error disable recovery for application", children=causes),
+            Cmd("interval", "Error disable recovery timer value",
+                args_hint="" if negate else "<30-86400>", handler=interval),
+        ]),
+    ])
+
+
+def _mac_table_tree(negate: bool) -> "Cmd":
+    """``[no] mac address-table static ... / aging-time <0|10-1000000>``."""
+    return Cmd("mac", "Global MAC configuration subcommands", children=[
+        Cmd("address-table", "Configure the MAC address table", children=[
+            Cmd("static", "static keyword",
+                args_hint="<H.H.H> vlan <1-4094> interface <interface>",
+                handler=lambda s, t: s._cmd_mac_static(t, not negate)),
+            Cmd("aging-time", "Set MAC address table entry maximum age",
+                args_hint="" if negate else "<0|10-1000000>",
+                handler=lambda s, t: s._cmd_mac_aging(t, negate)),
+        ]),
+    ])
+
+
+def _parse_mac(text: str) -> Optional[str]:
+    """'0000.1111.2222', '00:00:11:11:22:22' or '0000-1111-2222' -> colon form."""
+    digits = re.sub(r"[.:-]", "", text.lower())
+    if len(digits) != 12 or not re.fullmatch(r"[0-9a-f]{12}", digits):
+        return None
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+
+
 def _stp_iface_vlan_tree() -> "Cmd":
     """``spanning-tree vlan <list> cost|port-priority <value>`` on an interface."""
     run = lambda s, t: s._cmd_stp_iface_vlan(t)  # noqa: E731
@@ -641,6 +703,8 @@ class CLISession:
 
     def _global_tree(self) -> list[Cmd]:
         return [
+            _errdisable_tree(negate=False),
+            _mac_table_tree(negate=False),
             Cmd("hostname",   "Set system's network name",
                 args_hint="<hostname>",
                 handler=lambda s, t: s._cmd_hostname(t)),
@@ -706,6 +770,8 @@ class CLISession:
                 children=[
                     Cmd("spanning-tree", "Spanning Tree Subsystem",
                         children=[_stp_global_vlan_tree(negate=True)]),
+                    _errdisable_tree(negate=True),
+                    _mac_table_tree(negate=True),
                     Cmd("vlan", "Delete a VLAN",
                         args_hint="<vlan-id>",
                         handler=lambda s, t: s._cmd_no_vlan(t)),
@@ -815,6 +881,23 @@ class CLISession:
                         ],
                         fallback=True,
                         handler=lambda s, t: s._cmd_no_switchport(t)),
+                    Cmd("spanning-tree", "Spanning Tree Subsystem",
+                        children=[
+                            Cmd("portfast", "Disable PortFast on this interface",
+                                fallback=True, children=[],
+                                handler=lambda s, t: s._cmd_stp_portfast(t, False)),
+                            Cmd("bpduguard", "Disable BPDU guard on this interface",
+                                children=[Cmd("enable", "Disable BPDU guard",
+                                              handler=lambda s, t: s._cmd_stp_bpduguard(t, False))],
+                                handler=lambda s, t: s._cmd_stp_bpduguard(t, False)),
+                            Cmd("bpdufilter", "Disable BPDU filter on this interface",
+                                children=[Cmd("enable", "Disable BPDU filter",
+                                              handler=lambda s, t: s._cmd_stp_bpdufilter(t, False))],
+                                handler=lambda s, t: s._cmd_stp_bpdufilter(t, False)),
+                            Cmd("guard", "Disable root/loop guard on this interface",
+                                fallback=True, children=[],
+                                handler=lambda s, t: s._cmd_stp_guard(t, "none")),
+                        ]),
                     Cmd("cdp",       "Disable CDP on this interface",
                         children=[
                             Cmd("enable", "Disable CDP on this interface",
@@ -1102,6 +1185,12 @@ class CLISession:
                         handler=lambda s, t: s._cmd_show_stp_summary(t)),
                 ],
                 handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
+            Cmd("errdisable", "Error disable", children=[
+                Cmd("recovery", "Error disable recovery",
+                    handler=lambda s, t: s._cmd_show_errdisable_recovery(t)),
+                Cmd("detect", "Error disable detection",
+                    handler=lambda s, t: s._cmd_show_errdisable_detect(t)),
+            ]),
             Cmd("etherchannel", "EtherChannel information",
                 children=[
                     Cmd("summary",      "EtherChannel summary",
@@ -1548,7 +1637,32 @@ class CLISession:
         switch = self._get_switch()
         if switch is None:
             return _invalid_at(" ".join(tokens[:2]), tokens[1])
-        switch.clear_dynamic_mac_addresses()
+        # tokens: clear mac address-table [dynamic] [address M | interface I | vlan N]
+        args = tokens[3:]
+        if args and "dynamic".startswith(args[0].lower()):
+            args = args[1:]
+        if not args:
+            switch.clear_dynamic_mac_addresses()
+            return ""
+        key = args[0].lower()
+        if len(args) < 2:
+            return "% Incomplete command."
+        if "address".startswith(key):
+            mac = _parse_mac(args[1])
+            if mac is None:
+                return _invalid_at(" ".join(tokens), args[1])
+            switch.clear_dynamic_mac_addresses(address=mac)
+        elif "interface".startswith(key):
+            device = self.simulation.topology.devices[self.device_id]
+            joined = _join_iface_tokens(args, 1)
+            found = _match_iface(joined[1], list(device.interfaces))
+            if len(found) != 1:
+                return _invalid_at(" ".join(tokens), args[1])
+            switch.clear_dynamic_mac_addresses(interface=found[0])
+        elif "vlan".startswith(key) and args[1].isdigit():
+            switch.clear_dynamic_mac_addresses(vlan=int(args[1]))
+        else:
+            return _invalid_at(" ".join(tokens), args[0])
         return ""
 
     def _cmd_disable(self, tokens: list[str]) -> str:
@@ -1934,6 +2048,9 @@ class CLISession:
         iface = self._get_current_iface()
         if iface:
             iface.admin_state = InterfaceState.DOWN
+            # "shutdown" (then "no shutdown") is how IOS recovers a port
+            # from err-disable by hand.
+            iface.err_disabled = None
         self._refresh_l3()
         return ""
 
@@ -2686,6 +2803,131 @@ class CLISession:
 
         return "\n".join(lines)
 
+    # ── errdisable ────────────────────────────────────────────────────────────
+
+    def _cmd_errdisable_cause(self, tokens: list[str], enabled: bool) -> str:
+        """[no] errdisable recovery cause <cause>|all"""
+        switch = self._get_switch()
+        if switch is None:
+            return "% errdisable recovery is only available on switch devices."
+        offset = 1 if tokens[0].lower() == "no" else 0
+        word = tokens[3 + offset].lower()
+        names = [n for n, _ in _ERRDISABLE_CAUSES]
+        found = _match(word, names + ["all"])
+        chosen = names if found == ["all"] else found[:1]
+        for name in chosen:
+            if enabled:
+                switch.errdisable_recovery.add(name)
+            else:
+                switch.errdisable_recovery.discard(name)
+        return ""
+
+    def _cmd_errdisable_interval(self, tokens: list[str], negate: bool) -> str:
+        """[no] errdisable recovery interval <30-86400>"""
+        switch = self._get_switch()
+        if switch is None:
+            return "% errdisable recovery is only available on switch devices."
+        if negate:
+            switch.errdisable_interval = 300
+            return ""
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        if not tokens[3].isdigit() or not 30 <= int(tokens[3]) <= 86400:
+            return _invalid_at(" ".join(tokens[:4]), tokens[3])
+        switch.errdisable_interval = int(tokens[3])
+        return ""
+
+    def _cmd_show_errdisable_recovery(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show errdisable is only available on switch devices."
+        lines = ["ErrDisable Reason            Timer Status",
+                 "-----------------            --------------"]
+        for name, _ in _ERRDISABLE_CAUSES:
+            status = "Enabled" if name in switch.errdisable_recovery else "Disabled"
+            lines.append(f"{name:<29}{status}")
+        lines += ["", f"Timer interval: {switch.errdisable_interval} seconds", "",
+                  "Interfaces that will be enabled at the next timeout:", ""]
+        due = []
+        device = self.simulation.topology.devices[self.device_id]
+        for name in _display_order(device):
+            iface = device.interfaces[name]
+            if iface.err_disabled and iface.err_disabled in switch.errdisable_recovery:
+                left = switch.errdisable_interval - (self.simulation.lab_time - iface.err_disabled_at)
+                due.append(f"{name:<16}{iface.err_disabled:>17}{max(0, int(left)):>17}")
+        if due:
+            lines += ["Interface       Errdisable reason       Time left(sec)",
+                      "---------       -----------------       --------------"] + due
+        return "\n".join(lines)
+
+    def _cmd_show_errdisable_detect(self, tokens: list[str]) -> str:
+        if self._get_switch() is None:
+            return "% show errdisable is only available on switch devices."
+        lines = ["ErrDisable Reason            Detection    Mode",
+                 "-----------------            ---------    ----"]
+        lines += [f"{name:<29}{'Enabled':<13}port" for name, _ in _ERRDISABLE_CAUSES]
+        return "\n".join(lines)
+
+    # ── MAC address table configuration ───────────────────────────────────────
+
+    def _cmd_mac_static(self, tokens: list[str], add: bool) -> str:
+        """
+        [no] mac address-table static <H.H.H> vlan <1-4094> interface <name>
+        """
+        switch = self._get_switch()
+        if switch is None:
+            return "% mac address-table is only available on switch devices."
+        args = tokens[4:] if tokens[0].lower() == "no" else tokens[3:]
+        typed = " ".join(tokens[:len(tokens) - len(args)])
+        if not args:
+            return "% Incomplete command."
+        mac = _parse_mac(args[0])
+        if mac is None:
+            return _invalid_at(f"{typed} {args[0]}", args[0])
+        if len(args) < 3:
+            return "% Incomplete command."
+        if not "vlan".startswith(args[1].lower()) or len(args[1]) < 1:
+            return _invalid_at(f"{typed} {' '.join(args[:2])}", args[1])
+        if not args[2].isdigit() or not 1 <= int(args[2]) <= 4094:
+            return _invalid_at(f"{typed} {' '.join(args[:3])}", args[2])
+        vlan = int(args[2])
+        if int(mac[:2], 16) & 1:
+            return "% Only unicast addresses can be configured to be static"
+        port = None
+        if len(args) > 3:
+            if not "interface".startswith(args[3].lower()) or len(args) < 5:
+                return "% Incomplete command." if len(args) == 4 else \
+                    _invalid_at(f"{typed} {' '.join(args[:4])}", args[3])
+            device = self.simulation.topology.devices[self.device_id]
+            joined = _join_iface_tokens(args[3:], 1)
+            found = _match_iface(joined[1], list(device.interfaces))
+            if len(found) != 1 or not device.interfaces[found[0]].is_physical_switchport:
+                return _invalid_at(f"{typed} {' '.join(args)}", args[4])
+            port = found[0]
+        if add:
+            if port is None:
+                return "% Incomplete command."
+            switch.add_static_mac(mac, vlan, port)
+        else:
+            switch.remove_static_mac(mac, vlan, port)
+        return ""
+
+    def _cmd_mac_aging(self, tokens: list[str], negate: bool) -> str:
+        """[no] mac address-table aging-time <0|10-1000000>"""
+        switch = self._get_switch()
+        if switch is None:
+            return "% mac address-table is only available on switch devices."
+        if negate:
+            switch.mac_aging_time = 300
+            return ""
+        if len(tokens) < 4:
+            return "% Incomplete command."
+        value = tokens[3]
+        if not value.isdigit() or not (int(value) == 0 or 10 <= int(value) <= 1_000_000):
+            return _invalid_at(" ".join(tokens[:4]), value)
+        switch.mac_aging_time = int(value)
+        return ""
+
     def _cmd_show_interfaces_status(self, tokens: list[str]) -> str:
         """show interfaces status — brief port status table with speed/type."""
         device = self.simulation.topology.devices.get(self.device_id)
@@ -2695,6 +2937,16 @@ class CLISession:
         from simulator_core.port_types import detect_port_type, format_speed
 
         switch = self._get_switch()
+        if len(tokens) > 3:
+            if not "err-disabled".startswith(tokens[3].lower()):
+                return _invalid_at(" ".join(tokens[:4]), tokens[3])
+            rows = ["Port      Name               Status       Reason               Err-disabled Vlans"]
+            for name in _display_order(device):
+                iface = device.interfaces[name]
+                if iface.is_physical_switchport and iface.err_disabled:
+                    desc = getattr(iface, "_description", "")[:18]
+                    rows.append(f"{name:<9} {desc:<18} {'err-disabled':<12} {iface.err_disabled}")
+            return "\n".join(rows)
         lines = [
             "Port      Name               Status       Vlan       Duplex  Speed Type",
         ]
@@ -3714,30 +3966,61 @@ class CLISession:
         return "\n".join(lines)
 
     def _cmd_show_mac(self, tokens: list[str]) -> str:
-        """show mac address-table [dynamic | vlan <id> | interface <name>]"""
+        """
+        show mac address-table [dynamic | static] [address <mac> |
+                                interface <name> | vlan <id>]
+        show mac address-table count | aging-time
+        """
         try:
             switch = self.simulation.get_switch(self.device_id)
         except KeyError:
             return "% show mac address-table is only supported on switch devices."
         device = self.simulation.topology.devices[self.device_id]
-        entries = sorted(
-            ((vlan, mac, port) for (mac, vlan), port in switch.mac_table.items()),
-            key=lambda e: (e[0], _natural_key(e[2]), e[1]),
-        )
-        args = [a.lower() for a in tokens[3:]]
-        if args:
-            if "dynamic".startswith(args[0]):
-                pass
-            elif "vlan".startswith(args[0]) and len(args) > 1 and args[1].isdigit():
-                entries = [e for e in entries if e[0] == int(args[1])]
-            elif "interface".startswith(args[0]) and len(args) > 1:
-                joined = _join_iface_tokens(tokens[3:], 1)
+        entries = sorted(switch.mac_entries(),
+                         key=lambda e: (e[0], _natural_key(e[3]), e[1]))
+        args = tokens[3:]
+        if args and "aging-time".startswith(args[0].lower()) and args[0].lower().startswith("ag"):
+            return "\n".join([f"Global Aging Time: {switch.mac_aging_time:>4}",
+                              "Vlan    Aging Time", "----    ----------"])
+        if args and "count".startswith(args[0].lower()) and args[0].lower().startswith("c"):
+            out = []
+            for vlan in sorted({e[0] for e in entries} | set(switch.vlans)):
+                rows = [e for e in entries if e[0] == vlan]
+                dyn = sum(1 for e in rows if e[2] == "DYNAMIC")
+                out += [f"Mac Entries for Vlan {vlan}:", "---------------------------",
+                        f"Dynamic Address Count  : {dyn}",
+                        f"Static  Address Count  : {len(rows) - dyn}",
+                        f"Total Mac Addresses    : {len(rows)}", ""]
+            out.append(f"Total Mac Address Space Available: {8128 - len(entries)}")
+            return "\n".join(out)
+        i = 0
+        while i < len(args):
+            word = args[i].lower()
+            if "dynamic".startswith(word) and word.startswith("d"):
+                entries = [e for e in entries if e[2] == "DYNAMIC"]
+                i += 1
+            elif "static".startswith(word) and word.startswith("s"):
+                entries = [e for e in entries if e[2] == "STATIC"]
+                i += 1
+            elif "address".startswith(word) and word.startswith("ad") and i + 1 < len(args):
+                mac = _parse_mac(args[i + 1])
+                if mac is None:
+                    return _invalid_at(" ".join(tokens[:4 + i + 1]), args[i + 1])
+                entries = [e for e in entries if e[1] == mac]
+                i += 2
+            elif "vlan".startswith(word) and i + 1 < len(args) and args[i + 1].isdigit():
+                entries = [e for e in entries if e[0] == int(args[i + 1])]
+                i += 2
+            elif "interface".startswith(word) and i + 1 < len(args):
+                joined = _join_iface_tokens(args[i:], 1)
                 found = _match_iface(joined[1], list(device.interfaces))
                 if len(found) != 1:
-                    return _invalid_at(" ".join(tokens[:5]), tokens[4])
-                entries = [e for e in entries if e[2] == found[0]]
+                    return _invalid_at(" ".join(tokens[:4 + i + 1]), args[i + 1])
+                entries = [e for e in entries if e[3] == found[0]]
+                # "interface Fa0/1" is two tokens, "interface FastEthernet 0/1" three.
+                i += 2 + (len(args[i:]) - len(joined))
             else:
-                return _invalid_at(" ".join(tokens[:4]), tokens[3])
+                return _invalid_at(" ".join(tokens[:4 + i]), args[i])
         lines = [
             "          Mac Address Table",
             "-------------------------------------------",
@@ -3745,8 +4028,8 @@ class CLISession:
             "Vlan    Mac Address       Type        Ports",
             "----    -----------       --------    -----",
         ]
-        for vlan, mac, port in entries:
-            lines.append(f"{vlan:>4}    {_cisco_mac(mac)}    DYNAMIC     {port}")
+        for vlan, mac, kind, port in entries:
+            lines.append(f"{vlan:>4}    {_cisco_mac(mac)}    {kind:<8}    {port}")
         lines.append(f"Total Mac Addresses for this criterion: {len(entries)}")
         return "\n".join(lines)
 
@@ -3943,6 +4226,7 @@ class CLISession:
         switch = self._get_switch()
         if switch is not None:
             lines += _stp_global_lines(switch.stp)
+            lines += _switch_global_lines(switch)
             lines.append("!")
         for name, iface in device.interfaces.items():
             # Skip SVIs on devices that don't support them (e.g. L2-only switches).
@@ -4123,6 +4407,21 @@ _IFACE_TYPE_FULL = {
 _IFACE_NAME_RE = re.compile(r"^([A-Za-z][A-Za-z-]*)\s*(\d[\d/.:]*)$")
 
 
+def _switch_global_lines(switch) -> list[str]:
+    """errdisable recovery and MAC address table lines of the running-config."""
+    lines = []
+    names = [n for n, _ in _ERRDISABLE_CAUSES]
+    lines += [f"errdisable recovery cause {n}" for n in names if n in switch.errdisable_recovery]
+    if switch.errdisable_interval != 300:
+        lines.append(f"errdisable recovery interval {switch.errdisable_interval}")
+    if switch.mac_aging_time != 300:
+        lines.append(f"mac address-table aging-time {switch.mac_aging_time}")
+    for (mac, vlan), port in sorted(switch.static_macs.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        lines.append(f"mac address-table static {_cisco_mac(mac)} vlan {vlan} "
+                     f"interface {_long_name(port)}")
+    return lines
+
+
 def _stp_global_lines(stp) -> list[str]:
     """Global spanning-tree lines of the running-config, in IOS order."""
     lines = [f"spanning-tree mode {stp.mode.value}", "spanning-tree extend system-id"]
@@ -4297,6 +4596,8 @@ def _switch_port_status(iface, vlans=None) -> str:
     """
     if iface.admin_state == InterfaceState.DOWN:
         return "disabled"
+    if getattr(iface, "err_disabled", None):
+        return "err-disabled"
     if vlans is not None and iface.is_access and iface.vlan not in vlans:
         return "inactive"
     if iface.oper_state == InterfaceState.UP:

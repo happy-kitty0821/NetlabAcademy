@@ -33,6 +33,7 @@ DROP_NO_ROUTE: str = "no route to host — destination outside local subnet and 
 DROP_TTL_EXCEEDED: str = "TTL exceeded"
 DROP_UNRESOLVABLE_ARP: str = "ARP unresolvable — target unreachable"
 DROP_LINK_DOWN: str = "link down"
+DROP_INTERFACE_ERR_DISABLED: str = "interface err-disabled"
 
 
 # ---------------------------------------------------------------------------

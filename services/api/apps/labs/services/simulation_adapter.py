@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import time
 import uuid
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address
@@ -363,6 +364,10 @@ class SimulationSession:
     # CLI sessions keyed by device_id — one per open terminal.
     cli_sessions: dict[str, Any] = field(default_factory=dict)
 
+    # Wall-clock time (time.monotonic) the lab's time was last brought up
+    # to date; see get_session().
+    last_wall: float = field(default_factory=time.monotonic)
+
 
 # In-memory session store.  Keyed by session ID (UUID string).
 _sessions: dict[str, SimulationSession] = {}
@@ -384,11 +389,23 @@ def create_session(topology_doc: dict[str, Any], seed: int = 42) -> SimulationSe
 
 
 def get_session(session_id: str) -> SimulationSession:
-    """Return an existing session or raise KeyError."""
+    """
+    Return an existing session or raise KeyError.
+
+    Lab time follows the wall clock: every request for a running lab first
+    lets the real time since the previous request pass in the simulation,
+    so MAC addresses age out and errdisable recovery fires as on a real
+    switch.
+    """
     try:
-        return _sessions[session_id]
+        session = _sessions[session_id]
     except KeyError:
         raise KeyError(f"Simulation session {session_id!r} not found.")
+    now = time.monotonic()
+    elapsed, session.last_wall = now - session.last_wall, now
+    if elapsed > 0:
+        session.simulation.advance_time(elapsed)
+    return session
 
 
 def delete_session(session_id: str) -> None:
