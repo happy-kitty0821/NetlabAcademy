@@ -34,6 +34,12 @@ def _stp_global_lines(stp) -> list[str]:
     lines = [f"spanning-tree mode {stp.mode.value}", "spanning-tree extend system-id"]
     if getattr(stp, "_portfast_default", False):
         lines.append("spanning-tree portfast default")
+    if getattr(stp, "_bpduguard_default", False):
+        lines.append("spanning-tree portfast bpduguard default")
+    if getattr(stp, "_bpdufilter_default", False):
+        lines.append("spanning-tree portfast bpdufilter default")
+    if getattr(stp, "_loopguard_default", False):
+        lines.append("spanning-tree loopguard default")
     by_priority: dict[int, list[int]] = {}
     for vlan_id, priority in stp.configured_priorities().items():
         by_priority.setdefault(priority, []).append(vlan_id)

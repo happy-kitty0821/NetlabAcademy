@@ -158,9 +158,19 @@ class CommandTrees:
                                 handler=lambda s, t: s._cmd_stp_portfast_default(t)),
                             Cmd("bpduguard", "Enable BPDU Guard globally",
                                 children=[
-                                    Cmd("default", "Enable globally",
-                                        handler=lambda s, t: s._cmd_stp_bpduguard_default(t)),
+                                    Cmd("default", "Enable bpdu guard by default on all portfast edge ports",
+                                        handler=lambda s, t: s._cmd_stp_default(t, "bpduguard", True)),
                                 ]),
+                            Cmd("bpdufilter", "Enable BPDU Filter globally",
+                                children=[
+                                    Cmd("default", "Enable bpdu filter by default on all portfast edge ports",
+                                        handler=lambda s, t: s._cmd_stp_default(t, "bpdufilter", True)),
+                                ]),
+                        ]),
+                    Cmd("loopguard", "Spanning tree loopguard options",
+                        children=[
+                            Cmd("default", "Enable loopguard by default on all ports",
+                                handler=lambda s, t: s._cmd_stp_default(t, "loopguard", True)),
                         ]),
                     Cmd("backbonefast", "BackboneFast (no-op in sim)",
                         handler=lambda s, t: ""),
@@ -201,7 +211,22 @@ class CommandTrees:
             Cmd("no",         "Negate a command or set its defaults",
                 children=[
                     Cmd("spanning-tree", "Spanning Tree Subsystem",
-                        children=[_stp_global_vlan_tree(negate=True)]),
+                        children=[
+                            _stp_global_vlan_tree(negate=True),
+                            Cmd("portfast", "Spanning tree portfast options", children=[
+                                Cmd("default", "Disable portfast by default",
+                                    handler=lambda s, t: s._cmd_stp_default(t, "portfast", False)),
+                                Cmd("bpduguard", "Spanning tree bpduguard", children=[
+                                    Cmd("default", "Disable bpdu guard by default",
+                                        handler=lambda s, t: s._cmd_stp_default(t, "bpduguard", False))]),
+                                Cmd("bpdufilter", "Spanning tree bpdufilter", children=[
+                                    Cmd("default", "Disable bpdu filter by default",
+                                        handler=lambda s, t: s._cmd_stp_default(t, "bpdufilter", False))]),
+                            ]),
+                            Cmd("loopguard", "Spanning tree loopguard options", children=[
+                                Cmd("default", "Disable loopguard by default",
+                                    handler=lambda s, t: s._cmd_stp_default(t, "loopguard", False))]),
+                        ]),
                     _no_interface_tree(),
                     _load_balance_tree(negate=True),
                     _errdisable_tree(negate=True),
@@ -612,7 +637,9 @@ class CommandTrees:
                     Cmd("summary", "Summary of port states",
                         handler=lambda s, t: s._cmd_show_stp_summary(t)),
                     Cmd("detail",  "Detailed STP state",
-                        handler=lambda s, t: s._cmd_show_stp_vlan(t, None)),
+                        handler=lambda s, t: s._cmd_show_stp_detail(t)),
+                    Cmd("inconsistentports", "Show inconsistent ports",
+                        handler=lambda s, t: s._cmd_show_stp_inconsistent(t)),
                     Cmd("vlan",    "VLAN Switch Spanning Trees", children=[
                         _vlan_arg([], handler=lambda s, t: s._cmd_show_stp_vlan_dispatch(t))]),
                     Cmd("active",  "Active ports in spanning tree",
