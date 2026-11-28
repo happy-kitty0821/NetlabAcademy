@@ -35,11 +35,11 @@ from simulator_core.events import (
     DROP_PORT_DOWN,
 )
 from simulator_core.frames import EthernetFrame
-from simulator_core.stp import STPManager, STPMode, PortState
+from simulator_core.l2.stp import STPManager, STPMode, PortState
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
-from simulator_core.cdp import CDPManager
-from simulator_core.port_security import (
+from simulator_core.l2.cdp import CDPManager
+from simulator_core.l2.port_security import (
     SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY, PortSecurity, SecureAddress,
 )
 
@@ -322,7 +322,7 @@ class Switch:
         for iface in self._device.interfaces.values():
             if iface.is_svi or iface.is_loopback:
                 continue
-            from simulator_core.stp import PortID
+            from simulator_core.l2.stp import PortID
             pid = PortID(priority=iface.stp_port_priority, number=port_num)
             cost = iface.stp_path_cost  # None → auto-detected inside register_port
             for inst in self._stp.all_instances():
@@ -352,7 +352,7 @@ class Switch:
                 if ps.port_id is not None:
                     existing_port_nums.add(ps.port_id.number)
         port_num = max(existing_port_nums, default=0) + 1
-        from simulator_core.stp import PortID
+        from simulator_core.l2.stp import PortID
         pid = PortID(priority=iface.stp_port_priority, number=port_num)
         for inst in self._stp.all_instances():
             port = self._stp.register_port(inst, iface_name,
@@ -812,7 +812,7 @@ class Switch:
           (root_bridge_id, root_path_cost, sender_bridge_id, sender_port_id)
         Lower is better.
         """
-        from simulator_core.stp import PortRole, PortState, BridgeID
+        from simulator_core.l2.stp import PortRole, PortState, BridgeID
         bpdu = frame.bpdu_payload
         if bpdu is None or bpdu.root_bridge_id is None or bpdu.bridge_id is None:
             return

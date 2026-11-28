@@ -44,7 +44,7 @@ from simulator_core.frames import (
 )
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
-from simulator_core.cdp import CDPManager
+from simulator_core.l2.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation

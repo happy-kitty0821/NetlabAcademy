@@ -41,10 +41,10 @@ from simulator_core.frames import (
     ICMPMessage,
     IPv4Packet,
 )
-from simulator_core.routing import RoutingTable, RouteSource
+from simulator_core.l3.routing import RoutingTable, RouteSource
 from simulator_core.topology import Device
 from simulator_core.types import InterfaceState
-from simulator_core.cdp import CDPManager
+from simulator_core.l2.cdp import CDPManager
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
