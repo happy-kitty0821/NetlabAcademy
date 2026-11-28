@@ -65,6 +65,7 @@ class PortState(Enum):
     # Guard / security states (Phase 6)
     ERR_DISABLED      = "err-disabled"      # BPDUGuard tripped
     ROOT_INCONSISTENT = "root-inconsistent" # RootGuard tripped
+    LOOP_INCONSISTENT = "loop-inconsistent" # LoopGuard tripped
 
 
 class PortRole(Enum):
@@ -199,6 +200,13 @@ class STPPortState:
     bpdu_tx: int = 0
     bpdu_rx: int = 0
 
+    # Set by the election, for "show spanning-tree detail": the segment's
+    # designated bridge / port / root path cost, and whether BPDUs arrive.
+    designated_bridge: Optional["BridgeID"] = None
+    designated_port: Optional[PortID] = None
+    designated_cost: int = 0
+    hears_bpdus: bool = False
+
     @property
     def is_forwarding(self) -> bool:
         return self.state == PortState.FORWARDING
@@ -211,7 +219,13 @@ class STPPortState:
     def is_blocking(self) -> bool:
         return self.state in (PortState.BLOCKING, PortState.DISCARDING,
                               PortState.DISABLED, PortState.ERR_DISABLED,
-                              PortState.ROOT_INCONSISTENT)
+                              PortState.ROOT_INCONSISTENT, PortState.LOOP_INCONSISTENT)
+
+    @property
+    def inconsistency(self) -> Optional[str]:
+        """"root" / "loop" while a guard holds the port, else None."""
+        return {PortState.ROOT_INCONSISTENT: "root",
+                PortState.LOOP_INCONSISTENT: "loop"}.get(self.state)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +322,11 @@ class STPManager:
         # Feature flags
         self._stp_enabled: bool = True
         self._portfast_default: bool = False    # portfast default on access ports
+        # Global defaults ("spanning-tree portfast bpduguard|bpdufilter
+        # default", "spanning-tree loopguard default").
+        self._bpduguard_default: bool = False
+        self._bpdufilter_default: bool = False
+        self._loopguard_default: bool = False
 
         # Called after any change that affects the spanning tree (priority,
         # port cost or priority, PortFast, mode).  The simulation sets it to
@@ -771,7 +790,7 @@ class STPManager:
 
         # Only switches this one can reach over up links take part (a
         # switch cut off from the rest of the network elects its own root).
-        reachable = self._reachable_switches(topology, all_switches, vlan_id)
+        reachable = self._upstream_switches(topology, all_switches, vlan_id)
         all_bids: list[BridgeID] = [inst.bridge_id]
         for peer_id in reachable:
             peer_inst = all_switches[peer_id].get_instance(vlan_id)
@@ -783,9 +802,15 @@ class STPManager:
         inst.root_bridge_id = root_bid
         is_root = (root_bid == inst.bridge_id)
 
-        def peer_of(port_name: str):
-            """(peer STPInstance, peer port state) across an up link, or None."""
-            peer = self._vlan_peer(port_name, vlan_id, topology, all_switches)
+        def peer_of(port_name: str, heard: bool = True):
+            """
+            (peer STPInstance, peer port state) across an up link, or None.
+            heard=True only counts a neighbour whose BPDUs this port receives.
+            """
+            if heard:
+                peer = self._hears(port_name, vlan_id, topology, all_switches)
+            else:
+                peer = self._vlan_peer(port_name, vlan_id, topology, all_switches)
             if peer is None:
                 return None
             peer_inst = all_switches[peer[0]].get_instance(vlan_id)
@@ -793,76 +818,188 @@ class STPManager:
                 return None
             return peer_inst, peer_inst.port_states.get(peer[1])
 
-        if is_root:
-            inst.root_path_cost = 0
-            inst.root_port_name = None
-            # All ports are designated
-            for port in inst.port_states.values():
-                if port.portfast:
-                    port.role  = PortRole.EDGE
-                else:
-                    port.role  = PortRole.DESIGNATED
-                port.state = PortState.FORWARDING
-            return
-
         # Root port: lowest (root path cost, sender bridge ID, sender port
         # ID, own port ID) among ports whose neighbour already agrees on the
-        # root -- the 802.1D priority vector.
+        # root -- the 802.1D priority vector.  A root-guarded port can never
+        # become the root port.
         best_key = None
         best_port = None
-        for port_name, port_state in inst.port_states.items():
-            peer = peer_of(port_name)
-            if peer is None:
-                continue
-            peer_inst, peer_port = peer
-            if peer_inst.root_bridge_id != root_bid:
-                continue
-            key = (
-                peer_inst.root_path_cost + port_state.path_cost,
-                peer_inst.bridge_id,
-                _port_id(peer_port),
-                _port_id(port_state),
-            )
-            if best_key is None or key < best_key:
-                best_key, best_port = key, port_name
-
+        if not is_root:
+            for port_name, port_state in inst.port_states.items():
+                if port_state.guard == "root":
+                    continue
+                peer = peer_of(port_name)
+                if peer is None:
+                    continue
+                peer_inst, peer_port = peer
+                if peer_inst.root_bridge_id != root_bid:
+                    continue
+                key = (
+                    peer_inst.root_path_cost + port_state.path_cost,
+                    peer_inst.bridge_id,
+                    _port_id(peer_port),
+                    _port_id(port_state),
+                )
+                if best_key is None or key < best_key:
+                    best_key, best_port = key, port_name
         inst.root_path_cost = best_key[0] if best_key else 0
         inst.root_port_name = best_port
 
+        blocked = PortState.DISCARDING if self._mode == STPMode.RAPID_PVST else PortState.BLOCKING
+        device = topology.devices.get(self._device_id)
+        interfaces = device.interfaces if device is not None else {}
         for port_name, port_state in inst.port_states.items():
-            if port_state.portfast:
-                port_state.role  = PortRole.EDGE
+            iface = interfaces.get(port_name)
+            heard = peer_of(port_name)
+            port_state.hears_bpdus = heard is not None
+            # By default this switch is the segment's designated bridge.
+            port_state.designated_bridge = inst.bridge_id
+            port_state.designated_port = _port_id(port_state)
+            port_state.designated_cost = inst.root_path_cost
+            if heard is not None:
+                peer_inst, peer_port = heard
+                theirs = (peer_inst.root_path_cost, peer_inst.bridge_id, _port_id(peer_port))
+                ours = (inst.root_path_cost, inst.bridge_id, _port_id(port_state))
+                if theirs < ours or peer_inst.root_bridge_id < root_bid:
+                    port_state.designated_bridge = peer_inst.bridge_id
+                    port_state.designated_port = _port_id(peer_port)
+                    port_state.designated_cost = peer_inst.root_path_cost
+            # PortFast: an edge port while no BPDUs arrive; a port that hears
+            # BPDUs loses edge status and takes part like any other port.
+            if self.portfast_configured(port_state, iface) and heard is None:
+                port_state.role = PortRole.EDGE
                 port_state.state = PortState.FORWARDING
                 continue
             if port_name == best_port:
-                port_state.role  = PortRole.ROOT
+                port_state.role = PortRole.ROOT
                 port_state.state = PortState.FORWARDING
                 continue
-            peer = peer_of(port_name)
-            if peer is None:
+            neighbour = heard or peer_of(port_name, heard=False)
+            if neighbour is None:
                 # Edge / access port, or not up -- designated
-                port_state.role  = PortRole.DESIGNATED
+                port_state.role = PortRole.DESIGNATED
                 port_state.state = PortState.FORWARDING
                 continue
-            peer_inst, peer_port = peer
-            # Designated port for the segment: the side advertising the
-            # better (root path cost, bridge ID, port ID).
+            peer_inst, peer_port = neighbour
+            # The far side's BPDU is superior when it carries a better root,
+            # or the same root with a better (cost, bridge, port) vector.
             ours = (inst.root_path_cost, inst.bridge_id, _port_id(port_state))
-            theirs = (
-                peer_inst.root_path_cost if peer_inst.root_bridge_id == root_bid else 999999,
-                peer_inst.bridge_id,
-                _port_id(peer_port),
-            )
-            if ours < theirs:
-                port_state.role  = PortRole.DESIGNATED
-                port_state.state = PortState.FORWARDING
-            else:
-                # Peer has the better path -- alternate (blocking)
-                port_state.role  = PortRole.ALTERNATE
-                if self._mode == STPMode.RAPID_PVST:
-                    port_state.state = PortState.DISCARDING
+            theirs = (peer_inst.root_path_cost, peer_inst.bridge_id, _port_id(peer_port))
+            superior = (peer_inst.root_bridge_id < root_bid
+                        or (peer_inst.root_bridge_id == root_bid and theirs < ours))
+            if heard is None:
+                # No BPDUs arrive (BPDU filter).  Without loop guard the port
+                # becomes designated and forwards -- a loop if it should block.
+                if superior and self.loopguard_enabled(port_state, iface):
+                    port_state.role = PortRole.ALTERNATE
+                    port_state.state = PortState.LOOP_INCONSISTENT
                 else:
-                    port_state.state = PortState.BLOCKING
+                    port_state.role = PortRole.DESIGNATED
+                    port_state.state = PortState.FORWARDING
+                continue
+            if port_state.guard == "root" and superior:
+                # Root guard: a superior BPDU puts the port in root-inconsistent.
+                port_state.role = PortRole.DESIGNATED
+                port_state.state = PortState.ROOT_INCONSISTENT
+            elif superior:
+                # Peer has the better path -- alternate (blocking)
+                port_state.role = PortRole.ALTERNATE
+                port_state.state = blocked
+            else:
+                port_state.role = PortRole.DESIGNATED
+                port_state.state = PortState.FORWARDING
+
+    # ------------------------------------------------------------------
+    # Effective per-port protection settings (interface + global defaults)
+    # ------------------------------------------------------------------
+
+    def _iface(self, topology, port_name: str):
+        device = topology.devices.get(self._device_id) if topology is not None else None
+        return device.interfaces.get(port_name) if device is not None else None
+
+    def portfast_configured(self, port: "STPPortState", iface=None) -> bool:
+        """PortFast by interface command, or by portfast default on access ports."""
+        if port.portfast:
+            return True
+        return self._portfast_default and iface is not None and not iface.is_trunk
+
+    def bpduguard_enabled(self, port: "STPPortState", iface=None) -> bool:
+        """BPDU guard by interface command, or by default on PortFast ports."""
+        return port.bpduguard or (self._bpduguard_default and self.portfast_configured(port, iface))
+
+    def loopguard_enabled(self, port: "STPPortState", iface=None) -> bool:
+        """Loop guard by interface command, or by loopguard default (non-edge ports)."""
+        if port.guard == "loop":
+            return True
+        return (self._loopguard_default and port.guard == "none"
+                and not self.portfast_configured(port, iface))
+
+    def _hears(self, port_name: str, vlan_id: int, topology,
+               all_switches: dict[str, "STPManager"]) -> Optional[tuple[str, str]]:
+        """
+        The STP neighbour whose BPDUs this port actually receives: none if
+        either end filters BPDUs ("spanning-tree bpdufilter enable") or the
+        neighbour runs no spanning tree.  Cached for the length of an election.
+        """
+        cache = self.reach_cache
+        key = ("hear", vlan_id, self._device_id, port_name)
+        if cache is not None and key in cache:
+            return cache[key]
+        peer = self._vlan_peer(port_name, vlan_id, topology, all_switches)
+        if peer is not None:
+            own = self.get_instance(vlan_id)
+            own_port = own.port_states.get(port_name) if own else None
+            peer_mgr = all_switches[peer[0]]
+            peer_inst = peer_mgr.get_instance(vlan_id)
+            peer_port = peer_inst.port_states.get(peer[1]) if peer_inst else None
+            if ((own_port is not None and own_port.bpdufilter) or not peer_mgr.enabled
+                    or (peer_port is not None and peer_port.bpdufilter)):
+                peer = None
+        if cache is not None:
+            cache[key] = peer
+        return peer
+
+    def _upstream_switches(self, topology, all_switches: dict[str, "STPManager"],
+                           vlan_id: int) -> set[str]:
+        """
+        Switches whose root information reaches this one: BPDUs travel over
+        links where the sender does not filter them and the receiving port
+        neither filters them nor has root guard (which refuses a better root).
+        """
+        cache = self.reach_cache if self.reach_cache is not None else {}
+        key = ("up", vlan_id, self._device_id)
+        if key in cache:
+            return cache[key]
+
+        def accepted_from(mgr: "STPManager") -> list[str]:
+            in_key = ("in", vlan_id, mgr._device_id)
+            if in_key not in cache:
+                senders = []
+                device = topology.devices.get(mgr._device_id)
+                inst = mgr.get_instance(vlan_id)
+                for name in (device.interfaces if device else {}):
+                    ps = inst.port_states.get(name) if inst else None
+                    if ps is not None and ps.guard == "root":
+                        continue
+                    peer = mgr._hears(name, vlan_id, topology, all_switches)
+                    if peer is not None:
+                        senders.append(peer[0])
+                cache[in_key] = senders
+            return cache[in_key]
+
+        seen = {self._device_id}
+        queue = [self._device_id]
+        while queue:
+            current = all_switches.get(queue.pop())
+            if current is None:
+                continue
+            for sender in accepted_from(current):
+                if sender not in seen:
+                    seen.add(sender)
+                    queue.append(sender)
+        seen.discard(self._device_id)
+        cache[key] = seen
+        return seen
 
     def reset_election(self) -> None:
         """Forget the last election (each switch believes it is the root)."""
@@ -876,14 +1013,20 @@ class STPManager:
         """
         (switch id, port) across an up link on which both ends carry
         *vlan_id* -- the link is part of that VLAN's spanning tree.
+        Cached for the length of an election (links do not change in it).
         """
-        if not self.carries(port_name, vlan_id):
-            return None
-        peer = self._find_connected_switch_port(port_name, topology)
-        if peer is None or peer[0] not in all_switches:
-            return None
-        if not all_switches[peer[0]].carries(peer[1], vlan_id):
-            return None
+        cache = self.reach_cache
+        key = ("peer", vlan_id, self._device_id, port_name)
+        if cache is not None and key in cache:
+            return cache[key]
+        peer = None
+        if self.carries(port_name, vlan_id):
+            peer = self._find_connected_switch_port(port_name, topology)
+            if peer is not None and (peer[0] not in all_switches
+                                     or not all_switches[peer[0]].carries(peer[1], vlan_id)):
+                peer = None
+        if cache is not None:
+            cache[key] = peer
         return peer
 
     def _reachable_switches(self, topology, all_switches: dict[str, "STPManager"],
@@ -1133,6 +1276,13 @@ class STPManager:
             f"Root bridge for: {', '.join(root_for) or 'none'}",
             "Extended system ID           is enabled",
             f"Portfast Default             is {portfast}",
+            f"PortFast BPDU Guard Default  is {'enabled' if self._bpduguard_default else 'disabled'}",
+            f"Portfast BPDU Filter Default is {'enabled' if self._bpdufilter_default else 'disabled'}",
+            f"Loopguard Default            is {'enabled' if self._loopguard_default else 'disabled'}",
+            "EtherChannel misconfig guard is enabled",
+            "UplinkFast                   is disabled",
+            "BackboneFast                 is disabled",
+            "Configured Pathcost method used is short",
             "",
             "Name                   Blocking Listening Learning Forwarding STP Active",
             rule,
@@ -1169,6 +1319,99 @@ class STPManager:
                 lines.append(f"   BPDU Guard is enabled")
             lines.append("")
         return "\n".join(lines) if lines else f"% {iface_name} not found in any STP instance."
+
+    def show_inconsistent_ports(self, active_ports: Optional[set[str]] = None) -> str:
+        """``show spanning-tree inconsistentports``."""
+        from simulator_core.naming import long_name
+        rows = []
+        for inst in sorted(self._instances.values(), key=lambda i: i.vlan_id):
+            for name, port in sorted(inst.port_states.items(), key=lambda kv: _port_sort_key(kv[0])):
+                if port.inconsistency and (active_ports is None or name in active_ports):
+                    kind = "Root Inconsistent" if port.inconsistency == "root" else "Loop Inconsistent"
+                    rows.append(f"VLAN{inst.vlan_id:04d}             {long_name(name):<25}{kind}")
+        return "\n".join([
+            "Name                 Interface                Inconsistency",
+            "-------------------- ------------------------ ------------------",
+            *rows,
+            "",
+            f"Number of inconsistent ports (segments) in the system : {len(rows)}",
+        ])
+
+    def show_spanning_tree_detail(self, active_ports: Optional[set[str]] = None,
+                                  now: float = 0.0, topology=None) -> str:
+        """``show spanning-tree detail`` (per VLAN, then per up port)."""
+        from simulator_core.naming import long_name
+        proto = {STPMode.PVST: "ieee", STPMode.RAPID_PVST: "rstp", STPMode.MST: "mstp"}[self._mode]
+        out: list[str] = []
+        for inst in sorted(self._instances.values(), key=lambda i: i.vlan_id):
+            ports = self._vlan_ports(inst.vlan_id, active_ports)
+            if ports is not None and not ports:
+                continue
+            bid, root, t = inst.bridge_id, inst.root_bridge_id, inst.timers
+            vlan = f"VLAN{inst.vlan_id:04d}"
+            out += [
+                f" {vlan} is executing the {proto} compatible Spanning Tree protocol",
+                f"  Bridge Identifier has priority {bid.priority}, sysid {inst.vlan_id}, "
+                f"address {_dotted_mac(bid.mac)}",
+                f"  Configured hello time {t.hello_time}, max age {t.max_age}, "
+                f"forward delay {t.forward_delay}, transmit hold-count 6",
+            ]
+            if inst.is_root:
+                out.append("  We are the root of the spanning tree")
+            else:
+                rp = inst.port_states.get(inst.root_port_name)
+                number = rp.port_id.number if rp and rp.port_id else 0
+                out += [f"  Current root has priority {root.bridge_priority}, address {_dotted_mac(root.mac)}",
+                        f"  Root port is {number} ({long_name(inst.root_port_name or '')}), "
+                        f"cost of root path is {inst.root_path_cost}"]
+            out += [
+                "  Topology change flag not set, detected flag not set",
+                "  Number of topology changes 0 last change occurred 00:00:00 ago",
+                "  Times:  hold 1, topology change 35, notification 2",
+                f"          hello {t.hello_time}, max age {t.max_age}, forward delay {t.forward_delay}",
+                "  Timers: hello 0, topology change 0, notification 0",
+                "",
+            ]
+            hellos = int(now // max(1, t.hello_time))
+            for name, port in sorted(inst.port_states.items(), key=lambda kv: _port_sort_key(kv[0])):
+                if ports is not None and name not in ports:
+                    continue
+                pid = port.port_id or PortID(128, 0)
+                if port.inconsistency:
+                    words = ("broken  (Root Inconsistent)" if port.inconsistency == "root"
+                             else "broken  (Loop Inconsistent)")
+                else:
+                    role = {PortRole.EDGE: "designated"}.get(port.role, port.role.value)
+                    words = f"{role} {'forwarding' if port.is_forwarding else 'blocking'}"
+                db = port.designated_bridge or bid
+                dp = port.designated_port or pid
+                iface = self._iface(topology, name)
+                sends = not port.bpdufilter and port.role in (PortRole.DESIGNATED, PortRole.EDGE)
+                out += [
+                    f" Port {pid.number} ({long_name(name)}) of {vlan} is {words}",
+                    f"   Port path cost {port.path_cost}, Port priority {pid.priority}, "
+                    f"Port Identifier {pid.priority}.{pid.number}.",
+                    f"   Designated root has priority {root.bridge_priority}, address {_dotted_mac(root.mac)}",
+                    f"   Designated bridge has priority {db.bridge_priority}, address {_dotted_mac(db.mac)}",
+                    f"   Designated port id is {dp.priority}.{dp.number}, designated path cost "
+                    f"{port.designated_cost}",
+                    "   Timers: message age 0, forward delay 0, hold 0",
+                    f"   Number of transitions to forwarding state: {1 if port.is_forwarding else 0}",
+                ]
+                if port.role == PortRole.EDGE:
+                    out.append("   The port is in the portfast mode")
+                out.append("   Link type is point-to-point by default")
+                if port.guard == "root":
+                    out.append("   Root guard is enabled on the port")
+                if self.loopguard_enabled(port, iface):
+                    out.append("   Loop guard is enabled on the port")
+                if port.bpdufilter:
+                    out.append("   Bpdu filter is enabled")
+                if self.bpduguard_enabled(port, iface):
+                    out.append("   Bpdu guard is enabled")
+                out += [f"   BPDU: sent {hellos if sends else 0}, "
+                        f"received {hellos if port.hears_bpdus else 0}", ""]
+        return "\n".join(out).rstrip() or "No spanning tree instance exists."
 
     def _format_instance(self, inst: STPInstance,
                          active_ports: Optional[set] = None) -> list[str]:
@@ -1230,12 +1473,18 @@ class STPManager:
                 PortState.DISCARDING:        "BLK",   # IOS prints BLK for RSTP discarding too
                 PortState.DISABLED:          "DIS",
                 PortState.ERR_DISABLED:      "ERR",
-                PortState.ROOT_INCONSISTENT: "RIN",
             }.get(port.state, "???")
             pid = f"{port.port_id.priority}.{port.port_id.number}" if port.port_id else "128.1"
-            type_flags = "P2p" + (" Edge" if port.portfast else "")
+            type_flags = "P2p" + (" Edge" if port.role == PortRole.EDGE else "")
+            inconsistency = port.inconsistency
+            if inconsistency:
+                # IOS: "Desg BKN*19 ... P2p *ROOT_Inc"
+                type_flags += f" *{inconsistency.upper()}_Inc"
+                state_field = "BKN*"
+            else:
+                state_field = f"{state_abbr:<3} "
             lines.append(
-                f"{name:<19} {role_abbr:<4} {state_abbr:<3} {port.path_cost:<9} {pid:<8} {type_flags}"
+                f"{name:<19} {role_abbr:<4} {state_field}{port.path_cost:<9} {pid:<8} {type_flags}"
             )
         return lines
 

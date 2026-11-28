@@ -55,6 +55,9 @@ if TYPE_CHECKING:
 # Switch
 # ---------------------------------------------------------------------------
 
+# A frame reaching the same switch more often than this is circling a loop.
+LOOP_FRAME_LIMIT = 3
+
 class Switch:
     """
     Protocol logic for a simulated Ethernet switch.
@@ -92,6 +95,13 @@ class Switch:
 
         # switchport port-security, per port (created on first use).
         self._psec: dict[str, PortSecurity] = {}
+
+        # Loop safety: how often each frame has reached this switch (a frame
+        # that keeps coming back is circling a switching loop) and how often
+        # each address moved between ports (MAC flapping).
+        self._frames_seen: dict[tuple, int] = {}
+        self._mac_moves: dict[tuple[str, int], int] = {}
+        self._flap_logged: set[tuple[str, int]] = set()
 
         # EtherChannel groups: group_id → PortChannelGroup
         self._port_channels: dict[int, PortChannelGroup] = {}
@@ -441,7 +451,8 @@ class Switch:
         """BPDU guard is on for *port* (interface setting or portfast default)."""
         inst = self._stp.get_instance(1)
         ps = inst.port_states.get(port) if inst is not None else None
-        return bool(ps is not None and ps.bpduguard)
+        return bool(ps is not None
+                    and self._stp.bpduguard_enabled(ps, self._device.interfaces.get(port)))
 
     def sends_bpdus(self, port: str) -> bool:
         """Does this switch send BPDUs out of *port* (STP on, no BPDU filter)?"""
@@ -875,6 +886,24 @@ class Switch:
             ))
             return
 
+        # Switching loop: the same frame keeps arriving.  A real network
+        # melts down (broadcast storm); the simulator drops the copies so the
+        # lab stays responsive, and the MAC flapping it causes is logged.
+        loop_key = (frame.frame_id, frame.src_mac.value, vlan)
+        if len(self._frames_seen) > 20_000:
+            self._frames_seen.clear()
+        seen = self._frames_seen.get(loop_key, 0) + 1
+        self._frames_seen[loop_key] = seen
+        if seen > LOOP_FRAME_LIMIT:
+            self._sim._record(FrameDropped(
+                time=arrive_time, seq=self._sim.next_seq(),
+                device_id=self.device_id,
+                interface_name=ingress_iface,
+                frame=frame,
+                reason="switching loop: frame seen repeatedly",
+            ))
+            return
+
         # Port security: an unknown or misplaced source address on a secure
         # port is a violation.
         if not self.check_port_security(ingress_iface, frame.src_mac.value, vlan):
@@ -961,6 +990,17 @@ class Switch:
         if ps is not None and ps.enabled:
             return            # secure ports keep their addresses in port security
         self._mac_seen[key] = self._sim.lab_time
+        old_port = self._mac_table.get(key)
+        if old_port is not None and old_port != iface_name:
+            moves = self._mac_moves.get(key, 0) + 1
+            self._mac_moves[key] = moves
+            if moves >= 2 and key not in self._flap_logged:
+                self._flap_logged.add(key)
+                digits = mac_value.replace(":", "")
+                self._sim.log_event(
+                    self.device_id, "SW_MATM", 4, "MACFLAP_NOTIF",
+                    f"Host {digits[0:4]}.{digits[4:8]}.{digits[8:12]} in vlan {vlan} is flapping "
+                    f"between port {old_port} and port {iface_name}")
         if self._mac_table.get(key) != iface_name:
             self._mac_table[key] = iface_name
             seq = self._sim.next_seq()

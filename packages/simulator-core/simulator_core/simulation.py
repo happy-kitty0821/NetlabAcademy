@@ -154,6 +154,8 @@ class Simulation:
         self._iface_states: dict[tuple[str, str], tuple] = {}
         # Switch links currently reported with a native VLAN mismatch.
         self._native_mismatches: set[tuple] = set()
+        # Ports held by root guard / loop guard after the last election.
+        self._stp_inconsistent: dict[tuple[str, int, str], str] = {}
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -286,6 +288,7 @@ class Simulation:
         self._syslog.clear()
         self._iface_states.clear()
         self._native_mismatches.clear()
+        self._stp_inconsistent = {}
         self._init_devices()
 
     # ------------------------------------------------------------------
@@ -457,6 +460,31 @@ class Simulation:
                 break  # stable state reached
         for stp in all_stps.values():
             stp.reach_cache = None
+        self._log_stp_guard_changes()
+
+    def _log_stp_guard_changes(self) -> None:
+        """%SPANTREE-2-ROOTGUARD/LOOPGUARD_BLOCK / _UNBLOCK as ports change."""
+        from simulator_core.naming import long_name
+        current: dict[tuple[str, int, str], str] = {}
+        for dev_id, switch in self._switches.items():
+            for inst in switch.stp.all_instances():
+                for name, port in inst.port_states.items():
+                    if port.inconsistency:
+                        current[(dev_id, inst.vlan_id, name)] = port.inconsistency
+        previous = self._stp_inconsistent
+        for key in sorted(set(current) | set(previous)):
+            before, now = previous.get(key), current.get(key)
+            if before == now:
+                continue
+            dev_id, vlan, name = key
+            for kind, action in ((before, "UNBLOCK"), (now, "BLOCK")):
+                if kind is None:
+                    continue
+                guard = "Root guard" if kind == "root" else "Loop guard"
+                verb = "blocking" if action == "BLOCK" else "unblocking"
+                self.log_event(dev_id, "SPANTREE", 2, f"{kind.upper()}GUARD_{action}",
+                               f"{guard} {verb} port {long_name(name)} on VLAN{vlan:04d}.")
+        self._stp_inconsistent = current
 
     def _stp_snapshot(self) -> dict:
         """Snapshot relevant STP state for convergence detection."""

@@ -241,20 +241,37 @@ class StpCommands:
         return ""
 
     def _cmd_stp_portfast_default(self, tokens: list[str]) -> str:
+        return self._cmd_stp_default(tokens, "portfast", True)
+
+    def _cmd_stp_default(self, tokens: list[str], which: str, enabled: bool) -> str:
+        """
+        [no] spanning-tree portfast default | portfast bpduguard default |
+             portfast bpdufilter default | loopguard default
+        Defaults apply to every matching port, now and later.
+        """
         switch = self._get_switch()
-        if switch:
-            switch.stp._portfast_default = True
+        if switch is None:
+            return "% spanning-tree commands only on switch devices."
+        setattr(switch.stp, f"_{which}_default", enabled)
+        switch.stp._changed()
+        if which == "portfast" and enabled:
+            return ("%Warning: this command enables portfast by default on all interfaces. You\n"
+                    " should now disable portfast explicitly on switched ports leading to hubs,\n"
+                    " switches and bridges as they may create temporary bridging loops.")
         return ""
 
-    def _cmd_stp_bpduguard_default(self, tokens: list[str]) -> str:
+    def _cmd_show_stp_detail(self, tokens: list[str]) -> str:
         switch = self._get_switch()
-        if switch:
-            # Apply bpduguard to all current portfast ports
-            for inst in switch.stp.all_instances():
-                for port in inst.port_states.values():
-                    if port.portfast:
-                        port.bpduguard = True
-        return ""
+        if switch is None:
+            return "% show spanning-tree is only available on switch devices."
+        return switch.stp.show_spanning_tree_detail(self._stp_up_ports(), self.simulation.lab_time,
+                                                    self.simulation.topology)
+
+    def _cmd_show_stp_inconsistent(self, tokens: list[str]) -> str:
+        switch = self._get_switch()
+        if switch is None:
+            return "% show spanning-tree is only available on switch devices."
+        return switch.stp.show_inconsistent_ports(self._stp_up_ports())
 
     def _cmd_show_stp_vlan(self, tokens: list[str], vlan_id: Optional[int]) -> str:
         switch = self._get_switch()
