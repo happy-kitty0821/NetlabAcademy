@@ -39,6 +39,9 @@ from simulator_core.stp import STPManager, STPMode, PortState
 from simulator_core.topology import Device
 from simulator_core.types import DEFAULT_VLAN, InterfaceState
 from simulator_core.cdp import CDPManager
+from simulator_core.port_security import (
+    SECURE_CONFIGURED, SECURE_DYNAMIC, SECURE_STICKY, PortSecurity, SecureAddress,
+)
 
 if TYPE_CHECKING:
     from simulator_core.simulation import Simulation
@@ -260,6 +263,9 @@ class Switch:
         self.errdisable_recovery: set[str] = set()
         self.errdisable_interval: int = 300
 
+        # switchport port-security, per port (created on first use).
+        self._psec: dict[str, PortSecurity] = {}
+
         # EtherChannel groups: group_id → PortChannelGroup
         self._port_channels: dict[int, PortChannelGroup] = {}
 
@@ -458,16 +464,128 @@ class Switch:
         return True
 
     def mac_lookup(self, mac: str, vlan: int) -> Optional[str]:
-        """Port for *mac* in *vlan*: static entries first, then learned ones."""
+        """
+        Port for *mac* in *vlan*: static entries first, then secure
+        addresses (port security), then learned ones.
+        """
         key = (mac, vlan)
-        return self._static_macs.get(key) or self._mac_table.get(key)
+        return (self._static_macs.get(key) or self._secure_owner(key)
+                or self._mac_table.get(key))
 
     def mac_entries(self) -> list[tuple[int, str, str, str]]:
-        """(vlan, mac, "STATIC"|"DYNAMIC", port) for every entry."""
+        """
+        (vlan, mac, "STATIC"|"DYNAMIC", port) for every entry.  Secure
+        addresses are listed as STATIC, as IOS does.
+        """
         rows = [(v, m, "STATIC", p) for (m, v), p in self._static_macs.items()]
+        seen = set(self._static_macs)
+        for port, ps in self._psec.items():
+            if ps.enabled:
+                for key in ps.addresses:
+                    if key not in seen:
+                        rows.append((key[1], key[0], "STATIC", port))
+                        seen.add(key)
         rows += [(v, m, "DYNAMIC", p) for (m, v), p in self._mac_table.items()
-                 if (m, v) not in self._static_macs]
+                 if (m, v) not in seen]
         return rows
+
+    # ------------------------------------------------------------------
+    # Port security
+    # ------------------------------------------------------------------
+
+    def port_security(self, port: str) -> PortSecurity:
+        """The port's security settings (created with IOS defaults)."""
+        return self._psec.setdefault(port, PortSecurity())
+
+    def port_security_config(self, port: str) -> Optional[PortSecurity]:
+        """The port's settings, or None if port security was never touched."""
+        return self._psec.get(port)
+
+    def secure_ports(self) -> dict[str, PortSecurity]:
+        return {p: ps for p, ps in self._psec.items() if ps.enabled}
+
+    def _secure_owner(self, key: tuple[str, int]) -> Optional[str]:
+        for port, ps in self._psec.items():
+            if ps.enabled and key in ps.addresses:
+                return port
+        return None
+
+    def secure_address_owner(self, mac: str, vlan: int, exclude: Optional[str] = None) -> Optional[str]:
+        """Secure port (other than *exclude*) holding *mac* in *vlan*."""
+        for port, ps in self._psec.items():
+            if port != exclude and (mac, vlan) in ps.addresses:
+                return port
+        return None
+
+    def _psec_vlan(self, port: str) -> int:
+        iface = self._device.interfaces.get(port)
+        if iface is None:
+            return DEFAULT_VLAN
+        return iface.trunk_native_vlan if iface.is_trunk else iface.vlan
+
+    def check_port_security(self, port: str, mac: str, vlan: int) -> bool:
+        """
+        Apply port security to a frame from *mac* received on *port*.
+        Returns False when the frame must be dropped (a violation).
+        """
+        ps = self._psec.get(port)
+        if ps is None or not ps.enabled:
+            return True
+        now = self._sim.lab_time
+        key = (mac, vlan)
+        ps.last_source = key
+        known = ps.addresses.get(key)
+        if known is not None:
+            known.last_seen = now
+            return True
+        # An address secured on another port arriving here is a violation
+        # (a "MAC move" between secure ports).
+        if self.secure_address_owner(mac, vlan, exclude=port) is None \
+                and len(ps.addresses) < ps.maximum:
+            kind = SECURE_STICKY if ps.sticky else SECURE_DYNAMIC
+            ps.addresses[key] = SecureAddress(kind=kind, learned_at=now, last_seen=now)
+            self._mac_table.pop(key, None)
+            self._mac_seen.pop(key, None)
+            return True
+        self._psec_violation(port, ps, mac, vlan)
+        return False
+
+    def _psec_violation(self, port: str, ps: PortSecurity, mac: str, vlan: int) -> None:
+        if ps.violation == "protect":
+            return                      # dropped silently, not counted
+        ps.violation_count += 1
+        from simulator_core.naming import long_name
+        digits = mac.replace(":", "")
+        cisco = f"{digits[0:4]}.{digits[4:8]}.{digits[8:12]}"
+        message = (f"Security violation occurred, caused by MAC address {cisco} "
+                   f"on port {long_name(port)}.")
+        if ps.violation == "shutdown":
+            iface = self._device.interfaces.get(port)
+            if iface is not None and iface.err_disabled:
+                return
+            self._sim.err_disable(self.device_id, port, "psecure-violation")
+            self._sim.log_event(self.device_id, "PORT_SECURITY", 2, "PSECURE_VIOLATION", message)
+            self._sim.refresh_interface_states()
+        else:                           # restrict
+            self._sim.log_event(self.device_id, "PORT_SECURITY", 2, "PSECURE_VIOLATION", message)
+
+    def age_port_security(self, now: float) -> None:
+        for ps in self._psec.values():
+            for key in ps.expired(now):
+                del ps.addresses[key]
+
+    def clear_port_security(self, kinds: set[str], port: Optional[str] = None,
+                            mac: Optional[str] = None) -> int:
+        """clear port-security ... — remove secure addresses of *kinds*."""
+        removed = 0
+        for name, ps in self._psec.items():
+            if port is not None and name != port:
+                continue
+            for key in [k for k, a in ps.addresses.items()
+                        if a.kind in kinds and (mac is None or k[0] == mac)]:
+                del ps.addresses[key]
+                removed += 1
+        return removed
 
     def age_mac_table(self, now: float) -> int:
         """Drop dynamic entries not seen for the aging time; returns how many."""
@@ -484,6 +602,11 @@ class Switch:
         for k in [k for k, p in self._mac_table.items() if p == port]:
             self._mac_table.pop(k, None)
             self._mac_seen.pop(k, None)
+        # Secure dynamic addresses go with the link; sticky and configured
+        # ones stay.
+        ps = self._psec.get(port)
+        if ps is not None:
+            ps.remove_kind(SECURE_DYNAMIC)
 
     def bpdu_guard_enabled(self, port: str) -> bool:
         """BPDU guard is on for *port* (interface setting or portfast default)."""
@@ -856,6 +979,18 @@ class Switch:
             ))
             return
 
+        # Port security: an unknown or misplaced source address on a secure
+        # port is a violation.
+        if not self.check_port_security(ingress_iface, frame.src_mac.value, vlan):
+            self._sim._record(FrameDropped(
+                time=arrive_time, seq=self._sim.next_seq(),
+                device_id=self.device_id,
+                interface_name=ingress_iface,
+                frame=frame,
+                reason="port-security violation",
+            ))
+            return
+
         # STP check: drop frames if port is not forwarding for this VLAN
         if not self._stp.is_port_forwarding(ingress_iface, vlan):
             # Port is in LEARNING state: allow MAC learning but block forwarding.
@@ -926,6 +1061,9 @@ class Switch:
         key = (mac_value, vlan)
         if key in self._static_macs:
             return            # a static entry is never overwritten
+        ps = self._psec.get(iface_name)
+        if ps is not None and ps.enabled:
+            return            # secure ports keep their addresses in port security
         self._mac_seen[key] = self._sim.lab_time
         if self._mac_table.get(key) != iface_name:
             self._mac_table[key] = iface_name
