@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Optional, Union
 from simulator_core.addresses import MACAddress
 
 if TYPE_CHECKING:
-    from simulator_core.stp import BPDU
-    from simulator_core.cdp import CDPEntry
+    from simulator_core.l2.stp import BPDU
+    from simulator_core.l2.cdp import CDPEntry
 
 
 # ---------------------------------------------------------------------------

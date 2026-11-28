@@ -37,6 +37,7 @@ from simulator_core.events import (
 from simulator_core.exceptions import SimulationLimitError
 from simulator_core.scheduler import EventScheduler
 from simulator_core.topology import Topology
+from simulator_core.l2 import dtp, errdisable, native_vlan
 from simulator_core.types import InterfaceState, PROPAGATION_DELAY
 from dataclasses import dataclass as _dataclass
 
@@ -187,72 +188,20 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def err_disable(self, device_id: str, iface_name: str, cause: str) -> bool:
-        """
-        Put a port in the err-disabled state (it goes down until "shutdown /
-        no shutdown" or errdisable recovery).  Returns False if it already was.
-        The caller refreshes interface states.
-        """
-        device = self._topology.devices.get(device_id)
-        iface = device.interfaces.get(iface_name) if device else None
-        if iface is None or iface.err_disabled:
-            return False
-        iface.err_disabled = cause
-        iface.err_disabled_at = self._lab_time
-        self.log_event(device_id, "PM", 4, "ERR_DISABLE",
-                       f"{cause} error detected on {iface_name}, putting {iface_name} "
-                       f"in err-disable state")
-        return True
+        """Err-disable a port (see l2/errdisable.py); False if it already was."""
+        return errdisable.err_disable(self, device_id, iface_name, cause)
 
     def bpdu_guard_trip(self, device_id: str, iface_name: str) -> None:
-        """A BPDU arrived on a port with BPDU guard: disable it."""
-        device = self._topology.devices.get(device_id)
-        iface = device.interfaces.get(iface_name) if device else None
-        if iface is None or iface.err_disabled:
-            return
-        self.log_event(device_id, "SPANTREE", 2, "BLOCK_BPDUGUARD",
-                       f"Received BPDU on port {iface_name} with BPDU Guard enabled. "
-                       f"Disabling port.")
-        self.err_disable(device_id, iface_name, "bpduguard")
+        """A BPDU arrived on a port with BPDU guard: err-disable it."""
+        errdisable.bpdu_guard_trip(self, device_id, iface_name)
 
     def _apply_bpdu_guard(self) -> bool:
-        """
-        Spanning tree is computed directly, not from BPDU frames, so BPDU
-        guard is checked here: a guarded port that is up and cabled to a
-        switch port sending BPDUs is err-disabled.  Returns True if any was.
-        """
-        tripped = False
-        for dev_id, switch in self._switches.items():
-            device = self._topology.devices[dev_id]
-            for name, iface in device.interfaces.items():
-                if (not iface.is_physical_switchport or iface.err_disabled
-                        or iface.oper_state != InterfaceState.UP
-                        or not switch.bpdu_guard_enabled(name)):
-                    continue
-                peer = self._topology.neighbours(dev_id, name)
-                peer_switch = self._switches.get(peer[0]) if peer else None
-                if peer_switch is None or not peer_switch.sends_bpdus(peer[1]):
-                    continue
-                self.bpdu_guard_trip(dev_id, name)
-                tripped = True
-        return tripped
+        """Check BPDU guard on every port; True if any port was disabled."""
+        return errdisable.apply_bpdu_guard(self)
 
     def _recover_err_disabled(self) -> None:
-        """errdisable recovery: re-enable ports whose timer has expired."""
-        recovered = False
-        for dev_id, switch in self._switches.items():
-            for name, iface in self._topology.devices[dev_id].interfaces.items():
-                cause = iface.err_disabled
-                if (cause and cause in switch.errdisable_recovery
-                        and self._lab_time - iface.err_disabled_at >= switch.errdisable_interval):
-                    self.log_event(dev_id, "PM", 4, "ERR_RECOVER",
-                                   f"Attempting to recover from {cause} err-disable state "
-                                   f"on {name}")
-                    iface.err_disabled = None
-                    recovered = True
-        if recovered:
-            # The cause may still be there (a BPDU-sending switch on a
-            # guarded port): the refresh disables the port again, as on IOS.
-            self.refresh_interface_states()
+        """errdisable recovery: re-enable ports whose timer has run out."""
+        errdisable.recover_err_disabled(self)
 
     @property
     def trace(self) -> list[SimulationEvent]:
@@ -562,45 +511,8 @@ class Simulation:
         self._trigger_stp()
 
     def _log_native_vlan_mismatches(self) -> None:
-        """
-        CDP on IOS compares the native VLAN at both ends of a link and logs
-        ``%CDP-4-NATIVE_VLAN_MISMATCH`` on each switch.  A trunk's native
-        VLAN is its untagged VLAN; an access port's is its access VLAN.
-
-        Logged once when a mismatch appears (IOS repeats it every minute
-        while it lasts); fixing either end clears it.
-        """
-        from simulator_core.naming import long_name
-        current: set[tuple] = set()
-        for link in self._topology.links:
-            (da, ia), (db, ib) = link.endpoint_a, link.endpoint_b
-            ends = []
-            for dev_id, name in ((da, ia), (db, ib)):
-                if dev_id not in self._switches:
-                    break
-                iface = self._topology.devices[dev_id].interfaces.get(name)
-                cdp = self._get_cdp_manager(dev_id)
-                if (iface is None or iface.oper_state != InterfaceState.UP
-                        or cdp is None or not cdp.is_enabled
-                        or not getattr(iface, "_cdp_enabled", True)):
-                    break
-                native = iface.trunk_native_vlan if iface.is_trunk else iface.vlan
-                ends.append((dev_id, name, native))
-            if len(ends) != 2 or ends[0][2] == ends[1][2]:
-                continue
-            key = (link.id, ends[0][2], ends[1][2])
-            current.add(key)
-            if key in self._native_mismatches:
-                continue
-            for (dev_id, name, native), (peer_id, peer_name, peer_native) in (
-                    (ends[0], ends[1]), (ends[1], ends[0])):
-                peer_host = self._topology.devices[peer_id].hostname
-                self.log_event(
-                    dev_id, "CDP", 4, "NATIVE_VLAN_MISMATCH",
-                    f"Native VLAN mismatch discovered on {long_name(name)} ({native}), "
-                    f"with {peer_host} {long_name(peer_name)} ({peer_native}).",
-                )
-        self._native_mismatches = current
+        """Log %CDP-4-NATIVE_VLAN_MISMATCH for links whose ends disagree."""
+        native_vlan.log_native_vlan_mismatches(self)
 
     def _flush_down_port_macs(self) -> None:
         for dev_id, switch in self._switches.items():
@@ -650,47 +562,9 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def _negotiate_dtp(self) -> None:
-        """
-        Settle every dynamic switchport as a trunk or an access port.
+        """Settle every dynamic switchport as a trunk or an access port (DTP)."""
+        dtp.negotiate_dtp(self)
 
-        IOS rules, by the two ends' administrative modes:
-
-        ===================  =====  =====  =========  =====  ==================
-        local vs peer        auto  desir  trunk      access trunk+nonegotiate
-        ===================  =====  =====  =========  =====  ==================
-        dynamic auto         acc    trunk  trunk      acc    acc
-        dynamic desirable    trunk  trunk  trunk      acc    acc
-        ===================  =====  =====  =========  =====  ==================
-
-        A port that is down, or cabled to anything but a switchport (a
-        router, a PC), runs as access: nobody answers its DTP frames.
-        """
-        from simulator_core.types import DeviceModel
-        for device in self._topology.devices.values():
-            if device.model != DeviceModel.SWITCH:
-                continue
-            for name, iface in device.interfaces.items():
-                if not iface.switchport_mode.startswith("dynamic_"):
-                    iface.dtp_trunking = False
-                    continue
-                peer = self._dtp_peer(device.id, name, iface)
-                iface.dtp_trunking = peer is not None and _dtp_forms_trunk(iface, peer)
-
-    def _dtp_peer(self, device_id: str, name: str, iface):
-        """The switchport across an up link from *iface*, or None."""
-        from simulator_core.types import DeviceModel
-        if not iface.is_physical_switchport or iface.oper_state != InterfaceState.UP:
-            return None
-        peer = self._topology.neighbours(device_id, name)
-        if peer is None:
-            return None
-        peer_dev = self._topology.devices.get(peer[0])
-        if peer_dev is None or peer_dev.model != DeviceModel.SWITCH:
-            return None
-        peer_iface = peer_dev.interfaces.get(peer[1])
-        if peer_iface is None or not peer_iface.is_physical_switchport:
-            return None
-        return peer_iface
 
     def _physical_oper_state(self, device_id: str, iface) -> InterfaceState:
         if iface.admin_state == InterfaceState.DOWN or iface.err_disabled:
@@ -812,7 +686,7 @@ class Simulation:
         """
         import uuid as _uuid
         from simulator_core.frames import EthernetFrame, STP_MULTICAST_MAC
-        from simulator_core.stp import BPDU, PortRole
+        from simulator_core.l2.stp import BPDU, PortRole
         from simulator_core.addresses import MACAddress
         from simulator_core.types import InterfaceState
 
@@ -1173,7 +1047,7 @@ class Simulation:
         """
         import uuid as _uuid
         from simulator_core.frames import EthernetFrame, STP_MULTICAST_MAC
-        from simulator_core.stp import BPDU, PortRole
+        from simulator_core.l2.stp import BPDU, PortRole
         from simulator_core.addresses import MACAddress
         from simulator_core.types import InterfaceState
 
@@ -1250,7 +1124,7 @@ class Simulation:
         refresh within max_age ticks.  Triggers local recalculation when
         a port's best_bpdu expires.
         """
-        from simulator_core.stp import STPInstance, PortState
+        from simulator_core.l2.stp import STPInstance, PortState
         assert isinstance(inst, STPInstance)
         max_age_ticks = inst.timers.max_age
         changed = False
@@ -1326,7 +1200,7 @@ class Simulation:
         Only transitions the port if it is still in LEARNING state at fire
         time (a topology change may have already moved it).
         """
-        from simulator_core.stp import PortState
+        from simulator_core.l2.stp import PortState
 
         sw = self._switches.get(event.device_id)
         if sw is None:
@@ -1432,7 +1306,7 @@ class Simulation:
         """
         import uuid as _uuid
         from simulator_core.frames import EthernetFrame, CDP_MULTICAST_MAC, ETHERTYPE_CDP
-        from simulator_core.cdp import CDPEntry
+        from simulator_core.l2.cdp import CDPEntry
         from simulator_core.addresses import MACAddress
         from simulator_core.types import DeviceModel, InterfaceState
 
@@ -1528,16 +1402,3 @@ class Simulation:
         return None
 
 
-def _dtp_forms_trunk(local, peer) -> bool:
-    """
-    Does dynamic port *local* become a trunk with *peer*?  Only a peer that
-    sends DTP frames (not access, not ``nonegotiate``) can bring it up, and
-    two ``dynamic auto`` ports both wait for the other, so they stay access.
-    """
-    if peer.dtp_nonegotiate:
-        return False
-    if peer.switchport_mode in ("trunk", "dynamic_desirable"):
-        return True
-    if peer.switchport_mode == "dynamic_auto":
-        return local.switchport_mode == "dynamic_desirable"
-    return False

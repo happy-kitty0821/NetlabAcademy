@@ -107,7 +107,12 @@ NetlabAcademy/
 │           └── courses/        course content
 ├── packages/
 │   └── simulator-core/         standalone network simulator (stdlib only)
-│       ├── simulator_core/     engine, devices, CLI, STP, routing, CDP
+│       ├── simulator_core/
+│       │   ├── simulation.py   event engine, link and interface state
+│       │   ├── devices/        host, router, switch (forwarding)
+│       │   ├── cli/            IOS CLI: engine, session, one module per topic
+│       │   ├── l2/             STP, CDP, DTP, err-disable, port security, ...
+│       │   └── l3/             routing
 │       └── tests/
 ├── docs/                       design notes and reports
 ├── .github/
