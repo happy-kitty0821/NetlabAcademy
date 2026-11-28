@@ -14,7 +14,7 @@ routers and PCs from an IOS-style console, all in the browser.
 ![React](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)
 <!-- LOC-BADGE:START -->
-![Lines of code](https://img.shields.io/badge/lines_of_code-25.6k-0969da?style=flat-square)
+![Lines of code](https://img.shields.io/badge/lines_of_code-25.8k-0969da?style=flat-square)
 <!-- LOC-BADGE:END -->
 [![Lines of code workflow](https://github.com/happy-kitty0821/NetlabAcademy/actions/workflows/lines-of-code.yml/badge.svg)](https://github.com/happy-kitty0821/NetlabAcademy/actions/workflows/lines-of-code.yml)
 
@@ -201,16 +201,17 @@ locally.
 <!-- LOC:START -->
 | Language | Files | Code | Comments | Blank | Share of code |
 | :-- | --: | --: | --: | --: | :-- |
-| Python | 98 | 17,255 | 5,056 | 3,518 | `█████████████░░░░░░░` 67.4% |
-| TSX | 45 | 6,194 | 392 | 649 | `█████░░░░░░░░░░░░░░░` 24.2% |
+| Python | 99 | 17,448 | 5,084 | 3,548 | `██████████████░░░░░░` 67.6% |
+| TSX | 45 | 6,194 | 392 | 649 | `█████░░░░░░░░░░░░░░░` 24.0% |
 | Markdown | 5 | 975 | 0 | 287 | `█░░░░░░░░░░░░░░░░░░░` 3.8% |
 | TypeScript | 11 | 894 | 175 | 130 | `█░░░░░░░░░░░░░░░░░░░` 3.5% |
 | CSS | 1 | 164 | 28 | 32 | `░░░░░░░░░░░░░░░░░░░░` 0.6% |
 | JSON | 2 | 60 | 0 | 0 | `░░░░░░░░░░░░░░░░░░░░` 0.2% |
+| YAML | 1 | 36 | 3 | 8 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | TOML | 1 | 26 | 0 | 6 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | JavaScript | 2 | 16 | 0 | 5 | `░░░░░░░░░░░░░░░░░░░░` 0.1% |
 | INI | 1 | 4 | 0 | 0 | `░░░░░░░░░░░░░░░░░░░░` 0.0% |
-| **Total** | **166** | **25,588** | **5,651** | **4,627** | |
+| **Total** | **168** | **25,817** | **5,682** | **4,665** | |
 <sub>Counted by <code>.github/scripts/loc.py</code> on every push to <code>main</code> (git-tracked files; lockfiles, migrations and this README excluded). Last updated 2026-11-28.</sub>
 <!-- LOC:END -->
 
